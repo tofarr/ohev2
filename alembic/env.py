@@ -3,6 +3,7 @@
 Configured for async SQLAlchemy. Migrations run against the configured
 DATABASE_URL. Import model metadata here so autogenerate detects changes.
 """
+
 import asyncio
 from logging.config import fileConfig
 
