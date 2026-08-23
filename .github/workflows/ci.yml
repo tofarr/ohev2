@@ -26,9 +26,22 @@ jobs:
         with:
           node-version: "20"
       - run: npm install -g @informalsystems/quint
-      - run: for f in specs/*.qnt; do quintc "$f"; done
-      - run: quint test specs/sandbox.qnt --main=sandbox
-      - run: quint test specs/auth.qnt --main=auth
+      - name: Typecheck all specs
+        run: |
+          for f in specs/*.qnt; do
+            echo "::group::typecheck $f"
+            quint typecheck "$f"
+            echo "::endgroup::"
+          done
+      - name: Run Quint tests
+        run: |
+          quint test specs/sandbox.qnt --main=sandbox
+          quint test specs/auth.qnt --main=auth
+          quint test specs/rest.qnt --main=rest
+      - name: Check invariants
+        run: |
+          quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
+          quint run specs/auth.qnt --main=auth --invariant=sessionIdsUnique --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest

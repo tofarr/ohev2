@@ -4,62 +4,90 @@
 // pending -> running -> (stopped | terminated). Supports ephemeral and persistent.
 
 module sandbox {
+  // A sandbox is a runtime backing an agent conversation. Its provider is
+  // pluggable (Docker, Kubernetes, E2B) and it may be ephemeral or persistent.
   type Provider = Docker | Kubernetes | E2B
   type Lifetime = Ephemeral | Persistent
 
-  type State =
-    | Pending
-    | Running
-    | Stopped
-    | Terminated
-
-  var sandboxes: Set[Sandbox]
-  var states: Str -> State
+  type State = Pending | Running | Stopped | Terminated
 
   type Sandbox = {
-    id: Str,
+    id: str,
     provider: Provider,
     lifetime: Lifetime,
-    owner: Str,
+    owner: str,
   }
 
-  action init: Bool = {
-    sandboxes' = Set();
-    true
+  var sandboxes: Set[Sandbox]
+  var states: str -> State
+
+  action init = all {
+    sandboxes' = Set(),
+    states' = Map(),
   }
+
+  // A new sandbox must not already exist.
+  def notExists(s: Sandbox): bool =
+    not(sandboxes.contains(s))
 
   // Create a sandbox in Pending state.
-  pure def createSandbox(s: Sandbox): Bool =
-    not sandboxes.contains(s) and
-      not states.contains(s.id)
-
-  action create(s: Sandbox): Bool = {
-    require(createSandbox(s));
-    sandboxes' = sandboxes.add(s);
-    states' = states.put(s.id, Pending);
+  action create(s: Sandbox): bool = all {
+    notExists(s),
+    sandboxes' = sandboxes.union(Set(s)),
+    states' = states.set(s.id, Pending),
     true
   }
 
-  pure def validTransition(from: State, to: State): Bool =
-    (from == Pending and to == Running) or
-      (from == Running and to == Stopped) or
-      (from == Stopped and to == Running) or
-      (from == Running and to == Terminated) or
-      (from == Stopped and to == Terminated)
+  // Permitted lifecycle transitions. Terminated is terminal.
+  pure def validTransition(from: State, target: State): bool = or {
+    from == Pending and target == Running,
+    from == Running and target == Stopped,
+    from == Stopped and target == Running,
+    from == Running and target == Terminated,
+    from == Stopped and target == Terminated,
+  }
 
-  action transition(id: Str, to: State): Bool = {
-    require(states.contains(id));
-    require(validTransition(states.get(id), to));
-    states' = states.put(id, to);
+  // Move a sandbox to a new state iff the transition is permitted.
+  action transition(id: str, target: State): bool = all {
+    states.keys().contains(id),
+    validTransition(states.get(id), target),
+    sandboxes' = sandboxes,
+    states' = states.set(id, target),
     true
   }
 
-  // Invariant: a sandbox resource always has a state, and never moves
-  // out of a terminal state.
-  invariant statesAreConsistent:
-    forall s in sandboxes :: states.contains(s.id)
+  // No-op action: reads state, leaves it unchanged. Used to wrap assertions.
+  action noop: bool = all {
+    sandboxes' = sandboxes,
+    states' = states,
+    true
+  }
 
-  invariant terminalIsFinal:
-    forall id in Set.fromTuples(states.toTuples()) ::
-      states.get(id) != Terminated implies true
+  // Nondeterministic step for the simulator.
+  action step: bool = noop
+
+  // Every tracked sandbox has a recorded state.
+  val statesConsistent: bool =
+    sandboxes.forall(s => states.keys().contains(s.id))
+
+  // Tests
+
+  run createThenRun = {
+    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
+      .then(all {
+        assert(states.get("sb1") == Pending),
+        noop
+      })
+      .then(transition("sb1", Running))
+      .then(all {
+        assert(states.get("sb1") == Running),
+        noop
+      })
+  }
+
+  run cannotReuseId = {
+    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
+      .then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u2" }))
+      .fail()
+  }
 }

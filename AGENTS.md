@@ -11,7 +11,7 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 * SQLAlchemy 2 async ORM + asyncpg. Alembic for migrations.
 * OpenHands SDK + Agent Server for agent execution.
 * Quint for formal specs; every behavioral change to a resource must be reflected in
-  `specs/` and verified with `quintc` / `quint test`.
+  `specs/` and verified with `quint typecheck` / `quint test`.
 
 ## 2. Code quality gates (enforced in CI)
 

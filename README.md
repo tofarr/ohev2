@@ -74,7 +74,7 @@ managed independently and addressable by id).
 * `ruff check .` and `ruff format --check .` must pass.
 * `mypy --strict` must pass.
 * Unit coverage ≥ 90% (`--cov-fail-under=90`).
-* Quint specs compile (`quintc`) and tests pass (`quint test`).
+* Quint specs compile (`quint typecheck`) and tests pass (`quint test`).
 * Playwright e2e suite runs daily in CI.
 
 ## Agent & contributor guidance
