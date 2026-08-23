@@ -5,6 +5,7 @@ DATABASE_URL. Import model metadata here so autogenerate detects changes.
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -12,9 +13,19 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Import models so Alembic autogenerate sees their metadata.
+from ohev.db import Base
+from ohev.permission.models.permission import Permission  # noqa: F401
+from ohev.user.models.user import User  # noqa: F401
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Allow DATABASE_URL / OHEV_DATABASE_URL to override the ini's sqlalchemy.url.
+_db_url = os.environ.get("OHEV_DATABASE_URL") or os.environ.get("DATABASE_URL")
+if _db_url:
+    config.set_main_option("sqlalchemy.url", _db_url)
 
 
 def run_migrations_offline() -> None:
@@ -25,7 +36,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection)
+    context.configure(connection=connection, target_metadata=Base.metadata)
     with context.begin_transaction():
         context.run_migrations()
 

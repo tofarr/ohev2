@@ -37,6 +37,10 @@ class AppConfig(BaseModel):
 
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
+    database_url: str = Field(
+        default="postgresql+asyncpg://ohev:ohev@localhost:5432/ohev",
+        description="Async SQLAlchemy database URL.",
+    )
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:

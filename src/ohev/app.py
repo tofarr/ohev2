@@ -9,6 +9,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from ohev import __version__
+from ohev.permission.routes import router as permission_router
+from ohev.user.routes import router as user_router
 
 
 def create_app() -> FastAPI:
@@ -22,6 +24,8 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(user_router)
+    app.include_router(permission_router)
     return app
 
 
