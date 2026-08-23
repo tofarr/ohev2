@@ -1,0 +1,58 @@
+{
+  // --- Python interpreter & environment ---
+  // The project is managed with `uv`; the venv lives at <root>/.venv.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+
+  // src/ layout: make `ohev` importable for analysis and refactoring.
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.analysis.typeCheckingMode": "strict",
+  "python.analysis.autoImportCompletions": true,
+
+  // --- Testing (pytest) ---
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests/unit"],
+
+  // --- Formatting & linting (ruff) ---
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  "ruff.configuration": "${workspaceFolder}/pyproject.toml",
+  "ruff.lineLength": 100,
+  "ruff.organizeImports": true,
+  "ruff.fixAll": true,
+
+  // --- Type checking (mypy) ---
+  "mypy-type-checker.args": ["--config-file=${workspaceFolder}/pyproject.toml"],
+  "mypy-type-checker.preferDaemon": true,
+  "mypy.runUsingActiveInterpreter": true,
+
+  // --- File explorer / search hygiene ---
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "**/.pytest_cache": true,
+    "**/htmlcov": true,
+    "**/*.egg-info": true,
+    "**/dist": true,
+    "**/build": true
+  },
+  "search.exclude": {
+    "**/uv.lock": true,
+    "**/.coverage": true,
+    "**/coverage.xml": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "**/.pytest_cache": true
+  },
+
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true
+}

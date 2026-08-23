@@ -23,7 +23,13 @@ playwright/.cache/
 !.env.example
 
 # Editor
-.vscode/
+# Keep shared workspace configs (settings.json, launch.json) so debugging and
+# tooling config are reproducible across contributors; ignore personal state.
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
 .idea/
 
 # OS

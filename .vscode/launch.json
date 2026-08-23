@@ -1,0 +1,129 @@
+{
+  // VS Code debug configurations for the ohev FastAPI project.
+  //
+  // Pick a config from the Run and Debug panel (Ctrl/Cmd+Shift+D) or the
+  // floating debug controls. All configs use the project venv at .venv/bin/python.
+
+  "version": "0.2.0",
+  "configurations": [
+    // --- Run & debug the uvicorn/FastAPI server with reload + breakpoints ---
+    {
+      "name": "Debug: uvicorn (ohev.app:app)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "ohev.app:app",
+        "--reload",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+
+    // --- Same, but no reload (more reliable breakpoint attachment) ---
+    {
+      "name": "Debug: uvicorn (no reload)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "ohev.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+
+    // --- Run the full unit test suite under the debugger ---
+    {
+      "name": "Debug: pytest (unit)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "tests/unit",
+        "-ra",
+        "--no-cov",
+        "-s"
+      ],
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+
+    // --- Debug the currently open test file ---
+    {
+      "name": "Debug: pytest current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}",
+        "-ra",
+        "--no-cov",
+        "-s"
+      ],
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+
+    // --- Debug a single test (cursor) — drop-in for pytest --no-cov -s ---
+    // Tip: place the cursor inside a test function and use "Debug Test at Cursor".
+    {
+      "name": "Debug: pytest current file at cursor",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}::${selectedText}",
+        "-ra",
+        "--no-cov",
+        "-s"
+      ],
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+
+    // --- E2E tests (require a running server) ---
+    {
+      "name": "Debug: pytest (e2e)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "tests/e2e",
+        "-ra",
+        "--no-cov",
+        "-s"
+      ],
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}",
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    }
+  ]
+}
