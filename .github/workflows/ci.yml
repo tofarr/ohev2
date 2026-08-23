@@ -58,11 +58,17 @@ jobs:
           quint test specs/auth.qnt --main=auth
           quint test specs/rest.qnt --main=rest
           quint test specs/encryption.qnt --main=encryption
+          quint test specs/user.qnt --main=user
+          quint test specs/permission.qnt --main=permission
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
           quint run specs/auth.qnt --main=auth --invariant=sessionIdsUnique --max-steps=100
           quint run specs/encryption.qnt --main=encryption --invariant=encryptionKeyInDecryptionKeys --max-steps=100
+          quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100
+          quint run specs/user.qnt --main=user --invariant=userEmailsUnique --max-steps=100
+          quint run specs/permission.qnt --main=permission --invariant=permissionIdsUnique --max-steps=100
+          quint run specs/permission.qnt --main=permission --invariant=permissionsReferenceValidUsers --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest

@@ -74,6 +74,8 @@ module rest {
   run standardRoutes = all {
     assert(isStandard(collection("users"))),
     assert(isStandard(createRoute("users"))),
+    assert(isStandard(collection("permissions"))),
+    assert(isStandard(createRoute("permissions"))),
     assert(isStandard(actionRoute("sandboxes", "sb1", "stop"))),
   }
 }
