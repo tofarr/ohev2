@@ -18,6 +18,8 @@ services:
     build: .
     environment:
       OHEV_DATABASE_URL: postgresql+asyncpg://ohev:ohev@postgres:5432/ohev
+      OHEV_ENCRYPTION_KEY_ID: default
+      OHEV_ENCRYPTION_KEY_VALUE: dev-secret-at-least-32-bytes-long!!
       OHEV_SANDBOX_PROVIDER: docker
     ports:
       - "8000:8000"
