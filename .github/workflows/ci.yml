@@ -38,10 +38,12 @@ jobs:
           quint test specs/sandbox.qnt --main=sandbox
           quint test specs/auth.qnt --main=auth
           quint test specs/rest.qnt --main=rest
+          quint test specs/encryption.qnt --main=encryption
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
           quint run specs/auth.qnt --main=auth --invariant=sessionIdsUnique --max-steps=100
+          quint run specs/encryption.qnt --main=encryption --invariant=encryptionKeyInDecryptionKeys --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest
@@ -54,6 +56,6 @@ jobs:
       - name: Start services
         run: docker compose up -d
       - name: Run Playwright e2e
-        run: uv run pytest tests/e2e -q
+        run: uv run pytest tests/e2e -q --no-cov
       - if: always()
         run: docker compose down

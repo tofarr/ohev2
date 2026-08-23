@@ -11,7 +11,6 @@ from pydantic import SecretStr
 from ohev.config import AppConfig, EncryptionKeyConfig
 from ohev.services.encryption_service import EncryptionService
 
-
 # Use secrets >= 32 bytes to satisfy HMAC key length requirements (RFC 7518)
 PRIMARY_SECRET = "primary-secret-key-at-least-32-bytes-long"
 OLD_SECRET = "old-secret-key-at-least-32-bytes-long!!"
@@ -92,9 +91,7 @@ class TestJwsTokens:
         with pytest.raises(ValueError, match="Invalid JWT token format"):
             service.verify_jws_token("not-a-valid-token")
 
-    def test_verify_jws_without_kid_uses_encryption_key(
-        self, service: EncryptionService
-    ) -> None:
+    def test_verify_jws_without_kid_uses_encryption_key(self, service: EncryptionService) -> None:
         # Create a token without kid header by directly encoding
         payload = {"data": "test", "iat": 1234567890, "exp": 9999999999}
         secret = PRIMARY_SECRET
