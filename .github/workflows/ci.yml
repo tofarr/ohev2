@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-type-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - name: Unit tests with coverage
+        run: uv run pytest -q
+
+  specs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g @informalsystems/quint
+      - run: for f in specs/*.qnt; do quintc "$f"; done
+      - run: quint test specs/sandbox.qnt --main=sandbox
+      - run: quint test specs/auth.qnt --main=auth
+
+  e2e:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras
+      - run: uv run playwright install --with-deps chromium
+      - name: Start services
+        run: docker compose up -d
+      - name: Run Playwright e2e
+        run: uv run pytest tests/e2e -q
+      - if: always()
+        run: docker compose down
