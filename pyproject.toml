@@ -23,6 +23,7 @@ dependencies = [
     "httpx>=0.27",
     "anyio>=4.4",
     "openhands-agent-server>=1.43.1",
+    "joserfc>=1.7.4",
 ]
 
 [project.optional-dependencies]
