@@ -8,6 +8,7 @@ service, and serialize — no business logic here.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -42,10 +43,28 @@ async def list_users(
     session: SessionDep,
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    email__contains: Annotated[
+        str | None,
+        Query(alias="email__contains", description="Case-insensitive email substring"),
+    ] = None,
+    created_at__gte: Annotated[
+        datetime | None,
+        Query(alias="created_at__gte", description="ISO 8601; users created at or after"),
+    ] = None,
+    created_at__lt: Annotated[
+        datetime | None,
+        Query(alias="created_at__lt", description="ISO 8601; users created before"),
+    ] = None,
 ) -> UserList:
     service = UserService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
-    users, next_cursor = await service.list_users(cursor=cursor_uuid, limit=limit)
+    users, next_cursor = await service.list_users(
+        cursor=cursor_uuid,
+        limit=limit,
+        email_contains=email__contains,
+        created_at_gte=created_at__gte,
+        created_at_lt=created_at__lt,
+    )
     return UserList(
         items=[UserRead.model_validate(u) for u in users],
         next_cursor=str(next_cursor) if next_cursor is not None else None,

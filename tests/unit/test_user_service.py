@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,6 +85,80 @@ class TestListUsers:
         ids = [u.id for u in users]
         assert set(ids) == {a.id, b.id}
         assert ids == sorted(ids)
+
+
+class TestListUsersFilters:
+    async def test_email_contains_case_insensitive(self, service: UserService) -> None:
+        await service.create(UserCreate(email="Alice@Example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
+        await service.create(UserCreate(email="charlie@other.org"))
+        users, _ = await service.list_users(email_contains="EXAMPLE")
+        emails = {u.email for u in users}
+        assert emails == {"Alice@example.com", "bob@example.com"}
+
+    async def test_email_contains_partial_substring(self, service: UserService) -> None:
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
+        await service.create(UserCreate(email="charlie@other.org"))
+        users, _ = await service.list_users(email_contains="alic")
+        assert len(users) == 1
+        assert users[0].email == "alice@example.com"
+
+    async def test_email_contains_no_match(self, service: UserService) -> None:
+        await service.create(UserCreate(email="alice@example.com"))
+        users, _ = await service.list_users(email_contains="nonexistent")
+        assert users == []
+
+    async def test_created_at_gte(self, service: UserService) -> None:
+        old = await service.create(UserCreate(email="old@example.com"))
+        # Use the DB-side created_at as cutoff to avoid clock/precision skew
+        # between Python datetime.now() and PostgreSQL func.now().
+        cutoff = old.created_at
+        new = await service.create(UserCreate(email="new@example.com"))
+        users, _ = await service.list_users(created_at_gte=cutoff)
+        ids = {u.id for u in users}
+        assert new.id in ids
+        assert old.id in ids
+
+    async def test_created_at_lt(self, service: UserService) -> None:
+        old = await service.create(UserCreate(email="old@example.com"))
+        cutoff = old.created_at
+        await service.create(UserCreate(email="new@example.com"))
+        users, _ = await service.list_users(created_at_lt=cutoff)
+        ids = {u.id for u in users}
+        assert old.id not in ids
+        assert all(u.email != "new@example.com" for u in users)
+
+    async def test_combined_filters(self, service: UserService) -> None:
+        # PostgreSQL func.now() returns transaction-start time, so all creates
+        # in the same transaction share a timestamp. Use created_at_lt with a
+        # future date to include all users, verifying the email filter narrows.
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
+        await service.create(UserCreate(email="alice@other.org"))
+        users, _ = await service.list_users(
+            email_contains="alice",
+            created_at_lt=datetime.now() + timedelta(days=1),
+        )
+        emails = {u.email for u in users}
+        assert emails == {"alice@example.com", "alice@other.org"}
+
+    async def test_filters_with_pagination(self, service: UserService) -> None:
+        for i in range(5):
+            await service.create(UserCreate(email=f"user{i}@example.com"))
+        users, next_cursor = await service.list_users(
+            email_contains="example",
+            limit=2,
+        )
+        assert len(users) == 2
+        assert next_cursor is not None
+        users2, next_cursor2 = await service.list_users(
+            email_contains="example",
+            cursor=next_cursor,
+            limit=2,
+        )
+        assert len(users2) == 2
+        assert next_cursor2 is not None
 
 
 class TestUpdateUser:

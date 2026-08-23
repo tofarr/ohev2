@@ -83,6 +83,54 @@ class TestListUsersRoute:
         resp = await client.get("/users?limit=101")
         assert resp.status_code == 422
 
+    async def test_list_email_contains_filter(self, client: AsyncClient) -> None:
+        await client.post("/users", json={"email": "Alice@Example.com"})
+        await client.post("/users", json={"email": "bob@example.com"})
+        await client.post("/users", json={"email": "charlie@other.org"})
+        resp = await client.get("/users?email__contains=EXAMPLE")
+        assert resp.status_code == 200
+        emails = {u["email"] for u in resp.json()["items"]}
+        assert emails == {"Alice@example.com", "bob@example.com"}
+
+    async def test_list_email_contains_no_match(self, client: AsyncClient) -> None:
+        await client.post("/users", json={"email": "alice@example.com"})
+        resp = await client.get("/users?email__contains=nonexistent")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_list_created_at_gte_filter(self, client: AsyncClient) -> None:
+        create1 = await client.post("/users", json={"email": "old@example.com"})
+        # Use the DB-side created_at as cutoff to avoid clock/precision skew.
+        cutoff = create1.json()["created_at"]
+        await client.post("/users", json={"email": "new@example.com"})
+        resp = await client.get(f"/users?created_at__gte={cutoff}")
+        assert resp.status_code == 200
+        ids = {u["id"] for u in resp.json()["items"]}
+        assert create1.json()["id"] in ids
+
+    async def test_list_created_at_lt_filter(self, client: AsyncClient) -> None:
+        create1 = await client.post("/users", json={"email": "old@example.com"})
+        cutoff = create1.json()["created_at"]
+        await client.post("/users", json={"email": "new@example.com"})
+        resp = await client.get(f"/users?created_at__lt={cutoff}")
+        assert resp.status_code == 200
+        ids = {u["id"] for u in resp.json()["items"]}
+        assert create1.json()["id"] not in ids
+
+    async def test_list_combined_filters(self, client: AsyncClient) -> None:
+        await client.post("/users", json={"email": "alice@example.com"})
+        await client.post("/users", json={"email": "bob@example.com"})
+        create3 = await client.post("/users", json={"email": "alice@other.org"})
+        cutoff = create3.json()["created_at"]
+        resp = await client.get(f"/users?email__contains=alice&created_at__gte={cutoff}")
+        assert resp.status_code == 200
+        emails = {u["email"] for u in resp.json()["items"]}
+        assert emails == {"alice@other.org"}
+
+    async def test_list_invalid_datetime_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.get("/users?created_at__gte=not-a-date")
+        assert resp.status_code == 422
+
 
 class TestUpdateUserRoute:
     async def test_update_email(self, client: AsyncClient) -> None:

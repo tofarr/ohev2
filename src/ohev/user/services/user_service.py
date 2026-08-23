@@ -7,6 +7,7 @@ exposes a thin `UserService` over SQLAlchemy async sessions per AGENTS.md §4.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -60,12 +61,26 @@ class UserService:
         *,
         cursor: uuid.UUID | None = None,
         limit: int = 50,
+        email_contains: str | None = None,
+        created_at_gte: datetime | None = None,
+        created_at_lt: datetime | None = None,
     ) -> tuple[list[User], uuid.UUID | None]:
         """List users ordered by id, keyed-pagination via cursor.
 
+        Optional filters: case-insensitive email substring, created_at bounds.
         Returns (users, next_cursor). next_cursor is None when exhausted.
         """
         stmt = select(User).order_by(User.id)
+        if email_contains is not None:
+            stmt = stmt.where(User.email.ilike(f"%{email_contains}%"))
+        if created_at_gte is not None:
+            # DB stores naive timestamps (server_default func.now()); strip tz
+            # from aware datetimes to avoid asyncpg offset mismatch.
+            gte = created_at_gte.replace(tzinfo=None) if created_at_gte.tzinfo else created_at_gte
+            stmt = stmt.where(User.created_at >= gte)
+        if created_at_lt is not None:
+            lt = created_at_lt.replace(tzinfo=None) if created_at_lt.tzinfo else created_at_lt
+            stmt = stmt.where(User.created_at < lt)
         if cursor is not None:
             stmt = stmt.where(User.id > cursor)
         stmt = stmt.limit(limit)
