@@ -12,6 +12,9 @@ coverage.xml
 dist/
 build/
 
+# Node
+node_modules/
+
 # Playwright
 test-results/
 playwright-report/
