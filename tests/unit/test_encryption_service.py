@@ -9,7 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from ohev.config import AppConfig, EncryptionKeyConfig
-from ohev.services.encryption_service import EncryptionService
+from ohev.encryption.encryption_service import EncryptionService
 
 # Use secrets >= 32 bytes to satisfy HMAC key length requirements (RFC 7518)
 PRIMARY_SECRET = "primary-secret-key-at-least-32-bytes-long"
@@ -238,7 +238,7 @@ class TestGetEncryptionService:
     def test_get_encryption_service_returns_cached_instance(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from ohev.services.encryption_service import get_encryption_service
+        from ohev.encryption.encryption_service import get_encryption_service
 
         get_encryption_service.cache_clear()
 

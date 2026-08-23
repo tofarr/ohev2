@@ -8,10 +8,29 @@ on:
 jobs:
   lint-type-coverage:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ohev
+          POSTGRES_PASSWORD: ohev
+          POSTGRES_DB: ohev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ohev"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      OHEV_DATABASE_URL: postgresql+asyncpg://ohev:ohev@localhost:5432/ohev
+      OHEV_ENCRYPTION_KEY_ID: default
+      OHEV_ENCRYPTION_KEY_VALUE: ci-secret-at-least-32-bytes-long!!
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
+      - run: uv run alembic upgrade head
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
@@ -39,11 +58,17 @@ jobs:
           quint test specs/auth.qnt --main=auth
           quint test specs/rest.qnt --main=rest
           quint test specs/encryption.qnt --main=encryption
+          quint test specs/user.qnt --main=user
+          quint test specs/permission.qnt --main=permission
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
           quint run specs/auth.qnt --main=auth --invariant=sessionIdsUnique --max-steps=100
           quint run specs/encryption.qnt --main=encryption --invariant=encryptionKeyInDecryptionKeys --max-steps=100
+          quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100
+          quint run specs/user.qnt --main=user --invariant=userEmailsUnique --max-steps=100
+          quint run specs/permission.qnt --main=permission --invariant=permissionIdsUnique --max-steps=100
+          quint run specs/permission.qnt --main=permission --invariant=permissionsReferenceValidUsers --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest
@@ -55,6 +80,23 @@ jobs:
       - run: uv run playwright install --with-deps chromium
       - name: Start services
         run: docker compose up -d
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        env:
+          OHEV_DATABASE_URL: postgresql+asyncpg://ohev:ohev@localhost:5432/ohev
+      - name: Wait for app
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then
+              echo "App is healthy"
+              exit 0
+            fi
+            echo "Waiting for app... ($i/30)"
+            sleep 2
+          done
+          echo "App did not become healthy"
+          docker compose logs app
+          exit 1
       - name: Run Playwright e2e
         run: uv run pytest tests/e2e -q --no-cov
       - if: always()

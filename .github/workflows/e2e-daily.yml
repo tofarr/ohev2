@@ -14,6 +14,23 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run playwright install --with-deps chromium
       - run: docker compose up -d
-      - run: uv run pytest tests/e2e -q
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        env:
+          OHEV_DATABASE_URL: postgresql+asyncpg://ohev:ohev@localhost:5432/ohev
+      - name: Wait for app
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then
+              echo "App is healthy"
+              exit 0
+            fi
+            echo "Waiting for app... ($i/30)"
+            sleep 2
+          done
+          echo "App did not become healthy"
+          docker compose logs app
+          exit 1
+      - run: uv run pytest tests/e2e -q --no-cov
       - if: always()
         run: docker compose down

@@ -12,6 +12,8 @@
 //   auth.qnt       — sessions + sessionIdsUnique invariant + ownership check
 //   rest.qnt       — uniform REST route/verb mapping (review guard)
 //   encryption.qnt — encryption key config + encryptionKeyInDecryptionKeys invariant
+//   user.qnt       — user entity + userIdsUnique / userEmailsUnique invariants
+//   permission.qnt — ABAC permission model + evaluator + referential integrity invariant
 //
 // This file intentionally does not import the submodules, so each can be
 // typechecked and tested in isolation. To compose them in the future, add
@@ -19,5 +21,5 @@
 
 module ohev {
   // Index of available spec modules. See header comment for invocation.
-  pure val specModules: str = "sandbox, auth, rest, encryption"
+  pure val specModules: str = "sandbox, auth, rest, encryption, user, permission"
 }
