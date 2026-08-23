@@ -1,0 +1,19 @@
+name: Daily E2E
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras
+      - run: uv run playwright install --with-deps chromium
+      - run: docker compose up -d
+      - run: uv run pytest tests/e2e -q
+      - if: always()
+        run: docker compose down
