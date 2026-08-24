@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from httpx import AsyncClient
+
+from ohev.permission.services import reset_base_permissions_cache
 
 
 class TestCreateUserRoute:
@@ -164,3 +167,114 @@ class TestDeleteUserRoute:
     async def test_delete_missing_user_returns_404(self, client: AsyncClient) -> None:
         resp = await client.delete(f"/users/{uuid.uuid4()}")
         assert resp.status_code == 404
+
+
+class TestPermissionEnforcement:
+    """Tests for the permission check on user endpoints."""
+
+    async def test_missing_auth_header_returns_401(self, app) -> None:
+        # Use a client without the X-User-Id header to test the 401 path.
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/users")
+        assert resp.status_code == 401
+
+    async def test_invalid_auth_header_returns_401(self, client: AsyncClient) -> None:
+        resp = await client.get("/users", headers={"X-User-Id": "not-a-uuid"})
+        assert resp.status_code == 401
+
+    async def test_denied_without_permission(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With empty base permissions and no DB grant, all user endpoints return 403."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        resp = await client.get("/users")
+        assert resp.status_code == 403
+        resp = await client.post("/users", json={"email": "x@example.com"})
+        assert resp.status_code == 403
+
+    async def test_allowed_with_db_permission(
+        self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A per-user DB grant allows access even with empty base permissions."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        from ohev.permission.models.permission import Action, ResourceType
+        from ohev.permission.schemas import PermissionCreate
+        from ohev.permission.services import PermissionService
+        from ohev.user.schemas import UserCreate
+        from ohev.user.services import UserService
+
+        # Create the principal user directly in the DB (bypassing the API,
+        # which is itself permission-guarded).
+        principal = await UserService(session).create(UserCreate(email="principal@example.com"))
+        principal_id = principal.id
+
+        service = PermissionService(session)
+        await service.create(
+            PermissionCreate(
+                user_id=principal_id,
+                action=Action.LIST,
+                type=ResourceType.USER,
+            )
+        )
+        await session.commit()
+
+        # Use the principal's id as X-User-Id for this request.
+        resp = await client.get("/users", headers={"X-User-Id": str(principal_id)})
+        assert resp.status_code == 200
+
+    async def test_partial_permission_denies_other_action(
+        self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A LIST grant does not allow CREATE."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        from ohev.permission.models.permission import Action, ResourceType
+        from ohev.permission.schemas import PermissionCreate
+        from ohev.permission.services import PermissionService
+        from ohev.user.schemas import UserCreate
+        from ohev.user.services import UserService
+
+        principal = await UserService(session).create(UserCreate(email="principal@example.com"))
+        principal_id = principal.id
+
+        service = PermissionService(session)
+        await service.create(
+            PermissionCreate(
+                user_id=principal_id,
+                action=Action.LIST,
+                type=ResourceType.USER,
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/users", headers={"X-User-Id": str(principal_id)})
+        assert resp.status_code == 200
+        resp = await client.post(
+            "/users",
+            json={"email": "new@example.com"},
+            headers={"X-User-Id": str(principal_id)},
+        )
+        assert resp.status_code == 403

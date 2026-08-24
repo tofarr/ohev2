@@ -5,7 +5,7 @@ from __future__ import annotations
 from ohev.permission.models.permission import (
     Action,
     Permission,
-    SelectorKind,
+    ResourceType,
 )
 
-__all__ = ["Action", "Permission", "SelectorKind"]
+__all__ = ["Action", "Permission", "ResourceType"]

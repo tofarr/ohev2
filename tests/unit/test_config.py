@@ -79,6 +79,19 @@ class TestAppConfig:
         ids = [k.id for k in config.decryption_keys]
         assert ids.count("shared") == 1
 
+    def test_default_base_permissions(self) -> None:
+        config = AppConfig(
+            encryption_key=EncryptionKeyConfig(value=SecretStr("secret")),
+        )
+        assert config.base_permissions == ["*:user", "*:permission"]
+
+    def test_custom_base_permissions(self) -> None:
+        config = AppConfig(
+            encryption_key=EncryptionKeyConfig(value=SecretStr("secret")),
+            base_permissions=["read:user", "create:permission"],
+        )
+        assert config.base_permissions == ["read:user", "create:permission"]
+
 
 class TestGetConfig:
     """Tests for get_config function."""
@@ -97,6 +110,20 @@ class TestGetConfig:
         assert config.encryption_key.value.get_secret_value() == "env-secret"
 
         # Clean up
+        get_config.cache_clear()
+
+    def test_loads_base_permissions_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+
+        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "read:user")
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "*:permission")
+
+        config = get_config()
+        assert config.base_permissions == ["read:user", "*:permission"]
+
         get_config.cache_clear()
 
     def test_loads_decryption_keys_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:

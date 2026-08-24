@@ -2,7 +2,8 @@
 
 Follows the uniform REST surface (AGENTS.md §3): GET /users (paginated),
 POST /users, GET/PATCH/DELETE /users/{id}. Handlers validate, call the
-service, and serialize — no business logic here.
+service, and serialize — no business logic here. Every endpoint is guarded
+by a permission check (AGENTS.md §9).
 """
 
 from __future__ import annotations
@@ -12,9 +13,12 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.db import get_session
+from ohev.permission.dependencies import (
+    SessionDep,
+    require_permission,
+)
+from ohev.permission.models.permission import Action, ResourceType
 from ohev.user.schemas import UserCreate, UserList, UserRead, UserUpdate
 from ohev.user.services import (
     UserEmailConflictError,
@@ -35,10 +39,11 @@ def _cursor(value: str) -> uuid.UUID:
         ) from exc
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
-
-
-@router.get("", response_model=UserList)
+@router.get(
+    "",
+    response_model=UserList,
+    dependencies=[Depends(require_permission(Action.LIST, ResourceType.USER))],
+)
 async def list_users(
     session: SessionDep,
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
@@ -72,7 +77,12 @@ async def list_users(
     )
 
 
-@router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission(Action.CREATE, ResourceType.USER))],
+)
 async def create_user(payload: UserCreate, session: SessionDep) -> UserRead:
     service = UserService(session)
     try:
@@ -86,7 +96,11 @@ async def create_user(payload: UserCreate, session: SessionDep) -> UserRead:
     return UserRead.model_validate(user)
 
 
-@router.get("/{user_id}", response_model=UserRead)
+@router.get(
+    "/{user_id}",
+    response_model=UserRead,
+    dependencies=[Depends(require_permission(Action.READ, ResourceType.USER))],
+)
 async def get_user(user_id: uuid.UUID, session: SessionDep) -> UserRead:
     service = UserService(session)
     try:
@@ -99,7 +113,11 @@ async def get_user(user_id: uuid.UUID, session: SessionDep) -> UserRead:
     return UserRead.model_validate(user)
 
 
-@router.patch("/{user_id}", response_model=UserRead)
+@router.patch(
+    "/{user_id}",
+    response_model=UserRead,
+    dependencies=[Depends(require_permission(Action.UPDATE, ResourceType.USER))],
+)
 async def update_user(user_id: uuid.UUID, payload: UserUpdate, session: SessionDep) -> UserRead:
     service = UserService(session)
     try:
@@ -118,7 +136,11 @@ async def update_user(user_id: uuid.UUID, payload: UserUpdate, session: SessionD
     return UserRead.model_validate(user)
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_permission(Action.DELETE, ResourceType.USER))],
+)
 async def delete_user(user_id: uuid.UUID, session: SessionDep) -> None:
     service = UserService(session)
     try:

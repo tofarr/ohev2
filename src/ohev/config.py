@@ -33,6 +33,9 @@ class AppConfig(BaseModel):
     The decryption_keys list contains all keys that can decrypt data,
     enabling key rotation without breaking existing encrypted values.
     The encryption_key is automatically included in decryption_keys.
+    base_permissions is a list of permission strings (see permission_grammar)
+    applied to every authenticated request as a baseline before per-user DB
+    permissions are consulted.
     """
 
     encryption_key: EncryptionKeyConfig
@@ -40,6 +43,10 @@ class AppConfig(BaseModel):
     database_url: str = Field(
         default="postgresql+asyncpg://ohev:ohev@localhost:5432/ohev",
         description="Async SQLAlchemy database URL.",
+    )
+    base_permissions: list[str] = Field(
+        default_factory=lambda: ["*:user", "*:permission"],
+        description="Baseline permission grants applied to all authenticated users.",
     )
 
     @model_validator(mode="after")
@@ -62,6 +69,7 @@ def get_config() -> AppConfig:
       - OHEV_DECRYPTION_KEYS_0_VALUE
       - OHEV_DECRYPTION_KEYS_1_ID
       - OHEV_DECRYPTION_KEYS_1_VALUE
+      - OHEV_BASE_PERMISSIONS_0, OHEV_BASE_PERMISSIONS_1, ...
       ...
     """
     return cast(AppConfig, from_env(AppConfig, "OHEV"))
