@@ -34,7 +34,7 @@ class PermissionRead(BaseModel):
     created_at: datetime
 
 
-class PermissionList(BaseModel):
+class PermissionSearchResult(BaseModel):
     """Paginated collection of permissions."""
 
     items: list[PermissionRead]

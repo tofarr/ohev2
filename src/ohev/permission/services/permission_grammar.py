@@ -4,7 +4,7 @@ Grammar (URI-path inspired, matches the plural-noun REST resources)::
 
     <action>[.<attr>...]:<type>
 
-- ``action`` ∈ {create, read, update, delete, list, use, all}  (all = wildcard / all actions)
+- ``action`` ∈ {create, read, update, delete, search, use, all}  (all = wildcard / all actions)
 - ``.attr`` suffix, comma-separated, scopes to attributes; absent = all attributes
 - ``type`` is a resource type noun (e.g. ``user``, ``permission``)
 

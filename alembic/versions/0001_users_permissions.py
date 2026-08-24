@@ -42,7 +42,7 @@ def upgrade() -> None:
                 "read",
                 "update",
                 "delete",
-                "list",
+                "search",
                 "use",
                 name="permission_action",
             ),

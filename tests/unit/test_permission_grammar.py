@@ -35,7 +35,7 @@ class TestParseAction:
             ("read", Action.READ),
             ("update", Action.UPDATE),
             ("delete", Action.DELETE),
-            ("list", Action.LIST),
+            ("search", Action.SEARCH),
             ("use", Action.USE),
         ]:
             p = parse(f"{verb}:user")
@@ -109,7 +109,7 @@ class TestRoundTrip:
             "create:user",
             "update:permission",
             "delete:user",
-            "list:permission",
+            "search:permission",
             "use:user",
             "read.email,name:user",
             "read.email:permission",

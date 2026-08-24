@@ -4,12 +4,12 @@ A Permission is an immutable grant record: a *principal* (user) is granted an
 *action* over a *resource type*, optionally restricted to a subset of
 *attributes*. The shape is intentionally minimal and extensible:
 
-  - action ∈ {create, read, update, delete, list, use, *}
+  - action ∈ {create, read, update, delete, search, use, all}
   - type   ∈ {user, permission, …}  (extensible enum)
   - attributes = ["email", "name"] | None  (None ⇒ all attributes)
 
 Permissions are immutable: there is no update operation. To change a grant,
-delete and re-create. `action = "*"` is a wildcard matching any action. The
+delete and re-create. `action = "all"` is a wildcard matching any action. The
 string grammar that round-trips a Permission to/from a compact string lives in
 `permission/services/permission_grammar.py`.
 """
@@ -31,9 +31,9 @@ from ohev.user.models.user import User
 class Action(enum.StrEnum):
     """Actions a permission may grant.
 
-    `ALL` (`*`) is a wildcard matching any action. CRUD-L verbs cover the
-    standard REST operations; `USE` covers non-CRUD resource-scoped actions
-    (e.g. using an access token).
+    `ALL` (`all`) is a wildcard matching any action. CRUD verbs cover the
+    standard REST operations; `SEARCH` covers collection retrieval, and `USE`
+    covers non-CRUD resource-scoped actions (e.g. using an access token).
     """
 
     ALL = "all"
@@ -41,7 +41,7 @@ class Action(enum.StrEnum):
     READ = "read"
     UPDATE = "update"
     DELETE = "delete"
-    LIST = "list"
+    SEARCH = "search"
     USE = "use"
 
 

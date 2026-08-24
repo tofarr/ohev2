@@ -56,7 +56,7 @@ class UserService:
             raise UserNotFoundError(str(user_id))
         return user
 
-    async def list_users(
+    async def search_users(
         self,
         *,
         cursor: uuid.UUID | None = None,
@@ -65,7 +65,7 @@ class UserService:
         created_at_gte: datetime | None = None,
         created_at_lt: datetime | None = None,
     ) -> tuple[list[User], uuid.UUID | None]:
-        """List users ordered by id, keyed-pagination via cursor.
+        """Search users ordered by id, keyed-pagination via cursor.
 
         Optional filters: case-insensitive email substring, created_at bounds.
         Returns (users, next_cursor). next_cursor is None when exhausted.

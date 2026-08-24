@@ -82,14 +82,14 @@ class TestGetPermissionRoute:
 
 
 class TestListPermissionsRoute:
-    async def test_list_empty(self, client: AsyncClient) -> None:
+    async def test_search_empty(self, client: AsyncClient) -> None:
         resp = await client.get("/permissions")
         assert resp.status_code == 200
         body = resp.json()
         assert body["items"] == []
         assert body["next_cursor"] is None
 
-    async def test_list_filtered_by_user(self, client: AsyncClient) -> None:
+    async def test_search_filtered_by_user(self, client: AsyncClient) -> None:
         uid1 = await _make_user(client, email="u1@example.com")
         uid2 = await _make_user(client, email="u2@example.com")
         await client.post("/permissions", json=_payload(uid1, type="user"))
@@ -101,16 +101,16 @@ class TestListPermissionsRoute:
         assert len(body["items"]) == 2
         assert all(i["user_id"] == uid1 for i in body["items"])
 
-    async def test_list_pagination(self, client: AsyncClient) -> None:
+    async def test_search_pagination(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
-        for act in ["create", "read", "update", "delete", "list"]:
+        for act in ["create", "read", "update", "delete", "search"]:
             await client.post("/permissions", json=_payload(uid, action=act))
         resp = await client.get("/permissions?limit=2")
         body = resp.json()
         assert len(body["items"]) == 2
         assert body["next_cursor"] is not None
 
-    async def test_list_invalid_user_id_returns_422(self, client: AsyncClient) -> None:
+    async def test_search_invalid_user_id_returns_422(self, client: AsyncClient) -> None:
         resp = await client.get("/permissions?user_id=not-a-uuid")
         assert resp.status_code == 422
 

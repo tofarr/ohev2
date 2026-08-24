@@ -20,8 +20,8 @@ from ohev.permission.dependencies import (
 from ohev.permission.models.permission import Action, ResourceType
 from ohev.permission.schemas import (
     PermissionCreate,
-    PermissionList,
     PermissionRead,
+    PermissionSearchResult,
 )
 from ohev.permission.services import (
     PermissionConflictError,
@@ -44,21 +44,21 @@ def _cursor(value: str) -> uuid.UUID:
 
 @router.get(
     "",
-    response_model=PermissionList,
-    dependencies=[Depends(require_permission(Action.LIST, ResourceType.PERMISSION))],
+    response_model=PermissionSearchResult,
+    dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))],
 )
-async def list_permissions(
+async def search_permissions(
     session: SessionDep,
     user_id: Annotated[uuid.UUID | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-) -> PermissionList:
+) -> PermissionSearchResult:
     service = PermissionService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
-    permissions, next_cursor = await service.list_permissions(
+    permissions, next_cursor = await service.search_permissions(
         user_id=user_id, cursor=cursor_uuid, limit=limit
     )
-    return PermissionList(
+    return PermissionSearchResult(
         items=[PermissionRead.model_validate(p) for p in permissions],
         next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,

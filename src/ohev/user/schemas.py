@@ -33,7 +33,7 @@ class UserRead(BaseModel):
     updated_at: datetime
 
 
-class UserList(BaseModel):
+class UserSearchResult(BaseModel):
     """Paginated collection of users."""
 
     items: list[UserRead]

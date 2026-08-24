@@ -19,7 +19,7 @@ from ohev.permission.dependencies import (
     require_permission,
 )
 from ohev.permission.models.permission import Action, ResourceType
-from ohev.user.schemas import UserCreate, UserList, UserRead, UserUpdate
+from ohev.user.schemas import UserCreate, UserRead, UserSearchResult, UserUpdate
 from ohev.user.services import (
     UserEmailConflictError,
     UserNotFoundError,
@@ -41,10 +41,10 @@ def _cursor(value: str) -> uuid.UUID:
 
 @router.get(
     "",
-    response_model=UserList,
-    dependencies=[Depends(require_permission(Action.LIST, ResourceType.USER))],
+    response_model=UserSearchResult,
+    dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.USER))],
 )
-async def list_users(
+async def search_users(
     session: SessionDep,
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -60,17 +60,17 @@ async def list_users(
         datetime | None,
         Query(alias="created_at__lt", description="ISO 8601; users created before"),
     ] = None,
-) -> UserList:
+) -> UserSearchResult:
     service = UserService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
-    users, next_cursor = await service.list_users(
+    users, next_cursor = await service.search_users(
         cursor=cursor_uuid,
         limit=limit,
         email_contains=email__contains,
         created_at_gte=created_at__gte,
         created_at_lt=created_at__lt,
     )
-    return UserList(
+    return UserSearchResult(
         items=[UserRead.model_validate(u) for u in users],
         next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,

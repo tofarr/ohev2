@@ -77,12 +77,12 @@ class TestGetPermission:
 
 
 class TestListPermissions:
-    async def test_list_empty(self, service: PermissionService) -> None:
-        perms, next_cursor = await service.list_permissions()
+    async def test_search_empty(self, service: PermissionService) -> None:
+        perms, next_cursor = await service.search_permissions()
         assert perms == []
         assert next_cursor is None
 
-    async def test_list_filtered_by_user(self, service: PermissionService, session) -> None:
+    async def test_search_filtered_by_user(self, service: PermissionService, session) -> None:
         uid1 = await _make_user(session, email="first@example.com")
         uid2 = await _make_user(session, email="second@example.com")
 
@@ -90,20 +90,20 @@ class TestListPermissions:
         await service.create(_create_payload(uid1, type=ResourceType.PERMISSION))
         await service.create(_create_payload(uid2, type=ResourceType.USER))
 
-        perms, _ = await service.list_permissions(user_id=uid1)
+        perms, _ = await service.search_permissions(user_id=uid1)
         assert len(perms) == 2
         assert all(p.user_id == uid1 for p in perms)
 
-    async def test_list_pagination(self, service: PermissionService, session) -> None:
+    async def test_search_pagination(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        for act in [Action.CREATE, Action.READ, Action.UPDATE, Action.DELETE, Action.LIST]:
+        for act in [Action.CREATE, Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH]:
             await service.create(_create_payload(uid, action=act))
-        perms, next_cursor = await service.list_permissions(limit=2)
+        perms, next_cursor = await service.search_permissions(limit=2)
         assert len(perms) == 2
         assert next_cursor is not None
-        perms2, next_cursor2 = await service.list_permissions(cursor=next_cursor, limit=2)
+        perms2, next_cursor2 = await service.search_permissions(cursor=next_cursor, limit=2)
         assert len(perms2) == 2
-        perms3, next_cursor3 = await service.list_permissions(cursor=next_cursor2, limit=2)
+        perms3, next_cursor3 = await service.search_permissions(cursor=next_cursor2, limit=2)
         assert len(perms3) == 1
         assert next_cursor3 is None
 
@@ -126,12 +126,12 @@ class TestListForUser:
         uid = await _make_user(session)
         await service.create(_create_payload(uid, type=ResourceType.USER))
         await service.create(_create_payload(uid, type=ResourceType.PERMISSION))
-        perms = await service.list_for_user(uid)
+        perms = await service.search_for_user(uid)
         assert len(perms) == 2
 
     async def test_empty_for_user_with_none(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perms = await service.list_for_user(uid)
+        perms = await service.search_for_user(uid)
         assert perms == []
 
 

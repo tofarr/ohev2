@@ -15,9 +15,9 @@
 
 module permission {
   // Actions a permission may grant. Wildcard covers any action.
-  // CRUD-L verbs map to REST verbs: list=GET collection, create=POST,
+  // CRUD verbs map to REST verbs: search=GET collection, create=POST,
   // read=GET /{id}, update=PATCH /{id}, delete=DELETE /{id}.
-  type Action = Create | Read | Update | Delete | ListAct | Use | Wildcard
+  type Action = Create | Read | Update | Delete | Search | Use | Wildcard
 
   // Resource types a permission may scope. Extensible as new entities land.
   type ResourceType = TUser | TPermission
@@ -65,7 +65,7 @@ module permission {
       | Read => "read"
       | Update => "update"
       | Delete => "delete"
-      | ListAct => "list"
+      | Search => "search"
       | Use => "use"
       | Wildcard => "all"
     }
@@ -268,14 +268,14 @@ module permission {
     }, "delete"))
   }
 
-  run listActionMatchesList = {
+  run searchActionMatchesSearch = {
     assert(matchesAction({
       id: "p1",
       userId: "u1",
-      act: ListAct,
+      act: Search,
       resType: TUser,
       attributes: Set(),
-    }, "list"))
+    }, "search"))
   }
 
   run attributeSubsetRestrictsAccess = all {

@@ -62,9 +62,9 @@ def require_permission(
 
         @router.get(
             "",
-            dependencies=[Depends(require_permission(Action.LIST, ResourceType.USER))],
+            dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.USER))],
         )
-        async def list_users(...): ...
+        async def search_users(...): ...
 
     Raises 403 Forbidden when the principal is not granted the requested
     action. Depends on the DB session and the current user id.

@@ -45,10 +45,10 @@ class TestActionMatching:
         assert perm.matches_action("read")
         assert perm.matches_action("update")
         assert perm.matches_action("delete")
-        assert perm.matches_action("list")
+        assert perm.matches_action("search")
 
-    def test_list_action_matches(self) -> None:
-        assert _perm(action=Action.LIST).matches_action("list")
+    def test_search_action_matches(self) -> None:
+        assert _perm(action=Action.SEARCH).matches_action("search")
 
     def test_use_action_matches(self) -> None:
         assert _perm(action=Action.USE).matches_action("use")

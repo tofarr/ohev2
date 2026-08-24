@@ -124,14 +124,14 @@ class PermissionService:
             raise PermissionNotFoundError(str(permission_id))
         return permission
 
-    async def list_permissions(
+    async def search_permissions(
         self,
         *,
         user_id: uuid.UUID | None = None,
         cursor: uuid.UUID | None = None,
         limit: int = 50,
     ) -> tuple[list[Permission], uuid.UUID | None]:
-        """List permissions optionally filtered by user, keyed by id."""
+        """Search permissions optionally filtered by user, keyed by id."""
         stmt = select(Permission).order_by(Permission.id)
         if user_id is not None:
             stmt = stmt.where(Permission.user_id == user_id)
@@ -193,7 +193,7 @@ class PermissionService:
         result = await self._session.execute(stmt.limit(1))
         return result.scalar_one_or_none() is not None
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Permission]:
+    async def search_for_user(self, user_id: uuid.UUID) -> list[Permission]:
         """Load all permissions for a user (for evaluation/debugging)."""
         stmt = select(Permission).where(Permission.user_id == user_id)
         result = await self._session.execute(stmt)
