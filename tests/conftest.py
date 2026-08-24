@@ -47,8 +47,8 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Baseline grants that allow all CRUD-L on user and permission resources so
     # existing service/route tests pass without per-user DB permissions. Tests
     # that verify denial override this env var locally.
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "*:user")
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "*:permission")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "all:user")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
 
 
 @pytest_asyncio.fixture

@@ -36,7 +36,7 @@ class Action(enum.StrEnum):
     (e.g. using an access token).
     """
 
-    ALL = "*"
+    ALL = "all"
     CREATE = "create"
     READ = "read"
     UPDATE = "update"

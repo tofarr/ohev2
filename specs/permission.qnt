@@ -67,7 +67,7 @@ module permission {
       | Delete => "delete"
       | ListAct => "list"
       | Use => "use"
-      | Wildcard => "*"
+      | Wildcard => "all"
     }
 
   // Whether an action covers the requested action verb.

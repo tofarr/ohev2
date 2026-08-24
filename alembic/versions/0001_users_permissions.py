@@ -37,7 +37,7 @@ def upgrade() -> None:
         sa.Column(
             "action",
             sa.Enum(
-                "*",
+                "all",
                 "create",
                 "read",
                 "update",

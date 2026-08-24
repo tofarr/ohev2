@@ -26,7 +26,7 @@ class TestParseAction:
         assert p.attributes is None
 
     def test_wildcard_action(self) -> None:
-        p = parse("*:permission")
+        p = parse("all:permission")
         assert p.action is Action.ALL
 
     def test_all_actions(self) -> None:
@@ -105,7 +105,7 @@ class TestRoundTrip:
         "s",
         [
             "read:user",
-            "*:permission",
+            "all:permission",
             "create:user",
             "update:permission",
             "delete:user",
@@ -143,7 +143,7 @@ class TestRoundTrip:
             action=Action.ALL,
             type=ResourceType.PERMISSION,
         )
-        assert to_string(perm) == "*:permission"
+        assert to_string(perm) == "all:permission"
 
 
 class TestParseMany:

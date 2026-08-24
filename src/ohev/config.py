@@ -45,7 +45,7 @@ class AppConfig(BaseModel):
         description="Async SQLAlchemy database URL.",
     )
     base_permissions: list[str] = Field(
-        default_factory=lambda: ["*:user", "*:permission"],
+        default_factory=lambda: ["all:user", "all:permission"],
         description="Baseline permission grants applied to all authenticated users.",
     )
 

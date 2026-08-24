@@ -53,9 +53,9 @@ class TestCreatePermissionRoute:
 
     async def test_create_all_action(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
-        resp = await client.post("/permissions", json=_payload(uid, action="*"))
+        resp = await client.post("/permissions", json=_payload(uid, action="all"))
         assert resp.status_code == 201
-        assert resp.json()["action"] == "*"
+        assert resp.json()["action"] == "all"
 
     async def test_create_invalid_action_returns_422(self, client: AsyncClient) -> None:
         uid = await _make_user(client)

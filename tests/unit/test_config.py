@@ -83,7 +83,7 @@ class TestAppConfig:
         config = AppConfig(
             encryption_key=EncryptionKeyConfig(value=SecretStr("secret")),
         )
-        assert config.base_permissions == ["*:user", "*:permission"]
+        assert config.base_permissions == ["all:user", "all:permission"]
 
     def test_custom_base_permissions(self) -> None:
         config = AppConfig(
@@ -119,10 +119,10 @@ class TestGetConfig:
 
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "read:user")
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "*:permission")
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
 
         config = get_config()
-        assert config.base_permissions == ["read:user", "*:permission"]
+        assert config.base_permissions == ["read:user", "all:permission"]
 
         get_config.cache_clear()
 

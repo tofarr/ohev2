@@ -4,7 +4,7 @@ Grammar (URI-path inspired, matches the plural-noun REST resources)::
 
     <action>[.<attr>...]:<type>
 
-- ``action`` ∈ {create, read, update, delete, list, use, *}  (* = wildcard / all actions)
+- ``action`` ∈ {create, read, update, delete, list, use, all}  (all = wildcard / all actions)
 - ``.attr`` suffix, comma-separated, scopes to attributes; absent = all attributes
 - ``type`` is a resource type noun (e.g. ``user``, ``permission``)
 
@@ -12,7 +12,7 @@ A leading principal segment is *not* part of the permission string itself; the
 principal (user id) is carried by the enclosing Permission row. Examples::
 
     read:user
-    *:permission
+    all:permission
     read.email,name:user
     use:permission
 
