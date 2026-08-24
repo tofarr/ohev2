@@ -49,7 +49,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
-            "type",
+            "resource_type",
             sa.Enum("user", "permission", name="permission_resource_type"),
             nullable=False,
         ),
@@ -62,11 +62,11 @@ def upgrade() -> None:
         comment="ABAC permission grants",
     )
     op.create_index("ix_permissions_user_id", "permissions", ["user_id"], unique=False)
-    op.create_index("ix_permissions_type", "permissions", ["type"], unique=False)
+    op.create_index("ix_permissions_resource_type", "permissions", ["resource_type"], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_permissions_type", table_name="permissions")
+    op.drop_index("ix_permissions_resource_type", table_name="permissions")
     op.drop_index("ix_permissions_user_id", table_name="permissions")
     op.drop_table("permissions")
     sa.Enum(name="permission_resource_type").drop(op.get_bind(), checkfirst=True)

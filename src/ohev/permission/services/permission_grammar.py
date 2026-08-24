@@ -108,7 +108,7 @@ def to_string(permission: Permission) -> str:
     """Serialize a Permission model to its canonical string form."""
     return from_components(
         action=permission.action,
-        resource_type=permission.type,
+        resource_type=permission.resource_type,
         attributes=permission.attributes,
     )
 

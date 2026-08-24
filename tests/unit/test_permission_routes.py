@@ -17,7 +17,7 @@ def _payload(user_id: str, **overrides) -> dict:
     base = {
         "user_id": user_id,
         "action": "read",
-        "type": "user",
+        "resource_type": "user",
     }
     base.update(overrides)
     return base
@@ -30,7 +30,7 @@ class TestCreatePermissionRoute:
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["action"] == "read"
-        assert body["type"] == "user"
+        assert body["resource_type"] == "user"
         assert uuid.UUID(body["id"])
 
     async def test_create_with_attributes(self, client: AsyncClient) -> None:
@@ -46,10 +46,10 @@ class TestCreatePermissionRoute:
         uid = await _make_user(client)
         resp = await client.post(
             "/permissions",
-            json=_payload(uid, type="permission"),
+            json=_payload(uid, resource_type="permission"),
         )
         assert resp.status_code == 201
-        assert resp.json()["type"] == "permission"
+        assert resp.json()["resource_type"] == "permission"
 
     async def test_create_all_action(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
@@ -63,7 +63,7 @@ class TestCreatePermissionRoute:
         assert resp.status_code == 422
 
     async def test_create_missing_user_id_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.post("/permissions", json={"action": "read", "type": "user"})
+        resp = await client.post("/permissions", json={"action": "read", "resource_type": "user"})
         assert resp.status_code == 422
 
 
@@ -92,9 +92,9 @@ class TestListPermissionsRoute:
     async def test_search_filtered_by_user(self, client: AsyncClient) -> None:
         uid1 = await _make_user(client, email="u1@example.com")
         uid2 = await _make_user(client, email="u2@example.com")
-        await client.post("/permissions", json=_payload(uid1, type="user"))
-        await client.post("/permissions", json=_payload(uid1, type="permission"))
-        await client.post("/permissions", json=_payload(uid2, type="user"))
+        await client.post("/permissions", json=_payload(uid1, resource_type="user"))
+        await client.post("/permissions", json=_payload(uid1, resource_type="permission"))
+        await client.post("/permissions", json=_payload(uid2, resource_type="user"))
         resp = await client.get(f"/permissions?user_id={uid1}")
         assert resp.status_code == 200
         body = resp.json()

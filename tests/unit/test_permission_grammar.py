@@ -130,7 +130,7 @@ class TestRoundTrip:
         perm = Permission(
             user_id=uuid.uuid4(),
             action=Action.READ,
-            type=ResourceType.USER,
+            resource_type=ResourceType.USER,
             attributes=["email"],
         )
         assert to_string(perm) == "read.email:user"
@@ -141,7 +141,7 @@ class TestRoundTrip:
         perm = Permission(
             user_id=uuid.uuid4(),
             action=Action.ALL,
-            type=ResourceType.PERMISSION,
+            resource_type=ResourceType.PERMISSION,
         )
         assert to_string(perm) == "all:permission"
 

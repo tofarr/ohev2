@@ -26,14 +26,14 @@ module permission {
     id: str,
     userId: str,
     act: Action,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   }
 
   // Config-level baseline grants applied to every authenticated user.
   type BaseGrant = {
     act: Action,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   }
 
@@ -43,8 +43,8 @@ module permission {
   // Immutable config-level baseline (fixed for the spec's lifetime).
   pure val basePermissions: Set[BaseGrant] =
     Set(
-      { act: Wildcard, resType: TUser, attributes: Set() },
-      { act: Wildcard, resType: TPermission, attributes: Set() }
+      { act: Wildcard, resourceType: TUser, attributes: Set() },
+      { act: Wildcard, resourceType: TPermission, attributes: Set() }
     )
 
   action init = all {
@@ -97,10 +97,10 @@ module permission {
   pure def permissionAllows(
     p: Permission,
     actVerb: str,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool = all {
-    p.resType == resType,
+    p.resourceType == resourceType,
     matchesAction(p, actVerb),
     matchesAttributes(p, attributes),
   }
@@ -109,10 +109,10 @@ module permission {
   pure def baseGrantAllows(
     g: BaseGrant,
     actVerb: str,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool = all {
-    g.resType == resType,
+    g.resourceType == resourceType,
     actionMatches(g.act, actVerb),
     attributesMatch(g.attributes, attributes),
   }
@@ -120,19 +120,19 @@ module permission {
   // Whether any base grant authorizes the request.
   pure def baseAllows(
     actVerb: str,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool =
-    basePermissions.exists(g => baseGrantAllows(g, actVerb, resType, attributes))
+    basePermissions.exists(g => baseGrantAllows(g, actVerb, resourceType, attributes))
 
   // Whether any permission in the set authorizes the request.
   pure def isAllowed(
     perms: Set[Permission],
     actVerb: str,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool =
-    perms.exists(p => permissionAllows(p, actVerb, resType, attributes))
+    perms.exists(p => permissionAllows(p, actVerb, resourceType, attributes))
 
   // Combined check: base grants OR per-user permissions.
   // This mirrors the runtime: base checked in-memory, DB queried only if base
@@ -140,12 +140,12 @@ module permission {
   pure def checkPermission(
     perms: Set[Permission],
     actVerb: str,
-    resType: ResourceType,
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool =
     or {
-      baseAllows(actVerb, resType, attributes),
-      isAllowed(perms, actVerb, resType, attributes),
+      baseAllows(actVerb, resourceType, attributes),
+      isAllowed(perms, actVerb, resourceType, attributes),
     }
 
   // --- Actions ---
@@ -205,7 +205,7 @@ module permission {
     id: "p1",
     userId: "u1",
     act: Read,
-    resType: TUser,
+    resourceType: TUser,
     attributes: Set(),
   }
 
@@ -213,7 +213,7 @@ module permission {
     id: "p1",
     userId: "u1",
     act: Read,
-    resType: TUser,
+    resourceType: TUser,
     attributes: Set("email", "name"),
   }
 
@@ -221,7 +221,7 @@ module permission {
     id: "p1",
     userId: "u1",
     act: Wildcard,
-    resType: TPermission,
+    resourceType: TPermission,
     attributes: Set(),
   }
 
@@ -252,7 +252,7 @@ module permission {
         id: "p1",
         userId: "u1",
         act: Update,
-        resType: TUser,
+        resourceType: TUser,
         attributes: Set(),
       }))
       .fail()
@@ -263,7 +263,7 @@ module permission {
       id: "p1",
       userId: "u1",
       act: Wildcard,
-      resType: TUser,
+      resourceType: TUser,
       attributes: Set(),
     }, "delete"))
   }
@@ -273,7 +273,7 @@ module permission {
       id: "p1",
       userId: "u1",
       act: Search,
-      resType: TUser,
+      resourceType: TUser,
       attributes: Set(),
     }, "search"))
   }
@@ -314,7 +314,7 @@ module permission {
             id: "p1",
             userId: "u1",
             act: Read,
-            resType: TPermission,
+            resourceType: TPermission,
             attributes: Set(),
           }),
           "read",

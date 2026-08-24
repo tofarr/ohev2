@@ -40,7 +40,9 @@ class PermissionDeniedError(Exception):
         self.user_id = user_id
         self.action = action
         self.resource_type = resource_type
-        super().__init__(f"Permission denied: user={user_id} action={action} type={resource_type}")
+        super().__init__(
+            f"Permission denied: user={user_id} action={action} resource_type={resource_type}"
+        )
 
 
 _base_permissions_cache: list[Permission] | None = None
@@ -62,7 +64,7 @@ def _load_base_permissions() -> list[Permission]:
         Permission(
             user_id=uuid.UUID(int=0),
             action=p.action,
-            type=p.resource_type,
+            resource_type=p.resource_type,
             attributes=p.attributes,
         )
         for p in parsed
@@ -84,7 +86,7 @@ def _base_allows(
 ) -> bool:
     """Whether the config baseline grants the request (no I/O)."""
     for perm in _load_base_permissions():
-        if perm.type is not resource_type:
+        if perm.resource_type is not resource_type:
             continue
         if not perm.matches_action(action):
             continue
@@ -104,7 +106,7 @@ class PermissionService:
         permission = Permission(
             user_id=payload.user_id,
             action=payload.action,
-            type=payload.type,
+            resource_type=payload.resource_type,
             attributes=payload.attributes,
         )
         self._session.add(permission)
@@ -174,14 +176,14 @@ class PermissionService:
     ) -> bool:
         """Single SQL EXISTS query for the per-user permission check.
 
-        Matches a row where: user_id matches, type matches, action is ALL or
+        Matches a row where: user_id matches, resource_type matches, action is ALL or
         the exact action, and (attributes is NULL OR attributes ⊇ requested).
         """
         stmt = (
             select(literal(1))
             .select_from(Permission)
             .where(Permission.user_id == user_id)
-            .where(Permission.type == resource_type)
+            .where(Permission.resource_type == resource_type)
             .where((Permission.action == Action.ALL) | (Permission.action == action))
         )
         if attributes:

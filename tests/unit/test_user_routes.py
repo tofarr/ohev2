@@ -230,7 +230,7 @@ class TestPermissionEnforcement:
             PermissionCreate(
                 user_id=principal_id,
                 action=Action.SEARCH,
-                type=ResourceType.USER,
+                resource_type=ResourceType.USER,
             )
         )
         await session.commit()
@@ -265,7 +265,7 @@ class TestPermissionEnforcement:
             PermissionCreate(
                 user_id=principal_id,
                 action=Action.SEARCH,
-                type=ResourceType.USER,
+                resource_type=ResourceType.USER,
             )
         )
         await session.commit()

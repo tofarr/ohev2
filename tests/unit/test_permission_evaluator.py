@@ -28,7 +28,7 @@ def _perm(
     return Permission(
         user_id=uuid.uuid4(),
         action=action,
-        type=resource_type,
+        resource_type=resource_type,
         attributes=attributes,
     )
 
@@ -103,7 +103,7 @@ class TestCheckPermissionDB:
         service = PermissionService(session)
         uid = await self._make_user(session)
         await service.create(
-            PermissionCreate(user_id=uid, action=Action.READ, type=ResourceType.PERMISSION)
+            PermissionCreate(user_id=uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
         )
         assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
         assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
@@ -123,7 +123,7 @@ class TestCheckPermissionDB:
         service = PermissionService(session)
         uid = await self._make_user(session)
         await service.create(
-            PermissionCreate(user_id=uid, action=Action.ALL, type=ResourceType.USER)
+            PermissionCreate(user_id=uid, action=Action.ALL, resource_type=ResourceType.USER)
         )
         assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
 
@@ -145,7 +145,7 @@ class TestCheckPermissionDB:
             PermissionCreate(
                 user_id=uid,
                 action=Action.READ,
-                type=ResourceType.USER,
+                resource_type=ResourceType.USER,
                 attributes=["email"],
             )
         )

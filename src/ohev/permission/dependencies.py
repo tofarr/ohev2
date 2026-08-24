@@ -79,7 +79,9 @@ def require_permission(
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=(f"Permission denied: action={action.value} type={resource_type.value}"),
+                detail=(
+                    f"Permission denied: action={action.value} resource_type={resource_type.value}"
+                ),
             )
 
     return _guard

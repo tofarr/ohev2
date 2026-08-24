@@ -5,7 +5,7 @@ A Permission is an immutable grant record: a *principal* (user) is granted an
 *attributes*. The shape is intentionally minimal and extensible:
 
   - action ∈ {create, read, update, delete, search, use, all}
-  - type   ∈ {user, permission, …}  (extensible enum)
+  - type   ∈ {user, permission, …}  (extensible enum; column: resource_type)
   - attributes = ["email", "name"] | None  (None ⇒ all attributes)
 
 Permissions are immutable: there is no update operation. To change a grant,
@@ -55,7 +55,7 @@ class ResourceType(enum.StrEnum):
 class Permission(Base):
     """A single immutable authorization grant.
 
-    `(user_id, action, type, attributes)` identifies a grant. There is no
+    `(user_id, action, resource_type, attributes)` identifies a grant. There is no
     `updated_at` and no update operation — permissions are delete-and-recreate.
     """
 
@@ -77,7 +77,8 @@ class Permission(Base):
         Enum(Action, name="permission_action", values_callable=lambda x: [e.value for e in x]),
     )
     # Fields without defaults must precede defaulted ones in MappedAsDataclass.
-    type: Mapped[ResourceType] = mapped_column(
+    resource_type: Mapped[ResourceType] = mapped_column(
+        "resource_type",
         Enum(
             ResourceType,
             name="permission_resource_type",

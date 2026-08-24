@@ -17,7 +17,7 @@ class PermissionCreate(BaseModel):
 
     user_id: uuid.UUID
     action: Action = Action.READ
-    type: ResourceType
+    resource_type: ResourceType
     attributes: list[str] | None = None
 
 
@@ -29,7 +29,7 @@ class PermissionRead(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     action: Action
-    type: ResourceType
+    resource_type: ResourceType
     attributes: list[str] | None
     created_at: datetime
 
