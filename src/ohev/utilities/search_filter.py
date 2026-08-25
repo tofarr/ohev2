@@ -48,6 +48,7 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from typing import Any, Generic, TypeVar, cast
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
@@ -61,6 +62,18 @@ T = TypeVar("T")
 # Each maps to (sql_builder, in_memory_predicate). The SQL builder receives
 # the SQLAlchemy column and the filter value; the in-memory predicate receives
 # the item's attribute value and the filter value.
+
+
+def _naive(value: Any) -> Any:
+    """Strip tzinfo from aware datetimes.
+
+    ORM timestamp columns use `func.now()` (naive, server-side); comparing them
+    against an aware datetime raises an asyncpg offset mismatch. Normalizing to
+    naive keeps comparison operators safe for timestamp columns.
+    """
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
 
 def _sql_contains(column: Any, value: Any) -> Any:
@@ -85,11 +98,11 @@ def _in_mem_contains(attr_value: Any, value: Any) -> bool:
 
 _OPS: dict[str, tuple[Callable[[Any, Any], Any], Callable[[Any, Any], bool]]] = {
     "contains": (_sql_contains, _in_mem_contains),
-    "eq": (lambda c, v: c == v, operator.eq),
-    "lt": (lambda c, v: c < v, operator.lt),
-    "lte": (lambda c, v: c <= v, operator.le),
-    "gt": (lambda c, v: c > v, operator.gt),
-    "gte": (lambda c, v: c >= v, operator.ge),
+    "eq": (lambda c, v: c == _naive(v), operator.eq),
+    "lt": (lambda c, v: c < _naive(v), operator.lt),
+    "lte": (lambda c, v: c <= _naive(v), operator.le),
+    "gt": (lambda c, v: c > _naive(v), operator.gt),
+    "gte": (lambda c, v: c >= _naive(v), operator.ge),
 }
 
 _SEPARATOR = "__"

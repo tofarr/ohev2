@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.permission.models.permission import Action, ResourceType
-from ohev.permission.schemas import PermissionCreate
+from ohev.permission.schemas import PermissionCreate, PermissionSearchFilter
 from ohev.permission.services import (
     PermissionNotFoundError,
     PermissionService,
@@ -90,9 +90,33 @@ class TestListPermissions:
         await service.create(_create_payload(uid1, resource_type=ResourceType.PERMISSION))
         await service.create(_create_payload(uid2, resource_type=ResourceType.USER))
 
-        perms, _ = await service.search_permissions(user_id=uid1)
+        perms, _ = await service.search_permissions(
+            search_filter=PermissionSearchFilter(user_id__eq=uid1)
+        )
         assert len(perms) == 2
         assert all(p.user_id == uid1 for p in perms)
+
+    async def test_search_filtered_by_action_and_resource_type(
+        self, service: PermissionService, session
+    ) -> None:
+        uid = await _make_user(session)
+        await service.create(
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.USER)
+        )
+        await service.create(
+            _create_payload(uid, action=Action.CREATE, resource_type=ResourceType.USER)
+        )
+        await service.create(
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
+        )
+        perms, _ = await service.search_permissions(
+            search_filter=PermissionSearchFilter(
+                action__eq=Action.READ, resource_type__eq=ResourceType.USER
+            )
+        )
+        assert len(perms) == 1
+        assert perms[0].action is Action.READ
+        assert perms[0].resource_type is ResourceType.USER
 
     async def test_search_pagination(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)

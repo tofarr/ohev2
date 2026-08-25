@@ -7,7 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ohev.permission.models.permission import Action, ResourceType
+from ohev.permission.models.permission import Action, Permission, ResourceType
+from ohev.utilities.search_filter import BaseSearchFilter
 
 
 class PermissionCreate(BaseModel):
@@ -32,6 +33,34 @@ class PermissionRead(BaseModel):
     resource_type: ResourceType
     attributes: list[str] | None
     created_at: datetime
+
+
+class PermissionSearchFilter(BaseSearchFilter[Permission]):
+    """Optional filter clauses for `GET /permissions`.
+
+    Field names follow the `<attr>__<op>` convention. Every field is optional;
+    an unset filter matches everything. `user_id__eq` replaces the legacy
+    `user_id` query param so filtering keys are uniform across resources
+    (AGENTS.md §3).
+    """
+
+    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    action__eq: Action | None = Field(default=None, description="Exact action match.")
+    resource_type__eq: ResourceType | None = Field(
+        default=None, description="Exact resource type match."
+    )
+    created_at__gte: datetime | None = Field(
+        default=None, description="ISO 8601; permissions created at or after."
+    )
+    created_at__lt: datetime | None = Field(
+        default=None, description="ISO 8601; permissions created before."
+    )
+    created_at__gt: datetime | None = Field(
+        default=None, description="ISO 8601; permissions created strictly after."
+    )
+    created_at__lte: datetime | None = Field(
+        default=None, description="ISO 8601; permissions created at or before."
+    )
 
 
 class PermissionSearchResult(BaseModel):

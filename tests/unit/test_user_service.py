@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.schemas import UserCreate, UserUpdate
+from ohev.user.schemas import UserCreate, UserSearchFilter, UserUpdate
 from ohev.user.services import UserEmailConflictError, UserNotFoundError, UserService
 
 
@@ -92,7 +92,9 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="Alice@Example.com"))
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="charlie@other.org"))
-        users, _ = await service.search_users(email_contains="EXAMPLE")
+        users, _ = await service.search_users(
+            search_filter=UserSearchFilter(email__contains="EXAMPLE")
+        )
         emails = {u.email for u in users}
         assert emails == {"Alice@example.com", "bob@example.com"}
 
@@ -100,14 +102,27 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="alice@example.com"))
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="charlie@other.org"))
-        users, _ = await service.search_users(email_contains="alic")
+        users, _ = await service.search_users(
+            search_filter=UserSearchFilter(email__contains="alic")
+        )
         assert len(users) == 1
         assert users[0].email == "alice@example.com"
 
     async def test_email_contains_no_match(self, service: UserService) -> None:
         await service.create(UserCreate(email="alice@example.com"))
-        users, _ = await service.search_users(email_contains="nonexistent")
+        users, _ = await service.search_users(
+            search_filter=UserSearchFilter(email__contains="nonexistent")
+        )
         assert users == []
+
+    async def test_email_eq_exact_match(self, service: UserService) -> None:
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
+        users, _ = await service.search_users(
+            search_filter=UserSearchFilter(email__eq="alice@example.com")
+        )
+        assert len(users) == 1
+        assert users[0].email == "alice@example.com"
 
     async def test_created_at_gte(self, service: UserService) -> None:
         old = await service.create(UserCreate(email="old@example.com"))
@@ -115,7 +130,9 @@ class TestListUsersFilters:
         # between Python datetime.now() and PostgreSQL func.now().
         cutoff = old.created_at
         new = await service.create(UserCreate(email="new@example.com"))
-        users, _ = await service.search_users(created_at_gte=cutoff)
+        users, _ = await service.search_users(
+            search_filter=UserSearchFilter(created_at__gte=cutoff)
+        )
         ids = {u.id for u in users}
         assert new.id in ids
         assert old.id in ids
@@ -124,7 +141,7 @@ class TestListUsersFilters:
         old = await service.create(UserCreate(email="old@example.com"))
         cutoff = old.created_at
         await service.create(UserCreate(email="new@example.com"))
-        users, _ = await service.search_users(created_at_lt=cutoff)
+        users, _ = await service.search_users(search_filter=UserSearchFilter(created_at__lt=cutoff))
         ids = {u.id for u in users}
         assert old.id not in ids
         assert all(u.email != "new@example.com" for u in users)
@@ -137,8 +154,10 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="alice@other.org"))
         users, _ = await service.search_users(
-            email_contains="alice",
-            created_at_lt=datetime.now() + timedelta(days=1),
+            search_filter=UserSearchFilter(
+                email__contains="alice",
+                created_at__lt=datetime.now() + timedelta(days=1),
+            )
         )
         emails = {u.email for u in users}
         assert emails == {"alice@example.com", "alice@other.org"}
@@ -147,13 +166,13 @@ class TestListUsersFilters:
         for i in range(5):
             await service.create(UserCreate(email=f"user{i}@example.com"))
         users, next_cursor = await service.search_users(
-            email_contains="example",
+            search_filter=UserSearchFilter(email__contains="example"),
             limit=2,
         )
         assert len(users) == 2
         assert next_cursor is not None
         users2, next_cursor2 = await service.search_users(
-            email_contains="example",
+            search_filter=UserSearchFilter(email__contains="example"),
             cursor=next_cursor,
             limit=2,
         )
