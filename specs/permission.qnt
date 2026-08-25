@@ -182,6 +182,15 @@ module permission {
     true
   }
 
+  // Search: returns the subset of permissions matching a predicate. The
+  // predicate encodes the `<attr>__<op>` clauses from search_filter.qnt; an
+  // always-true predicate (empty filter) returns every permission. Read-only.
+  def search(pred: (Permission) => bool): Set[Permission] =
+    permissions.filter(pred)
+
+  pure def matchesUserIdEq(p: Permission, userId: str): bool =
+    p.userId == userId
+
   action step: bool = all {
     permissions' = permissions,
     knownUsers' = knownUsers,
@@ -333,6 +342,32 @@ module permission {
       .then(cascadeDeleteUser("u1"))
       .then(all {
         assert(permissions.size() == 0),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // An empty filter (always-true predicate) returns every permission.
+  run searchEmptyFilterReturnsAll = {
+    init
+      .then(registerUser("u1"))
+      .then(create(readAllUsers))
+      .then(all {
+        assert(search(_ => true).size() == 1),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // A userId__eq filter narrows to that user's permissions.
+  run searchFilterNarrowsByUserId = {
+    init
+      .then(registerUser("u1"))
+      .then(registerUser("u2"))
+      .then(create(readAllUsers))
+      .then(all {
+        assert(search(p => matchesUserIdEq(p, "u1")).size() == 1),
+        assert(search(p => matchesUserIdEq(p, "u2")).size() == 0),
         permissions' = permissions,
         knownUsers' = knownUsers,
       })

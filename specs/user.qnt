@@ -57,6 +57,15 @@ module user {
     true
   }
 
+  // Search: returns the subset of users matching a predicate. The predicate
+  // encodes the `<attr>__<op>` clauses from search_filter.qnt; an always-true
+  // predicate (empty filter) returns every user. Search is read-only.
+  def search(pred: (User) => bool): Set[User] =
+    users.filter(pred)
+
+  pure def matchesEmailContains(u: User, fragment: str): bool =
+    u.email == fragment
+
   action step: bool = all {
     users' = users,
     true
@@ -100,6 +109,28 @@ module user {
       .then(all {
         assert(not(users.contains({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))),
         assert(users.size() == 0),
+        users' = users,
+      })
+  }
+
+  // An empty filter (always-true predicate) returns every user.
+  run searchEmptyFilterReturnsAll = {
+    init
+      .then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(all {
+        assert(search(_ => true).size() == 2),
+        users' = users,
+      })
+  }
+
+  // A filter narrows the result set to matching users.
+  run searchFilterNarrowsResults = {
+    init
+      .then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(all {
+        assert(search(u => matchesEmailContains(u, "alice@example.com")).size() == 1),
         users' = users,
       })
   }

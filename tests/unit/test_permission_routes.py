@@ -95,7 +95,7 @@ class TestListPermissionsRoute:
         await client.post("/permissions", json=_payload(uid1, resource_type="user"))
         await client.post("/permissions", json=_payload(uid1, resource_type="permission"))
         await client.post("/permissions", json=_payload(uid2, resource_type="user"))
-        resp = await client.get(f"/permissions?user_id={uid1}")
+        resp = await client.get(f"/permissions?user_id__eq={uid1}")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["items"]) == 2
@@ -111,7 +111,7 @@ class TestListPermissionsRoute:
         assert body["next_cursor"] is not None
 
     async def test_search_invalid_user_id_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.get("/permissions?user_id=not-a-uuid")
+        resp = await client.get("/permissions?user_id__eq=not-a-uuid")
         assert resp.status_code == 422
 
 
@@ -134,10 +134,10 @@ class TestCascadeViaRoutes:
     async def test_deleting_user_removes_permissions(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
         await client.post("/permissions", json=_payload(uid))
-        resp = await client.get(f"/permissions?user_id={uid}")
+        resp = await client.get(f"/permissions?user_id__eq={uid}")
         assert len(resp.json()["items"]) == 1
         await client.delete(f"/users/{uid}")
-        resp = await client.get(f"/permissions?user_id={uid}")
+        resp = await client.get(f"/permissions?user_id__eq={uid}")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 

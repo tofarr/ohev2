@@ -21,7 +21,7 @@ from ohev.permission.models.permission import (
     Permission,
     ResourceType,
 )
-from ohev.permission.schemas import PermissionCreate
+from ohev.permission.schemas import PermissionCreate, PermissionSearchFilter
 from ohev.permission.services.permission_grammar import parse_many
 
 
@@ -129,14 +129,18 @@ class PermissionService:
     async def search_permissions(
         self,
         *,
-        user_id: uuid.UUID | None = None,
         cursor: uuid.UUID | None = None,
         limit: int = 50,
+        search_filter: PermissionSearchFilter | None = None,
     ) -> tuple[list[Permission], uuid.UUID | None]:
-        """Search permissions optionally filtered by user, keyed by id."""
+        """Search permissions, keyed by id.
+
+        Optional `search_filter` pushes its clauses into the SQL query via
+        `filter_sql`; `None` (or an all-`None` filter) matches everything.
+        """
         stmt = select(Permission).order_by(Permission.id)
-        if user_id is not None:
-            stmt = stmt.where(Permission.user_id == user_id)
+        if search_filter is not None:
+            stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
             stmt = stmt.where(Permission.id > cursor)
         stmt = stmt.limit(limit)

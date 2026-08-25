@@ -9,7 +9,6 @@ by a permission check (AGENTS.md §9).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -19,7 +18,7 @@ from ohev.permission.dependencies import (
     require_permission,
 )
 from ohev.permission.models.permission import Action, ResourceType
-from ohev.user.schemas import UserCreate, UserRead, UserSearchResult, UserUpdate
+from ohev.user.schemas import UserCreate, UserRead, UserSearchFilter, UserSearchResult, UserUpdate
 from ohev.user.services import (
     UserEmailConflictError,
     UserNotFoundError,
@@ -46,29 +45,20 @@ def _cursor(value: str) -> uuid.UUID:
 )
 async def search_users(
     session: SessionDep,
+    # `Depends()` (bare) lets FastAPI use the type annotation as the dependency
+    # callable and explode the model's fields as individual query params. A
+    # factory or `Annotated[..., Query()]` would NOT populate fields from query
+    # strings when sibling scalar `Query()` params are present.
+    search_filter: UserSearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    email__contains: Annotated[
-        str | None,
-        Query(alias="email__contains", description="Case-insensitive email substring"),
-    ] = None,
-    created_at__gte: Annotated[
-        datetime | None,
-        Query(alias="created_at__gte", description="ISO 8601; users created at or after"),
-    ] = None,
-    created_at__lt: Annotated[
-        datetime | None,
-        Query(alias="created_at__lt", description="ISO 8601; users created before"),
-    ] = None,
 ) -> UserSearchResult:
     service = UserService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     users, next_cursor = await service.search_users(
         cursor=cursor_uuid,
         limit=limit,
-        email_contains=email__contains,
-        created_at_gte=created_at__gte,
-        created_at_lt=created_at__lt,
+        search_filter=search_filter,
     )
     return UserSearchResult(
         items=[UserRead.model_validate(u) for u in users],

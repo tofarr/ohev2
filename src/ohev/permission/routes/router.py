@@ -21,6 +21,7 @@ from ohev.permission.models.permission import Action, ResourceType
 from ohev.permission.schemas import (
     PermissionCreate,
     PermissionRead,
+    PermissionSearchFilter,
     PermissionSearchResult,
 )
 from ohev.permission.services import (
@@ -49,14 +50,16 @@ def _cursor(value: str) -> uuid.UUID:
 )
 async def search_permissions(
     session: SessionDep,
-    user_id: Annotated[uuid.UUID | None, Query()] = None,
+    # See user router: bare `Depends()` is required so FastAPI explodes the
+    # filter model's fields as individual query params alongside scalar queries.
+    search_filter: PermissionSearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> PermissionSearchResult:
     service = PermissionService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     permissions, next_cursor = await service.search_permissions(
-        user_id=user_id, cursor=cursor_uuid, limit=limit
+        cursor=cursor_uuid, limit=limit, search_filter=search_filter
     )
     return PermissionSearchResult(
         items=[PermissionRead.model_validate(p) for p in permissions],
