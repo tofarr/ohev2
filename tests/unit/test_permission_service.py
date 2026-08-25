@@ -7,11 +7,12 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.models.permission import Action, SelectorKind
-from ohev.permission.schemas import PermissionCreate, PermissionUpdate
+from ohev.permission.models.permission import Action, ResourceType
+from ohev.permission.schemas import PermissionCreate
 from ohev.permission.services import (
     PermissionNotFoundError,
     PermissionService,
+    reset_base_permissions_cache,
 )
 from ohev.user.schemas import UserCreate
 from ohev.user.services import UserService
@@ -31,8 +32,7 @@ def _create_payload(user_id: uuid.UUID, **overrides) -> PermissionCreate:
     defaults = {
         "user_id": user_id,
         "action": Action.READ,
-        "resource_type": "users",
-        "selector_kind": SelectorKind.ALL,
+        "resource_type": ResourceType.USER,
     }
     defaults.update(overrides)
     return PermissionCreate(**defaults)
@@ -45,8 +45,7 @@ class TestCreatePermission:
         assert perm.id is not None
         assert perm.user_id == uid
         assert perm.action is Action.READ
-        assert perm.resource_type == "users"
-        assert perm.selector_kind is SelectorKind.ALL
+        assert perm.resource_type is ResourceType.USER
         assert perm.created_at is not None
 
     async def test_create_with_attributes(self, service: PermissionService, session) -> None:
@@ -54,27 +53,15 @@ class TestCreatePermission:
         perm = await service.create(_create_payload(uid, attributes=["email", "name"]))
         assert perm.attributes == ["email", "name"]
 
-    async def test_create_by_id_selector(self, service: PermissionService, session) -> None:
+    async def test_create_permission_type(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(
-            _create_payload(
-                uid,
-                selector_kind=SelectorKind.BY_ID,
-                selector_value="abc-123",
-            )
-        )
-        assert perm.selector_kind is SelectorKind.BY_ID
-        assert perm.selector_value == "abc-123"
+        perm = await service.create(_create_payload(uid, resource_type=ResourceType.PERMISSION))
+        assert perm.resource_type is ResourceType.PERMISSION
 
-    async def test_create_custom_action(self, service: PermissionService, session) -> None:
+    async def test_create_all_action(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(
-            _create_payload(
-                uid, action=Action.USE, custom_action="deploy", resource_type="sandboxes"
-            )
-        )
-        assert perm.action is Action.USE
-        assert perm.custom_action == "deploy"
+        perm = await service.create(_create_payload(uid, action=Action.ALL))
+        assert perm.action is Action.ALL
 
 
 class TestGetPermission:
@@ -90,53 +77,35 @@ class TestGetPermission:
 
 
 class TestListPermissions:
-    async def test_list_empty(self, service: PermissionService) -> None:
-        perms, next_cursor = await service.list_permissions()
+    async def test_search_empty(self, service: PermissionService) -> None:
+        perms, next_cursor = await service.search_permissions()
         assert perms == []
         assert next_cursor is None
 
-    async def test_list_filtered_by_user(self, service: PermissionService, session) -> None:
+    async def test_search_filtered_by_user(self, service: PermissionService, session) -> None:
         uid1 = await _make_user(session, email="first@example.com")
         uid2 = await _make_user(session, email="second@example.com")
 
-        await service.create(_create_payload(uid1, resource_type="users"))
-        await service.create(_create_payload(uid1, resource_type="sandboxes"))
-        await service.create(_create_payload(uid2, resource_type="users"))
+        await service.create(_create_payload(uid1, resource_type=ResourceType.USER))
+        await service.create(_create_payload(uid1, resource_type=ResourceType.PERMISSION))
+        await service.create(_create_payload(uid2, resource_type=ResourceType.USER))
 
-        perms, _ = await service.list_permissions(user_id=uid1)
+        perms, _ = await service.search_permissions(user_id=uid1)
         assert len(perms) == 2
         assert all(p.user_id == uid1 for p in perms)
 
-    async def test_list_pagination(self, service: PermissionService, session) -> None:
+    async def test_search_pagination(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        for rt in ["a", "b", "c", "d", "e"]:
-            await service.create(_create_payload(uid, resource_type=rt))
-        perms, next_cursor = await service.list_permissions(limit=2)
+        for act in [Action.CREATE, Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH]:
+            await service.create(_create_payload(uid, action=act))
+        perms, next_cursor = await service.search_permissions(limit=2)
         assert len(perms) == 2
         assert next_cursor is not None
-        perms2, next_cursor2 = await service.list_permissions(cursor=next_cursor, limit=2)
+        perms2, next_cursor2 = await service.search_permissions(cursor=next_cursor, limit=2)
         assert len(perms2) == 2
-        perms3, next_cursor3 = await service.list_permissions(cursor=next_cursor2, limit=2)
+        perms3, next_cursor3 = await service.search_permissions(cursor=next_cursor2, limit=2)
         assert len(perms3) == 1
         assert next_cursor3 is None
-
-
-class TestUpdatePermission:
-    async def test_update_action(self, service: PermissionService, session) -> None:
-        uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid))
-        updated = await service.update(perm.id, PermissionUpdate(action=Action.WRITE))
-        assert updated.action is Action.WRITE
-
-    async def test_update_attributes(self, service: PermissionService, session) -> None:
-        uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid))
-        updated = await service.update(perm.id, PermissionUpdate(attributes=["email"]))
-        assert updated.attributes == ["email"]
-
-    async def test_update_missing_raises(self, service: PermissionService) -> None:
-        with pytest.raises(PermissionNotFoundError):
-            await service.update(uuid.uuid4(), PermissionUpdate(action=Action.WRITE))
 
 
 class TestDeletePermission:
@@ -155,15 +124,118 @@ class TestDeletePermission:
 class TestListForUser:
     async def test_returns_all_user_permissions(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        await service.create(_create_payload(uid, resource_type="users"))
-        await service.create(_create_payload(uid, resource_type="sandboxes"))
-        perms = await service.list_for_user(uid)
+        await service.create(_create_payload(uid, resource_type=ResourceType.USER))
+        await service.create(_create_payload(uid, resource_type=ResourceType.PERMISSION))
+        perms = await service.search_for_user(uid)
         assert len(perms) == 2
 
     async def test_empty_for_user_with_none(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perms = await service.list_for_user(uid)
+        perms = await service.search_for_user(uid)
         assert perms == []
+
+
+class TestCheckPermission:
+    """Tests for the single-SQL-query permission check."""
+
+    async def test_base_grant_allows_without_db_row(
+        self, service: PermissionService, session
+    ) -> None:
+        """Config baseline grants all on user/permission — no DB row needed."""
+        uid = await _make_user(session)
+        assert await service.check_permission(uid, Action.READ, ResourceType.USER)
+        assert await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
+        assert await service.check_permission(uid, Action.DELETE, ResourceType.USER)
+
+    async def test_db_grant_allows_when_base_denies(
+        self, service: PermissionService, session, monkeypatch
+    ) -> None:
+        """With an empty baseline, a DB permission row grants the request."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        uid = await _make_user(session)
+        await service.create(
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
+        )
+        assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
+        assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
+
+    async def test_all_action_grants_any(self, service: PermissionService, session) -> None:
+        """An ALL-action permission covers any specific action via the DB path."""
+        uid = await _make_user(session)
+        await service.create(
+            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER)
+        )
+        # Base grants already allow these; the DB ALL row also returns True.
+        assert await service.check_permission(uid, Action.READ, ResourceType.USER)
+        assert await service.check_permission(uid, Action.DELETE, ResourceType.USER)
+
+    async def test_wrong_type_denied_via_db(
+        self, service: PermissionService, session, monkeypatch
+    ) -> None:
+        """A permission for USER does not grant access to PERMISSION."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        uid = await _make_user(session)
+        await service.create(
+            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER)
+        )
+        assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
+
+    async def test_attribute_subset_denies_unlisted(
+        self, service: PermissionService, session, monkeypatch
+    ) -> None:
+        """A permission with attributes subset denies unlisted attributes."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        uid = await _make_user(session)
+        await service.create(
+            _create_payload(
+                uid,
+                action=Action.READ,
+                resource_type=ResourceType.USER,
+                attributes=["email"],
+            )
+        )
+        assert await service.check_permission(
+            uid, Action.READ, ResourceType.USER, attributes=("email",)
+        )
+        assert not await service.check_permission(
+            uid, Action.READ, ResourceType.USER, attributes=("email", "password")
+        )
+
+    async def test_no_permission_denied(
+        self, service: PermissionService, session, monkeypatch
+    ) -> None:
+        """With empty baseline and no DB row, access is denied."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        uid = await _make_user(session)
+        assert not await service.check_permission(uid, Action.READ, ResourceType.USER)
 
 
 class TestCascadeDelete:

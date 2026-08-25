@@ -49,37 +49,37 @@ class TestGetUser:
 
 
 class TestListUsers:
-    async def test_list_empty(self, service: UserService) -> None:
-        users, next_cursor = await service.list_users()
+    async def test_search_empty(self, service: UserService) -> None:
+        users, next_cursor = await service.search_users()
         assert users == []
         assert next_cursor is None
 
-    async def test_list_returns_users(self, service: UserService) -> None:
+    async def test_search_returns_users(self, service: UserService) -> None:
         await service.create(UserCreate(email="a@example.com"))
         await service.create(UserCreate(email="b@example.com"))
-        users, next_cursor = await service.list_users()
+        users, next_cursor = await service.search_users()
         assert len(users) == 2
         assert next_cursor is None
 
-    async def test_list_pagination_with_limit(self, service: UserService) -> None:
+    async def test_search_pagination_with_limit(self, service: UserService) -> None:
         for i in range(5):
             await service.create(UserCreate(email=f"u{i}@example.com"))
-        users, next_cursor = await service.list_users(limit=2)
+        users, next_cursor = await service.search_users(limit=2)
         assert len(users) == 2
         assert next_cursor is not None
 
-        users2, next_cursor2 = await service.list_users(cursor=next_cursor, limit=2)
+        users2, next_cursor2 = await service.search_users(cursor=next_cursor, limit=2)
         assert len(users2) == 2
         assert next_cursor2 is not None
 
-        users3, next_cursor3 = await service.list_users(cursor=next_cursor2, limit=2)
+        users3, next_cursor3 = await service.search_users(cursor=next_cursor2, limit=2)
         assert len(users3) == 1
         assert next_cursor3 is None
 
-    async def test_list_sorted_by_id(self, service: UserService) -> None:
+    async def test_search_sorted_by_id(self, service: UserService) -> None:
         a = await service.create(UserCreate(email="a@example.com"))
         b = await service.create(UserCreate(email="b@example.com"))
-        users, _ = await service.list_users()
+        users, _ = await service.search_users()
         # List is ordered by id ascending; with random UUIDs the order is
         # deterministic but not insertion order.
         ids = [u.id for u in users]
@@ -92,7 +92,7 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="Alice@Example.com"))
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="charlie@other.org"))
-        users, _ = await service.list_users(email_contains="EXAMPLE")
+        users, _ = await service.search_users(email_contains="EXAMPLE")
         emails = {u.email for u in users}
         assert emails == {"Alice@example.com", "bob@example.com"}
 
@@ -100,13 +100,13 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="alice@example.com"))
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="charlie@other.org"))
-        users, _ = await service.list_users(email_contains="alic")
+        users, _ = await service.search_users(email_contains="alic")
         assert len(users) == 1
         assert users[0].email == "alice@example.com"
 
     async def test_email_contains_no_match(self, service: UserService) -> None:
         await service.create(UserCreate(email="alice@example.com"))
-        users, _ = await service.list_users(email_contains="nonexistent")
+        users, _ = await service.search_users(email_contains="nonexistent")
         assert users == []
 
     async def test_created_at_gte(self, service: UserService) -> None:
@@ -115,7 +115,7 @@ class TestListUsersFilters:
         # between Python datetime.now() and PostgreSQL func.now().
         cutoff = old.created_at
         new = await service.create(UserCreate(email="new@example.com"))
-        users, _ = await service.list_users(created_at_gte=cutoff)
+        users, _ = await service.search_users(created_at_gte=cutoff)
         ids = {u.id for u in users}
         assert new.id in ids
         assert old.id in ids
@@ -124,7 +124,7 @@ class TestListUsersFilters:
         old = await service.create(UserCreate(email="old@example.com"))
         cutoff = old.created_at
         await service.create(UserCreate(email="new@example.com"))
-        users, _ = await service.list_users(created_at_lt=cutoff)
+        users, _ = await service.search_users(created_at_lt=cutoff)
         ids = {u.id for u in users}
         assert old.id not in ids
         assert all(u.email != "new@example.com" for u in users)
@@ -136,7 +136,7 @@ class TestListUsersFilters:
         await service.create(UserCreate(email="alice@example.com"))
         await service.create(UserCreate(email="bob@example.com"))
         await service.create(UserCreate(email="alice@other.org"))
-        users, _ = await service.list_users(
+        users, _ = await service.search_users(
             email_contains="alice",
             created_at_lt=datetime.now() + timedelta(days=1),
         )
@@ -146,13 +146,13 @@ class TestListUsersFilters:
     async def test_filters_with_pagination(self, service: UserService) -> None:
         for i in range(5):
             await service.create(UserCreate(email=f"user{i}@example.com"))
-        users, next_cursor = await service.list_users(
+        users, next_cursor = await service.search_users(
             email_contains="example",
             limit=2,
         )
         assert len(users) == 2
         assert next_cursor is not None
-        users2, next_cursor2 = await service.list_users(
+        users2, next_cursor2 = await service.search_users(
             email_contains="example",
             cursor=next_cursor,
             limit=2,

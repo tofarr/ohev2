@@ -2,6 +2,8 @@
 
 Uniform REST surface (AGENTS.md §3). Supports filtering the collection by user
 via `?user_id=…` — a query param on the collection, never a bespoke route.
+Every endpoint is guarded by a permission check (AGENTS.md §9). Permissions are
+immutable, so there is no PATCH/UPDATE endpoint — delete and re-create.
 """
 
 from __future__ import annotations
@@ -10,14 +12,16 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.db import get_session
+from ohev.permission.dependencies import (
+    SessionDep,
+    require_permission,
+)
+from ohev.permission.models.permission import Action, ResourceType
 from ohev.permission.schemas import (
     PermissionCreate,
-    PermissionList,
     PermissionRead,
-    PermissionUpdate,
+    PermissionSearchResult,
 )
 from ohev.permission.services import (
     PermissionConflictError,
@@ -38,30 +42,39 @@ def _cursor(value: str) -> uuid.UUID:
         ) from exc
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
-
-
-@router.get("", response_model=PermissionList)
-async def list_permissions(
+@router.get(
+    "",
+    response_model=PermissionSearchResult,
+    dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))],
+)
+async def search_permissions(
     session: SessionDep,
     user_id: Annotated[uuid.UUID | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-) -> PermissionList:
+) -> PermissionSearchResult:
     service = PermissionService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
-    permissions, next_cursor = await service.list_permissions(
+    permissions, next_cursor = await service.search_permissions(
         user_id=user_id, cursor=cursor_uuid, limit=limit
     )
-    return PermissionList(
+    return PermissionSearchResult(
         items=[PermissionRead.model_validate(p) for p in permissions],
         next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,
     )
 
 
-@router.post("", response_model=PermissionRead, status_code=status.HTTP_201_CREATED)
-async def create_permission(payload: PermissionCreate, session: SessionDep) -> PermissionRead:
+@router.post(
+    "",
+    response_model=PermissionRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission(Action.CREATE, ResourceType.PERMISSION))],
+)
+async def create_permission(
+    payload: PermissionCreate,
+    session: SessionDep,
+) -> PermissionRead:
     service = PermissionService(session)
     try:
         permission = await service.create(payload)
@@ -74,7 +87,11 @@ async def create_permission(payload: PermissionCreate, session: SessionDep) -> P
     return PermissionRead.model_validate(permission)
 
 
-@router.get("/{permission_id}", response_model=PermissionRead)
+@router.get(
+    "/{permission_id}",
+    response_model=PermissionRead,
+    dependencies=[Depends(require_permission(Action.READ, ResourceType.PERMISSION))],
+)
 async def get_permission(permission_id: uuid.UUID, session: SessionDep) -> PermissionRead:
     service = PermissionService(session)
     try:
@@ -87,31 +104,15 @@ async def get_permission(permission_id: uuid.UUID, session: SessionDep) -> Permi
     return PermissionRead.model_validate(permission)
 
 
-@router.patch("/{permission_id}", response_model=PermissionRead)
-async def update_permission(
+@router.delete(
+    "/{permission_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_permission(Action.DELETE, ResourceType.PERMISSION))],
+)
+async def delete_permission(
     permission_id: uuid.UUID,
-    payload: PermissionUpdate,
     session: SessionDep,
-) -> PermissionRead:
-    service = PermissionService(session)
-    try:
-        permission = await service.update(permission_id, payload)
-    except PermissionNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Permission not found: {exc}",
-        ) from exc
-    except PermissionConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Permission already exists: {exc}",
-        ) from exc
-    await session.commit()
-    return PermissionRead.model_validate(permission)
-
-
-@router.delete("/{permission_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_permission(permission_id: uuid.UUID, session: SessionDep) -> None:
+) -> None:
     service = PermissionService(session)
     try:
         await service.delete(permission_id)

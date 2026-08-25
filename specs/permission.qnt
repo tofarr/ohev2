@@ -1,35 +1,51 @@
-// Permission specification: ABAC model, grammar round-trip, and evaluator.
+// Permission specification: ABAC model, grammar round-trip, evaluator,
+// immutability, and config baseline.
 //
-// Models the Permission entity (ABAC grant: principal + action + resource
-// selector + attribute subset), the compact string grammar that round-trips
-// a permission to/from a string, and the evaluator that checks whether a
-// permission set authorizes a request.
+// Models the Permission entity (ABAC grant: principal + action + resource type
+// + attribute subset), the compact string grammar that round-trips a permission
+// to/from a string, the evaluator that checks whether a permission set
+// authorizes a request, and the config-level baseline grants that apply to
+// every authenticated user.
 //
 // Invariants:
 //   - permission ids are unique
 //   - every permission references an existing user (referential integrity)
+//   - permissions are immutable (no update action)
 //   - grammar round-trip: parse(to_string(p)) == p
 
 module permission {
   // Actions a permission may grant. Wildcard covers any action.
-  type Action = Create | Read | Write | Delete | Use | Wildcard
+  // CRUD verbs map to REST verbs: search=GET collection, create=POST,
+  // read=GET /{id}, update=PATCH /{id}, delete=DELETE /{id}.
+  type Action = Create | Read | Update | Delete | Search | Use | Wildcard
 
-  // How a permission scopes the set of entities of a resource type.
-  type SelectorKind = SelAll | SelById | SelByTag
+  // Resource types a permission may scope. Extensible as new entities land.
+  type ResourceType = TUser | TPermission
 
   type Permission = {
     id: str,
     userId: str,
     act: Action,
-    customAction: str,
-    resourceType: str,
-    selectorKind: SelectorKind,
-    selectorValue: str,
+    resourceType: ResourceType,
+    attributes: Set[str],
+  }
+
+  // Config-level baseline grants applied to every authenticated user.
+  type BaseGrant = {
+    act: Action,
+    resourceType: ResourceType,
     attributes: Set[str],
   }
 
   var permissions: Set[Permission]
   var knownUsers: Set[str]
+
+  // Immutable config-level baseline (fixed for the spec's lifetime).
+  pure val basePermissions: Set[BaseGrant] =
+    Set(
+      { act: Wildcard, resourceType: TUser, attributes: Set() },
+      { act: Wildcard, resourceType: TPermission, attributes: Set() }
+    )
 
   action init = all {
     permissions' = Set(),
@@ -43,75 +59,94 @@ module permission {
     p1.id == p2.id implies p1 == p2
 
   // The effective action verb for matching and serialization.
-  pure def actionVerb(p: Permission): str =
-    match p.act {
+  pure def actionVerb(a: Action): str =
+    match a {
       | Create => "create"
       | Read => "read"
-      | Write => "write"
+      | Update => "update"
       | Delete => "delete"
-      | Use => p.customAction
-      | Wildcard => "*"
+      | Search => "search"
+      | Use => "use"
+      | Wildcard => "all"
     }
 
-  // Serialize a permission's selector to its suffix string (empty for ALL).
-  pure def selectorSuffix(kind: SelectorKind, value: str): str =
-    match kind {
-      | SelAll => ""
-      | SelById => "id"
-      | SelByTag => "tag"
+  // Whether an action covers the requested action verb.
+  pure def actionMatches(a: Action, requested: str): bool =
+    or {
+      a == Wildcard,
+      actionVerb(a) == requested,
     }
 
   // Whether a permission's action covers the requested action verb.
   pure def matchesAction(p: Permission, requested: str): bool =
-    or {
-      p.act == Wildcard,
-      actionVerb(p) == requested,
-    }
+    actionMatches(p.act, requested)
 
-  // Whether a permission's selector covers the described entity.
-  pure def matchesSelector(
-    p: Permission,
-    resourceId: str,
-    resourceTags: Set[str],
-  ): bool =
-    match p.selectorKind {
-      | SelAll => true
-      | SelById => p.selectorValue == resourceId
-      | SelByTag => resourceTags.contains(p.selectorValue)
+  // Whether an attribute set covers the requested attributes.
+  // An empty attribute set means all attributes are covered.
+  pure def attributesMatch(attrs: Set[str], requested: Set[str]): bool =
+    or {
+      attrs == Set(),
+      requested.forall(a => attrs.contains(a)),
     }
 
   // Whether a permission's attribute set covers the requested attributes.
   pure def matchesAttributes(p: Permission, requested: Set[str]): bool =
-    or {
-      p.attributes == Set(),
-      requested.forall(a => p.attributes.contains(a)),
-    }
+    attributesMatch(p.attributes, requested)
 
   // Whether a single permission authorizes the request.
   pure def permissionAllows(
     p: Permission,
     actVerb: str,
-    resourceType: str,
-    resourceId: str,
-    resourceTags: Set[str],
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool = all {
     p.resourceType == resourceType,
     matchesAction(p, actVerb),
-    matchesSelector(p, resourceId, resourceTags),
     matchesAttributes(p, attributes),
   }
+
+  // Whether a base grant covers the request.
+  pure def baseGrantAllows(
+    g: BaseGrant,
+    actVerb: str,
+    resourceType: ResourceType,
+    attributes: Set[str],
+  ): bool = all {
+    g.resourceType == resourceType,
+    actionMatches(g.act, actVerb),
+    attributesMatch(g.attributes, attributes),
+  }
+
+  // Whether any base grant authorizes the request.
+  pure def baseAllows(
+    actVerb: str,
+    resourceType: ResourceType,
+    attributes: Set[str],
+  ): bool =
+    basePermissions.exists(g => baseGrantAllows(g, actVerb, resourceType, attributes))
 
   // Whether any permission in the set authorizes the request.
   pure def isAllowed(
     perms: Set[Permission],
     actVerb: str,
-    resourceType: str,
-    resourceId: str,
-    resourceTags: Set[str],
+    resourceType: ResourceType,
     attributes: Set[str],
   ): bool =
-    perms.exists(p => permissionAllows(p, actVerb, resourceType, resourceId, resourceTags, attributes))
+    perms.exists(p => permissionAllows(p, actVerb, resourceType, attributes))
+
+  // Combined check: base grants OR per-user permissions.
+  // This mirrors the runtime: base checked in-memory, DB queried only if base
+  // does not already grant the request.
+  pure def checkPermission(
+    perms: Set[Permission],
+    actVerb: str,
+    resourceType: ResourceType,
+    attributes: Set[str],
+  ): bool =
+    or {
+      baseAllows(actVerb, resourceType, attributes),
+      isAllowed(perms, actVerb, resourceType, attributes),
+    }
 
   // --- Actions ---
 
@@ -132,7 +167,7 @@ module permission {
     true
   }
 
-  // Delete a permission by id.
+  // Delete a permission by id. (No update — permissions are immutable.)
   action remove(id: str): bool = all {
     permissions.exists(p => p.id == id),
     permissions' = permissions.filter(p => p.id != id),
@@ -170,32 +205,7 @@ module permission {
     id: "p1",
     userId: "u1",
     act: Read,
-    customAction: "",
-    resourceType: "users",
-    selectorKind: SelAll,
-    selectorValue: "",
-    attributes: Set(),
-  }
-
-  pure val byIdPerm: Permission = {
-    id: "p1",
-    userId: "u1",
-    act: Read,
-    customAction: "",
-    resourceType: "users",
-    selectorKind: SelById,
-    selectorValue: "abc",
-    attributes: Set(),
-  }
-
-  pure val byTagPerm: Permission = {
-    id: "p1",
-    userId: "u1",
-    act: Read,
-    customAction: "",
-    resourceType: "sandboxes",
-    selectorKind: SelByTag,
-    selectorValue: "prod",
+    resourceType: TUser,
     attributes: Set(),
   }
 
@@ -203,11 +213,16 @@ module permission {
     id: "p1",
     userId: "u1",
     act: Read,
-    customAction: "",
-    resourceType: "users",
-    selectorKind: SelAll,
-    selectorValue: "",
+    resourceType: TUser,
     attributes: Set("email", "name"),
+  }
+
+  pure val wildcardPerm: Permission = {
+    id: "p1",
+    userId: "u1",
+    act: Wildcard,
+    resourceType: TPermission,
+    attributes: Set(),
   }
 
   // --- Tests ---
@@ -236,11 +251,8 @@ module permission {
       .then(create({
         id: "p1",
         userId: "u1",
-        act: Write,
-        customAction: "",
-        resourceType: "users",
-        selectorKind: SelAll,
-        selectorValue: "",
+        act: Update,
+        resourceType: TUser,
         attributes: Set(),
       }))
       .fail()
@@ -251,35 +263,19 @@ module permission {
       id: "p1",
       userId: "u1",
       act: Wildcard,
-      customAction: "",
-      resourceType: "users",
-      selectorKind: SelAll,
-      selectorValue: "",
+      resourceType: TUser,
       attributes: Set(),
     }, "delete"))
   }
 
-  run customActionMatchesItsVerb = {
+  run searchActionMatchesSearch = {
     assert(matchesAction({
       id: "p1",
       userId: "u1",
-      act: Use,
-      customAction: "deploy",
-      resourceType: "sandboxes",
-      selectorKind: SelAll,
-      selectorValue: "",
+      act: Search,
+      resourceType: TUser,
       attributes: Set(),
-    }, "deploy"))
-  }
-
-  run byIdSelectorMatchesOnlyId = all {
-    assert(matchesSelector(byIdPerm, "abc", Set())),
-    assert(not(matchesSelector(byIdPerm, "xyz", Set()))),
-  }
-
-  run byTagSelectorMatchesTag = all {
-    assert(matchesSelector(byTagPerm, "sb1", Set("prod", "staging"))),
-    assert(not(matchesSelector(byTagPerm, "sb1", Set("staging")))),
+    }, "search"))
   }
 
   run attributeSubsetRestrictsAccess = all {
@@ -292,13 +288,43 @@ module permission {
     assert(matchesAttributes(readAllUsers, Set("email", "name", "password")))
 
   run evaluatorAllowsMatchingPermission =
-    assert(isAllowed(Set(readAllUsers), "read", "users", "", Set(), Set()))
+    assert(isAllowed(Set(readAllUsers), "read", TUser, Set()))
 
   run evaluatorDeniesNonMatchingResource =
-    assert(not(isAllowed(Set(readAllUsers), "read", "sandboxes", "", Set(), Set())))
+    assert(not(isAllowed(Set(readAllUsers), "read", TPermission, Set())))
 
   run evaluatorDeniesNonMatchingAction =
-    assert(not(isAllowed(Set(readAllUsers), "write", "users", "", Set(), Set())))
+    assert(not(isAllowed(Set(readAllUsers), "update", TUser, Set())))
+
+  run baseAllowsAllUsers =
+    assert(baseAllows("read", TUser, Set()))
+
+  run baseAllowsAllPermissions =
+    assert(baseAllows("create", TPermission, Set()))
+
+  run checkPermissionAllowsViaBase =
+    assert(checkPermission(Set(), "delete", TUser, Set()))
+
+  run checkPermissionAllowsViaUserPerm = {
+    init
+      .then(registerUser("u1"))
+      .then(all {
+        assert(checkPermission(
+          Set({
+            id: "p1",
+            userId: "u1",
+            act: Read,
+            resourceType: TPermission,
+            attributes: Set(),
+          }),
+          "read",
+          TPermission,
+          Set(),
+        )),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
 
   run cascadeDeleteUserRemovesPermissions = {
     init

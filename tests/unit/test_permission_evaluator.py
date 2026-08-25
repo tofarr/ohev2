@@ -1,145 +1,173 @@
-"""Unit tests for the PermissionEvaluator (pure, no database)."""
+"""Unit tests for permission matching and the check_permission service method.
+
+The model-level `matches_action` and `matches_attributes` methods are pure and
+tested without a database. The `check_permission` service method is DB-backed
+and tested via the session fixture.
+"""
 
 from __future__ import annotations
 
 import uuid
 
-from ohev.permission.models.permission import Action, Permission, SelectorKind
-from ohev.permission.services import PermissionEvaluator
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ohev.permission.models.permission import Action, Permission, ResourceType
+from ohev.permission.schemas import PermissionCreate
+from ohev.permission.services import PermissionService, reset_base_permissions_cache
+from ohev.user.schemas import UserCreate
+from ohev.user.services import UserService
 
 
 def _perm(
     *,
     action: Action = Action.READ,
-    resource_type: str = "users",
-    selector_kind: SelectorKind = SelectorKind.ALL,
-    selector_value: str | None = None,
+    resource_type: ResourceType = ResourceType.USER,
     attributes: list[str] | None = None,
-    custom_action: str | None = None,
 ) -> Permission:
     return Permission(
         user_id=uuid.uuid4(),
         action=action,
         resource_type=resource_type,
-        selector_kind=selector_kind,
-        selector_value=selector_value,
         attributes=attributes,
-        custom_action=custom_action,
     )
 
 
 class TestActionMatching:
     def test_exact_action_match(self) -> None:
-        ev = PermissionEvaluator([_perm(action=Action.READ)])
-        assert ev.is_allowed(action="read", resource_type="users")
+        assert _perm(action=Action.READ).matches_action("read")
 
     def test_wrong_action_denied(self) -> None:
-        ev = PermissionEvaluator([_perm(action=Action.READ)])
-        assert not ev.is_allowed(action="write", resource_type="users")
+        assert not _perm(action=Action.READ).matches_action("update")
 
     def test_wildcard_action_covers_all(self) -> None:
-        ev = PermissionEvaluator([_perm(action=Action.ALL)])
-        assert ev.is_allowed(action="read", resource_type="users")
-        assert ev.is_allowed(action="write", resource_type="users")
-        assert ev.is_allowed(action="delete", resource_type="users")
+        perm = _perm(action=Action.ALL)
+        assert perm.matches_action("read")
+        assert perm.matches_action("update")
+        assert perm.matches_action("delete")
+        assert perm.matches_action("search")
 
-    def test_custom_action_matches_verb(self) -> None:
-        ev = PermissionEvaluator(
-            [_perm(action=Action.USE, custom_action="deploy", resource_type="sandboxes")]
-        )
-        assert ev.is_allowed(action="deploy", resource_type="sandboxes")
-        assert not ev.is_allowed(action="read", resource_type="sandboxes")
+    def test_search_action_matches(self) -> None:
+        assert _perm(action=Action.SEARCH).matches_action("search")
 
-    def test_wrong_resource_type_denied(self) -> None:
-        ev = PermissionEvaluator([_perm(resource_type="users")])
-        assert not ev.is_allowed(action="read", resource_type="sandboxes")
-
-
-class TestSelectorMatching:
-    def test_all_selector_covers_any_entity(self) -> None:
-        ev = PermissionEvaluator([_perm()])
-        assert ev.is_allowed(action="read", resource_type="users", resource_id="any-id")
-
-    def test_by_id_matches_specific_entity(self) -> None:
-        ev = PermissionEvaluator([_perm(selector_kind=SelectorKind.BY_ID, selector_value="123")])
-        assert ev.is_allowed(action="read", resource_type="users", resource_id="123")
-
-    def test_by_id_denies_other_entity(self) -> None:
-        ev = PermissionEvaluator([_perm(selector_kind=SelectorKind.BY_ID, selector_value="123")])
-        assert not ev.is_allowed(action="read", resource_type="users", resource_id="456")
-
-    def test_by_tag_matches_entity_with_tag(self) -> None:
-        ev = PermissionEvaluator([_perm(selector_kind=SelectorKind.BY_TAG, selector_value="prod")])
-        assert ev.is_allowed(
-            action="read", resource_type="users", resource_tags=("prod", "staging")
-        )
-
-    def test_by_tag_denies_entity_without_tag(self) -> None:
-        ev = PermissionEvaluator([_perm(selector_kind=SelectorKind.BY_TAG, selector_value="prod")])
-        assert not ev.is_allowed(action="read", resource_type="users", resource_tags=("staging",))
-
-    def test_by_tag_denies_no_tags(self) -> None:
-        ev = PermissionEvaluator([_perm(selector_kind=SelectorKind.BY_TAG, selector_value="prod")])
-        assert not ev.is_allowed(action="read", resource_type="users", resource_tags=())
+    def test_use_action_matches(self) -> None:
+        assert _perm(action=Action.USE).matches_action("use")
 
 
 class TestAttributeMatching:
     def test_no_attribute_restriction_covers_all(self) -> None:
-        ev = PermissionEvaluator([_perm()])
-        assert ev.is_allowed(action="read", resource_type="users", attributes=("email", "name"))
+        perm = _perm()
+        assert perm.matches_attributes(["email", "name"])
 
     def test_attribute_subset_covers_requested(self) -> None:
-        ev = PermissionEvaluator([_perm(attributes=["email", "name"])])
-        assert ev.is_allowed(action="read", resource_type="users", attributes=("email",))
+        perm = _perm(attributes=["email", "name"])
+        assert perm.matches_attributes(["email"])
 
     def test_attribute_subset_denies_unlisted(self) -> None:
-        ev = PermissionEvaluator([_perm(attributes=["email"])])
-        assert not ev.is_allowed(
-            action="read", resource_type="users", attributes=("email", "password")
-        )
+        perm = _perm(attributes=["email"])
+        assert not perm.matches_attributes(["email", "password"])
 
     def test_empty_requested_attributes_allowed(self) -> None:
-        ev = PermissionEvaluator([_perm(attributes=["email"])])
-        assert ev.is_allowed(action="read", resource_type="users", attributes=())
+        perm = _perm(attributes=["email"])
+        assert perm.matches_attributes([])
 
 
-class TestCombined:
-    def test_empty_permissions_denies_everything(self) -> None:
-        ev = PermissionEvaluator([])
-        assert not ev.is_allowed(action="read", resource_type="users")
+class TestCheckPermissionDB:
+    """DB-backed tests for PermissionService.check_permission."""
 
-    def test_multiple_permissions_any_match(self) -> None:
-        ev = PermissionEvaluator(
-            [
-                _perm(action=Action.READ, resource_type="users"),
-                _perm(action=Action.WRITE, resource_type="sandboxes"),
-            ]
-        )
-        assert ev.is_allowed(action="read", resource_type="users")
-        assert ev.is_allowed(action="write", resource_type="sandboxes")
-        assert not ev.is_allowed(action="delete", resource_type="users")
+    async def _make_user(
+        self, session: AsyncSession, email: str = "check@example.com"
+    ) -> uuid.UUID:
+        user = await UserService(session).create(UserCreate(email=email))
+        return user.id
 
-    def test_full_combination(self) -> None:
-        ev = PermissionEvaluator(
-            [
-                _perm(
-                    action=Action.ALL,
-                    resource_type="sandboxes",
-                    selector_kind=SelectorKind.BY_TAG,
-                    selector_value="prod",
-                    attributes=["name", "status"],
-                )
-            ]
+    async def test_base_grant_allows_without_db(self, session: AsyncSession) -> None:
+        """Config baseline grants all on user/permission — no DB row needed."""
+        service = PermissionService(session)
+        uid = await self._make_user(session)
+        assert await service.check_permission(uid, Action.READ, ResourceType.USER)
+        assert await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
+
+    async def test_db_grant_allows_when_base_empty(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With an empty baseline, a DB permission row grants the request."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        service = PermissionService(session)
+        uid = await self._make_user(session)
+        await service.create(
+            PermissionCreate(user_id=uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
         )
-        assert ev.is_allowed(
-            action="read",
-            resource_type="sandboxes",
-            resource_tags=("prod",),
-            attributes=("name",),
+        assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
+        assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
+
+    async def test_wrong_type_denied_via_db(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission for USER does not grant access to PERMISSION."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        service = PermissionService(session)
+        uid = await self._make_user(session)
+        await service.create(
+            PermissionCreate(user_id=uid, action=Action.ALL, resource_type=ResourceType.USER)
         )
-        assert not ev.is_allowed(
-            action="read",
-            resource_type="sandboxes",
-            resource_tags=("dev",),
-            attributes=("name",),
+        assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
+
+    async def test_attribute_subset_denies_unlisted(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission with attributes subset denies unlisted attributes."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        service = PermissionService(session)
+        uid = await self._make_user(session)
+        await service.create(
+            PermissionCreate(
+                user_id=uid,
+                action=Action.READ,
+                resource_type=ResourceType.USER,
+                attributes=["email"],
+            )
         )
+        assert await service.check_permission(
+            uid, Action.READ, ResourceType.USER, attributes=("email",)
+        )
+        assert not await service.check_permission(
+            uid, Action.READ, ResourceType.USER, attributes=("email", "password")
+        )
+
+    async def test_no_permission_denied(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With empty baseline and no DB row, access is denied."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        service = PermissionService(session)
+        uid = await self._make_user(session)
+        assert not await service.check_permission(uid, Action.READ, ResourceType.USER)

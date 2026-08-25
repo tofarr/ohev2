@@ -31,13 +31,24 @@ _TEST_DB_URL = (
     else os.environ.get("OHEV_DATABASE_URL", "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev")
 )
 
+# Default test principal — sent as X-User-Id so the permission flow is exercised.
+_TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+
 
 def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point AppConfig at the test database and reset cached engine/factory."""
     get_config.cache_clear()
     reset_engine_factory()
+    from ohev.permission.services import reset_base_permissions_cache
+
+    reset_base_permissions_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
     monkeypatch.setenv("OHEV_DATABASE_URL", _TEST_DB_URL)
+    # Baseline grants that allow all CRUD-L on user and permission resources so
+    # existing service/route tests pass without per-user DB permissions. Tests
+    # that verify denial override this env var locally.
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "all:user")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
 
 
 @pytest_asyncio.fixture
@@ -93,13 +104,21 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
 
 @pytest_asyncio.fixture
 async def client(app) -> AsyncGenerator[AsyncClient, None]:
-    """An async HTTP client backed by the test app."""
+    """An async HTTP client backed by the test app.
+
+    Sends a default X-User-Id header so every request is authenticated as the
+    test principal, satisfying the permission dependencies' auth requirement.
+    """
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-User-Id": str(_TEST_USER_ID)},
+    ) as ac:
         yield ac
 
 
 @pytest.fixture
 def user_id() -> uuid.UUID:
     """A deterministic user id for permission fixtures."""
-    return uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+    return _TEST_USER_ID

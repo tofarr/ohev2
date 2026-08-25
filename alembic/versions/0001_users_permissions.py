@@ -36,20 +36,25 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column(
             "action",
-            sa.Enum("*", "create", "read", "write", "delete", "use", name="permission_action"),
+            sa.Enum(
+                "all",
+                "create",
+                "read",
+                "update",
+                "delete",
+                "search",
+                "use",
+                name="permission_action",
+            ),
             nullable=False,
         ),
-        sa.Column("resource_type", sa.String(length=64), nullable=False),
-        sa.Column("custom_action", sa.String(length=64), nullable=True),
         sa.Column(
-            "selector_kind",
-            sa.Enum("all", "by_id", "by_tag", name="permission_selector_kind"),
+            "resource_type",
+            sa.Enum("user", "permission", name="permission_resource_type"),
             nullable=False,
         ),
-        sa.Column("selector_value", sa.String(length=255), nullable=True),
         sa.Column("attributes", postgresql.ARRAY(sa.String()), nullable=True),
         sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(
             ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_permissions_user_id_users"
         ),
@@ -64,7 +69,7 @@ def downgrade() -> None:
     op.drop_index("ix_permissions_resource_type", table_name="permissions")
     op.drop_index("ix_permissions_user_id", table_name="permissions")
     op.drop_table("permissions")
-    sa.Enum(name="permission_selector_kind").drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name="permission_resource_type").drop(op.get_bind(), checkfirst=True)
     sa.Enum(name="permission_action").drop(op.get_bind(), checkfirst=True)
     op.drop_index("ix_users_email", table_name="users")
     op.drop_table("users")

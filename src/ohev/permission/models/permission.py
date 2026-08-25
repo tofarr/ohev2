@@ -1,18 +1,16 @@
 """ORM model for the permission feature.
 
-A Permission is a policy record of the form: a *principal* (user) is granted an
-*action* over a *resource* (type + selector) optionally restricted to a subset of
-*attributes*. This single shape covers all the scoping cases discussed:
+A Permission is an immutable grant record: a *principal* (user) is granted an
+*action* over a *resource type*, optionally restricted to a subset of
+*attributes*. The shape is intentionally minimal and extensible:
 
-  - all entities of a type   -> selector_kind = ALL
-  - subset by tag            -> selector_kind = BY_TAG
-  - single entity            -> selector_kind = BY_ID
-  - read/write/create/delete -> action in {create, read, write, delete}
-  - non-CRUD action          -> action = custom verb (e.g. "use")
-  - attribute subset         -> attributes = ["email", "name"]
+  - action ∈ {create, read, update, delete, search, use, all}
+  - type   ∈ {user, permission, …}  (extensible enum; column: resource_type)
+  - attributes = ["email", "name"] | None  (None ⇒ all attributes)
 
-`action = "*"` is a wildcard matching any action. The string grammar that
-round-trips a Permission to/from a compact string lives in
+Permissions are immutable: there is no update operation. To change a grant,
+delete and re-create. `action = "all"` is a wildcard matching any action. The
+string grammar that round-trips a Permission to/from a compact string lives in
 `permission/services/permission_grammar.py`.
 """
 
@@ -33,32 +31,32 @@ from ohev.user.models.user import User
 class Action(enum.StrEnum):
     """Actions a permission may grant.
 
-    `ALL` (`*`) is a wildcard matching any action. CRUD verbs cover the standard
-    REST operations; non-CRUD verbs (e.g. `use` for an access token) are stored
-    as the literal string via the `CUSTOM` member plus `custom_action`.
+    `ALL` (`all`) is a wildcard matching any action. CRUD verbs cover the
+    standard REST operations; `SEARCH` covers collection retrieval, and `USE`
+    covers non-CRUD resource-scoped actions (e.g. using an access token).
     """
 
-    ALL = "*"
+    ALL = "all"
     CREATE = "create"
     READ = "read"
-    WRITE = "write"
+    UPDATE = "update"
     DELETE = "delete"
+    SEARCH = "search"
     USE = "use"
 
 
-class SelectorKind(enum.StrEnum):
-    """How a permission scopes the set of entities of a resource type."""
+class ResourceType(enum.StrEnum):
+    """Resource types a permission may scope. Extensible as new entities land."""
 
-    ALL = "all"
-    BY_ID = "by_id"
-    BY_TAG = "by_tag"
+    USER = "user"
+    PERMISSION = "permission"
 
 
 class Permission(Base):
-    """A single authorization grant.
+    """A single immutable authorization grant.
 
-    `(user_id, action, resource_type, selector_kind, selector_value, attributes)`
-    is unique — a principal gets at most one permission row per scoped resource.
+    `(user_id, action, resource_type, attributes)` identifies a grant. There is no
+    `updated_at` and no update operation — permissions are delete-and-recreate.
     """
 
     __tablename__ = "permissions"
@@ -79,24 +77,14 @@ class Permission(Base):
         Enum(Action, name="permission_action", values_callable=lambda x: [e.value for e in x]),
     )
     # Fields without defaults must precede defaulted ones in MappedAsDataclass.
-    resource_type: Mapped[str] = mapped_column(String(64), index=True)
-    custom_action: Mapped[str | None] = mapped_column(
-        String(64),
-        default=None,
-        comment="Literal action verb when action is non-CRUD (e.g. 'use').",
-    )
-    selector_kind: Mapped[SelectorKind] = mapped_column(
+    resource_type: Mapped[ResourceType] = mapped_column(
+        "resource_type",
         Enum(
-            SelectorKind,
-            name="permission_selector_kind",
+            ResourceType,
+            name="permission_resource_type",
             values_callable=lambda x: [e.value for e in x],
         ),
-        default=SelectorKind.ALL,
-    )
-    selector_value: Mapped[str | None] = mapped_column(
-        String(255),
-        default=None,
-        comment="Entity id (BY_ID) or tag (BY_TAG); null for ALL.",
+        index=True,
     )
     attributes: Mapped[list[str] | None] = mapped_column(
         ARRAY(String),
@@ -107,25 +95,17 @@ class Permission(Base):
         init=False,
         server_default=func.now(),
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
 
     user: Mapped[User] = relationship(init=False, lazy="selectin")
 
     def matches_action(self, requested: str) -> bool:
         """Whether this permission's action covers `requested`.
 
-        Wildcard `*` covers everything. CRUD actions match by value. A custom
-        action matches only its literal verb.
+        Wildcard `*` covers everything; otherwise the action value must match.
         """
         if self.action is Action.ALL:
             return True
-        if self.action.value == requested:
-            return True
-        return self.action is Action.USE and self.custom_action == requested
+        return self.action.value == requested
 
     def matches_attributes(self, requested: list[str]) -> bool:
         """Whether this permission covers the requested attributes.
