@@ -41,6 +41,11 @@ class TestCreateUser:
         with pytest.raises(ValueError):
             UserCreate(email="not-an-email")
 
+    async def test_create_defaults_to_unrestricted_scope(self, service: UserService) -> None:
+        # No perm_filter supplied: defaults to AllSearchFilter (unrestricted scope).
+        user = await service.create(UserCreate(email="default@example.com"))
+        assert user.email == "default@example.com"
+
 
 class TestGetUser:
     async def test_get_existing_user(self, service: UserService) -> None:
@@ -215,6 +220,12 @@ class TestUpdateUser:
         user = await service.create(UserCreate(email="other@example.com"), _ALL())
         with pytest.raises(UserEmailConflictError):
             await service.update(user.id, UserUpdate(email="taken@example.com"), _ALL())
+
+    async def test_update_defaults_to_unrestricted_scope(self, service: UserService) -> None:
+        user = await service.create(UserCreate(email="orig@example.com"), _ALL())
+        # No perm_filter supplied: defaults to AllSearchFilter (unrestricted scope).
+        updated = await service.update(user.id, UserUpdate(email="replaced@example.com"))
+        assert updated.email == "replaced@example.com"
 
 
 class TestDeleteUser:

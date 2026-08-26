@@ -35,6 +35,10 @@ from ohev.util.search_filter import (
     SearchFilter,
 )
 
+# Module-level singleton so it can be used as an argument default without
+# triggering B008 (the filter is immutable). Unrestricted scope by default.
+_DEFAULT_PERMISSION_FILTER = AllSearchFilter[Any]()
+
 
 class PermissionNotFoundError(Exception):
     """Raised when a permission id does not exist."""
@@ -120,7 +124,7 @@ class PermissionService:
     async def create(
         self,
         payload: PermissionCreate,
-        perm_filter: SearchFilter[Any],
+        perm_filter: SearchFilter[Any] = _DEFAULT_PERMISSION_FILTER,
     ) -> Permission:
         """Create a permission.
 

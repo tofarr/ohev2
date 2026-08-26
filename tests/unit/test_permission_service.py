@@ -59,6 +59,15 @@ class TestCreatePermission:
         perm = await service.create(_create_payload(uid, attributes=["email", "name"]), _ALL)
         assert perm.attributes == ["email", "name"]
 
+    async def test_create_defaults_to_unrestricted_scope(
+        self, service: PermissionService, session
+    ) -> None:
+        uid = await _make_user(session)
+        # No perm_filter supplied: defaults to AllSearchFilter (unrestricted scope).
+        perm = await service.create(_create_payload(uid))
+        assert perm.user_id == uid
+        assert perm.action is Action.READ
+
     async def test_create_permission_type(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
         perm = await service.create(
