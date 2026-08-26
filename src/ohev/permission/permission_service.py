@@ -115,19 +115,23 @@ def _base_allows(
 class PermissionService:
     """CRUD operations plus the centralized permission checker over permissions."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        perm_filter: SearchFilter[Any] = ALL_SEARCH_FILTER,
+    ) -> None:
         self._session = session
+        self._perm_filter = perm_filter
 
     async def create(
         self,
         payload: PermissionCreate,
-        perm_filter: SearchFilter[Any] = ALL_SEARCH_FILTER,
     ) -> Permission:
         """Create a permission.
 
         Raises :class:`PermissionScopeError` if the prospective permission does
-        not satisfy *perm_filter* (the principal's create scope on the
-        permission resource).
+        not satisfy the service's ``perm_filter`` (the principal's create scope
+        on the permission resource).
         """
         permission = Permission(
             user_id=payload.user_id,
@@ -136,7 +140,7 @@ class PermissionService:
             attributes=payload.attributes,
             search_filter=payload.search_filter,
         )
-        if not perm_filter.matches(permission):
+        if not self._perm_filter.matches(permission):
             raise PermissionScopeError(str(payload))
         self._session.add(permission)
         try:
@@ -152,10 +156,11 @@ class PermissionService:
     async def get(
         self,
         permission_id: uuid.UUID,
-        perm_filter: SearchFilter[Any],
     ) -> Permission:
-        """Retrieve a permission by id, scoped by *perm_filter*."""
-        stmt = perm_filter.filter_sql(select(Permission).where(Permission.id == permission_id))
+        """Retrieve a permission by id, scoped by ``perm_filter``."""
+        stmt = self._perm_filter.filter_sql(
+            select(Permission).where(Permission.id == permission_id)
+        )
         result = await self._session.execute(stmt)
         permission: Permission | None = result.scalar_one_or_none()
         if permission is None:
@@ -168,17 +173,13 @@ class PermissionService:
         cursor: uuid.UUID | None = None,
         limit: int = 50,
         search_filter: PermissionSearchFilter | None = None,
-        perm_filter: SearchFilter[Any] | None = None,
     ) -> tuple[list[Permission], uuid.UUID | None]:
         """Search permissions, keyed by id.
 
-        The permission filter (*perm_filter*) scopes the SQL to rows the
-        principal may see; the optional *search_filter* (from query params) is
-        ANDed on top. `None` (or an all-`None` filter) matches everything.
+        The service's ``perm_filter`` scopes the SQL to rows the principal may
+        see; the optional *search_filter* (from query params) is ANDed on top.
         """
-        stmt = select(Permission).order_by(Permission.id)
-        if perm_filter is not None:
-            stmt = perm_filter.filter_sql(stmt)
+        stmt = self._perm_filter.filter_sql(select(Permission).order_by(Permission.id))
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
@@ -192,9 +193,8 @@ class PermissionService:
     async def delete(
         self,
         permission_id: uuid.UUID,
-        perm_filter: SearchFilter[Any],
     ) -> None:
-        permission = await self.get(permission_id, perm_filter)
+        permission = await self.get(permission_id)
         await self._session.delete(permission)
         await self._session.flush()
 
@@ -328,15 +328,12 @@ class PermissionService:
 
     async def count(
         self,
-        perm_filter: SearchFilter[Any] | None = None,
         search_filter: PermissionSearchFilter | None = None,
     ) -> int:
-        """Total permission count, scoped by the principal's *perm_filter* and
+        """Total permission count, scoped by the service's ``perm_filter`` and
         the optional *search_filter* (the same query-param filter the collection
-        endpoint accepts). Both default to unrestricted."""
-        stmt = select(func.count()).select_from(Permission)
-        if perm_filter is not None:
-            stmt = perm_filter.filter_sql(stmt)
+        endpoint accepts)."""
+        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(Permission))
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)

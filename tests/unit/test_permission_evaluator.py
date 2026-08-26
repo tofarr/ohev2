@@ -83,7 +83,7 @@ class TestCheckPermissionDB:
     async def _make_user(
         self, session: AsyncSession, email: str = "check@example.com"
     ) -> uuid.UUID:
-        user = await UserService(session).create(UserCreate(email=email), AllSearchFilter[User]())
+        user = await UserService(session, AllSearchFilter[User]()).create(UserCreate(email=email))
         return user.id
 
     async def test_base_grant_allows_without_db(self, session: AsyncSession) -> None:
@@ -105,13 +105,12 @@ class TestCheckPermissionDB:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        service = PermissionService(session)
+        service = PermissionService(session, _ALL)
         uid = await self._make_user(session)
         await service.create(
             PermissionCreate(
                 user_id=uid, action=Action.READ, resource_type=ResourceType.PERMISSION
             ),
-            _ALL,
         )
         assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
         assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
@@ -128,11 +127,10 @@ class TestCheckPermissionDB:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        service = PermissionService(session)
+        service = PermissionService(session, _ALL)
         uid = await self._make_user(session)
         await service.create(
             PermissionCreate(user_id=uid, action=Action.ALL, resource_type=ResourceType.USER),
-            _ALL,
         )
         assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
 
@@ -148,7 +146,7 @@ class TestCheckPermissionDB:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        service = PermissionService(session)
+        service = PermissionService(session, _ALL)
         uid = await self._make_user(session)
         await service.create(
             PermissionCreate(
@@ -157,7 +155,6 @@ class TestCheckPermissionDB:
                 resource_type=ResourceType.USER,
                 search_filter={"kind": "NoneSearchFilter"},
             ),
-            _ALL,
         )
         # A grant exists, so check_permission returns True; the deny-all scope
         # is enforced when the effective filter is applied to SQL.

@@ -254,19 +254,18 @@ class TestPermissionEnforcement:
 
         # Create the principal user directly in the DB (bypassing the API,
         # which is itself permission-guarded).
-        principal = await UserService(session).create(
-            UserCreate(email="principal@example.com"), AllSearchFilter[User]()
+        principal = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="principal@example.com")
         )
         principal_id = principal.id
 
-        service = PermissionService(session)
+        service = PermissionService(session, AllSearchFilter[Permission]())
         await service.create(
             PermissionCreate(
                 user_id=principal_id,
                 action=Action.SEARCH,
                 resource_type=ResourceType.USER,
             ),
-            AllSearchFilter[Permission](),
         )
         await session.commit()
 
@@ -294,19 +293,18 @@ class TestPermissionEnforcement:
         from ohev.user.user_service import UserService
         from ohev.util.search_filter import AllSearchFilter
 
-        principal = await UserService(session).create(
-            UserCreate(email="principal@example.com"), AllSearchFilter[User]()
+        principal = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="principal@example.com")
         )
         principal_id = principal.id
 
-        service = PermissionService(session)
+        service = PermissionService(session, AllSearchFilter[Permission]())
         await service.create(
             PermissionCreate(
                 user_id=principal_id,
                 action=Action.SEARCH,
                 resource_type=ResourceType.USER,
             ),
-            AllSearchFilter[Permission](),
         )
         await session.commit()
 

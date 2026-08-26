@@ -2,11 +2,11 @@
 
 Services contain business logic; repositories contain data access. This module
 exposes a thin `UserService` over SQLAlchemy async sessions per AGENTS.md §4.
-Every data-access method accepts a ``perm_filter`` (the effective search filter
-from the centralized permission checker) that scopes the SQL to rows the
-principal is allowed to see/modify; :meth:`create` validates the incoming item
-against it in memory (AGENTS.md §9 — authorization enforced in services, not
-just routers).
+The service holds the effective ``perm_filter`` (the search filter from the
+centralized permission checker) as a field, set at construction, that scopes
+the SQL to rows the principal is allowed to see/modify; :meth:`create` validates
+the incoming item against it in memory (AGENTS.md §9 — authorization enforced
+in services, not just routers).
 """
 
 from __future__ import annotations
@@ -37,25 +37,29 @@ class UserPermissionScopeError(Exception):
 class UserService:
     """CRUD operations over users.
 
-    The service is constructed per request with the request-scoped session; it
-    holds no mutable state of its own.
+    The service is constructed per request with the request-scoped session and
+    the principal's effective ``perm_filter``; it holds no other mutable state.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
+    ) -> None:
         self._session = session
+        self._perm_filter = perm_filter
 
     async def create(
         self,
         payload: UserCreate,
-        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
     ) -> User:
         """Create a user. Raises UserEmailConflictError on duplicate email.
 
         Raises :class:`UserPermissionScopeError` if the prospective user does
-        not satisfy *perm_filter* (the principal's create scope).
+        not satisfy the service's ``perm_filter`` (the principal's create scope).
         """
         user = User(email=payload.email)
-        if not perm_filter.matches(user):
+        if not self._perm_filter.matches(user):
             raise UserPermissionScopeError(str(payload.email))
         self._session.add(user)
         try:
@@ -71,14 +75,13 @@ class UserService:
     async def get(
         self,
         user_id: uuid.UUID,
-        perm_filter: SearchFilter[User],
     ) -> User:
-        """Retrieve a user by id, scoped by *perm_filter*.
+        """Retrieve a user by id, scoped by ``perm_filter``.
 
         Raises :class:`UserNotFoundError` if the user is missing or out of the
         principal's scope (so callers return 404 without leaking existence).
         """
-        stmt = perm_filter.filter_sql(select(User).where(User.id == user_id))
+        stmt = self._perm_filter.filter_sql(select(User).where(User.id == user_id))
         result = await self._session.execute(stmt)
         user = result.scalar_one_or_none()
         if user is None:
@@ -91,16 +94,14 @@ class UserService:
         cursor: uuid.UUID | None = None,
         limit: int = 50,
         search_filter: UserSearchFilter | None = None,
-        perm_filter: SearchFilter[User],
     ) -> tuple[list[User], uuid.UUID | None]:
         """Search users ordered by id, keyed-pagination via cursor.
 
-        The permission filter (*perm_filter*) scopes the SQL to rows the
-        principal may see; the optional *search_filter* (from query params) is
-        ANDed on top. Returns (users, next_cursor). next_cursor is None when
-        exhausted.
+        The service's ``perm_filter`` scopes the SQL to rows the principal may
+        see; the optional *search_filter* (from query params) is ANDed on top.
+        Returns (users, next_cursor). next_cursor is None when exhausted.
         """
-        stmt = perm_filter.filter_sql(select(User).order_by(User.id))
+        stmt = self._perm_filter.filter_sql(select(User).order_by(User.id))
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
@@ -115,10 +116,9 @@ class UserService:
         self,
         user_id: uuid.UUID,
         payload: UserUpdate,
-        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
     ) -> User:
         """Partially update a user. Raises on missing/scoped-out user or email conflict."""
-        user = await self.get(user_id, perm_filter)
+        user = await self.get(user_id)
         if payload.email is not None:
             user.email = payload.email
         try:
@@ -134,24 +134,20 @@ class UserService:
     async def delete(
         self,
         user_id: uuid.UUID,
-        perm_filter: SearchFilter[User],
     ) -> None:
         """Delete a user. Raises UserNotFoundError if missing or out of scope."""
-        user = await self.get(user_id, perm_filter)
+        user = await self.get(user_id)
         await self._session.delete(user)
         await self._session.flush()
 
     async def count(
         self,
-        perm_filter: SearchFilter[User] | None = None,
         search_filter: UserSearchFilter | None = None,
     ) -> int:
-        """Total user count, scoped by the principal's *perm_filter* and the
+        """Total user count, scoped by the service's ``perm_filter`` and the
         optional *search_filter* (the same query-param filter the collection
-        endpoint accepts). Both default to unrestricted (used by tests/fixtures)."""
-        stmt = select(func.count()).select_from(User)
-        if perm_filter is not None:
-            stmt = perm_filter.filter_sql(stmt)
+        endpoint accepts)."""
+        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(User))
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
