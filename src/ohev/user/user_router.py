@@ -13,13 +13,19 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.permission.dependencies import (
+from ohev.permission.permission_dependencies import (
     SessionDep,
     require_permission,
 )
-from ohev.permission.models.permission import Action, ResourceType
-from ohev.user.schemas import UserCreate, UserRead, UserSearchFilter, UserSearchResult, UserUpdate
-from ohev.user.services import (
+from ohev.permission.permission_models import Action, ResourceType
+from ohev.user.user_schemas import (
+    UserCreate,
+    UserRead,
+    UserSearchFilter,
+    UserSearchResult,
+    UserUpdate,
+)
+from ohev.user.user_service import (
     UserEmailConflictError,
     UserNotFoundError,
     UserService,

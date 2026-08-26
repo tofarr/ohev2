@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.schemas import UserCreate, UserSearchFilter, UserUpdate
-from ohev.user.services import UserEmailConflictError, UserNotFoundError, UserService
+from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
+from ohev.user.user_service import UserEmailConflictError, UserNotFoundError, UserService
 
 
 @pytest.fixture

@@ -16,13 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.config import get_config
-from ohev.permission.models.permission import (
+from ohev.permission.permission_grammar import parse_many
+from ohev.permission.permission_models import (
     Action,
     Permission,
     ResourceType,
 )
-from ohev.permission.schemas import PermissionCreate, PermissionSearchFilter
-from ohev.permission.services.permission_grammar import parse_many
+from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
 
 
 class PermissionNotFoundError(Exception):

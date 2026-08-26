@@ -54,6 +54,19 @@ reject the change.
 * Layering: `routers → services → repositories → models`. Do not skip layers (a router
   must not query the DB directly).
 * Shared behavior goes in a common module; do not copy-paste across resources.
+  Layering is enforced by import direction, not folder hierarchy.
+
+### File & directory layout
+
+* One flat directory per feature, directly under `src/ohev/` (e.g. `user/`,
+  `permission/`). No `models/`/`routes/`/`services/` subfolders.
+* Files inside a feature directory are flat and prefixed with the feature name for
+  global uniqueness: `user_models.py`, `user_schemas.py`, `user_router.py`,
+  `user_service.py`.
+* No `__init__.py` unless it performs real package-level work. Default to namespace
+  packages — convention over configuration.
+* Genuinely shared, cross-cutting code lives in `src/ohev/util/`, outside the
+  per-feature pattern.
 
 ## 5. Testing
 

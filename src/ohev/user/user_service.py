@@ -12,8 +12,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.models.user import User
-from ohev.user.schemas import UserCreate, UserSearchFilter, UserUpdate
+from ohev.user.user_models import User
+from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
 
 
 class UserNotFoundError(Exception):

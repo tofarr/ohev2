@@ -9,8 +9,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from ohev import __version__
-from ohev.permission.routes import router as permission_router
-from ohev.user.routes import router as user_router
+from ohev.permission.permission_router import router as permission_router
+from ohev.user.user_router import router as user_router
 
 
 def create_app() -> FastAPI:

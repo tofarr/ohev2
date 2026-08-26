@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ohev.db import Base
-from ohev.user.models.user import User
+from ohev.user.user_models import User
 
 
 class Action(enum.StrEnum):

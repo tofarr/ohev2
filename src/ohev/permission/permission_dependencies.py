@@ -21,8 +21,8 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.db import get_session
-from ohev.permission.models.permission import Action, ResourceType
-from ohev.permission.services import PermissionService
+from ohev.permission.permission_models import Action, ResourceType
+from ohev.permission.permission_service import PermissionService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 

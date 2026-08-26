@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import models so Alembic autogenerate sees their metadata.
 from ohev.db import Base
-from ohev.permission.models.permission import Permission  # noqa: F401
-from ohev.user.models.user import User  # noqa: F401
+from ohev.permission.permission_models import Permission  # noqa: F401
+from ohev.user.user_models import User  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

@@ -7,15 +7,15 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.models.permission import Action, ResourceType
-from ohev.permission.schemas import PermissionCreate, PermissionSearchFilter
-from ohev.permission.services import (
+from ohev.permission.permission_models import Action, ResourceType
+from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
+from ohev.permission.permission_service import (
     PermissionNotFoundError,
     PermissionService,
     reset_base_permissions_cache,
 )
-from ohev.user.schemas import UserCreate
-from ohev.user.services import UserService
+from ohev.user.user_schemas import UserCreate
+from ohev.user.user_service import UserService
 
 
 async def _make_user(session: AsyncSession, email: str = "perm-test@example.com") -> uuid.UUID:
@@ -264,7 +264,7 @@ class TestCheckPermission:
 
 class TestCascadeDelete:
     async def test_deleting_user_cascades_to_permissions(self, session) -> None:
-        from ohev.user.services import UserService
+        from ohev.user.user_service import UserService
 
         uid = await _make_user(session)
         ps = PermissionService(session)
