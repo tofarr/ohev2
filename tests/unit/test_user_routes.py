@@ -135,6 +135,35 @@ class TestListUsersRoute:
         assert resp.status_code == 422
 
 
+class TestCountUsersRoute:
+    async def test_count_empty(self, client: AsyncClient) -> None:
+        resp = await client.get("/users/count")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0}
+
+    async def test_count_after_creates(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await client.post("/users", json={"email": f"c{i}@example.com"})
+        resp = await client.get("/users/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 3
+
+    async def test_count_with_email_filter(self, client: AsyncClient) -> None:
+        await client.post("/users", json={"email": "alice@example.com"})
+        await client.post("/users", json={"email": "bob@example.com"})
+        resp = await client.get("/users/count?email__contains=alice")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+
+    async def test_count_excludes_deleted(self, client: AsyncClient) -> None:
+        create = await client.post("/users", json={"email": "del@example.com"})
+        await client.post("/users", json={"email": "keep@example.com"})
+        await client.delete(f"/users/{create.json()['id']}")
+        resp = await client.get("/users/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+
+
 class TestUpdateUserRoute:
     async def test_update_email(self, client: AsyncClient) -> None:
         create = await client.post("/users", json={"email": "old@example.com"})

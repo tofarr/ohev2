@@ -33,6 +33,7 @@ from ohev.permission.permission_service import (
     PermissionScopeError,
     PermissionService,
 )
+from ohev.util.schemas import CountResult
 from ohev.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/permissions", tags=["permissions"])
@@ -76,6 +77,25 @@ async def search_permissions(
         next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,
     )
+
+
+@router.get(
+    "/count",
+    response_model=CountResult,
+)
+async def count_permissions(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))
+    ],
+    # See search_permissions: bare `Depends()` lets FastAPI explode the filter
+    # model's fields as query params. Declared before `/{permission_id}` so the
+    # static path matches ahead of the UUID path param.
+    search_filter: PermissionSearchFilter = Depends(),  # noqa: B008
+) -> CountResult:
+    service = PermissionService(session)
+    total = await service.count(perm_filter=perm_filter, search_filter=search_filter)
+    return CountResult(count=total)
 
 
 @router.post(

@@ -117,6 +117,39 @@ class TestListPermissionsRoute:
         assert resp.status_code == 422
 
 
+class TestCountPermissionsRoute:
+    async def test_count_empty(self, client: AsyncClient) -> None:
+        resp = await client.get("/permissions/count")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0}
+
+    async def test_count_after_creates(self, client: AsyncClient) -> None:
+        uid = await _make_user(client)
+        for act in ["create", "read", "update"]:
+            await client.post("/permissions", json=_payload(uid, action=act))
+        resp = await client.get("/permissions/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 3
+
+    async def test_count_with_user_filter(self, client: AsyncClient) -> None:
+        uid1 = await _make_user(client, email="u1@example.com")
+        uid2 = await _make_user(client, email="u2@example.com")
+        await client.post("/permissions", json=_payload(uid1))
+        await client.post("/permissions", json=_payload(uid2))
+        resp = await client.get(f"/permissions/count?user_id__eq={uid1}")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+
+    async def test_count_excludes_deleted(self, client: AsyncClient) -> None:
+        uid = await _make_user(client)
+        create = await client.post("/permissions", json=_payload(uid))
+        await client.post("/permissions", json=_payload(uid, action="read"))
+        await client.delete(f"/permissions/{create.json()['id']}")
+        resp = await client.get("/permissions/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+
+
 class TestDeletePermissionRoute:
     async def test_delete_permission(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
