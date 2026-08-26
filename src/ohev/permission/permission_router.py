@@ -3,10 +3,10 @@
 Uniform REST surface (AGENTS.md §3). Supports filtering the collection by user
 via `?user_id=…` — a query param on the collection, never a bespoke route.
 Every endpoint is guarded by the centralized permission checker
-(AGENTS.md §9); the returned :class:`SearchFilter` is passed to the service so
-search/update/delete SQL and create payloads are scoped to the principal.
-Permissions are immutable, so there is no PATCH/UPDATE endpoint — delete and
-re-create.
+(AGENTS.md §9); the returned :class:`SearchFilter` is passed into the service
+constructor so search/delete SQL and create payloads are scoped to the
+principal. Permissions are immutable, so there is no PATCH/UPDATE endpoint —
+delete and re-create.
 """
 
 from __future__ import annotations
@@ -64,13 +64,12 @@ async def search_permissions(
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> PermissionSearchResult:
-    service = PermissionService(session)
+    service = PermissionService(session, perm_filter)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     permissions, next_cursor = await service.search_permissions(
         cursor=cursor_uuid,
         limit=limit,
         search_filter=search_filter,
-        perm_filter=perm_filter,
     )
     return PermissionSearchResult(
         items=[PermissionRead.model_validate(p) for p in permissions],
@@ -93,8 +92,8 @@ async def count_permissions(
     # static path matches ahead of the UUID path param.
     search_filter: PermissionSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
-    service = PermissionService(session)
-    total = await service.count(perm_filter=perm_filter, search_filter=search_filter)
+    service = PermissionService(session, perm_filter)
+    total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
 
 
@@ -110,9 +109,9 @@ async def create_permission(
         SearchFilter[Any], Depends(require_permission(Action.CREATE, ResourceType.PERMISSION))
     ],
 ) -> PermissionRead:
-    service = PermissionService(session)
+    service = PermissionService(session, perm_filter)
     try:
-        permission = await service.create(payload, perm_filter)
+        permission = await service.create(payload)
     except PermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -138,9 +137,9 @@ async def get_permission(
         SearchFilter[Any], Depends(require_permission(Action.READ, ResourceType.PERMISSION))
     ],
 ) -> PermissionRead:
-    service = PermissionService(session)
+    service = PermissionService(session, perm_filter)
     try:
-        permission = await service.get(permission_id, perm_filter)
+        permission = await service.get(permission_id)
     except PermissionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -160,9 +159,9 @@ async def delete_permission(
         SearchFilter[Any], Depends(require_permission(Action.DELETE, ResourceType.PERMISSION))
     ],
 ) -> None:
-    service = PermissionService(session)
+    service = PermissionService(session, perm_filter)
     try:
-        await service.delete(permission_id, perm_filter)
+        await service.delete(permission_id)
     except PermissionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

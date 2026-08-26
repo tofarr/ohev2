@@ -192,10 +192,10 @@ class TestFilterSqlExecuted:
     _all = AllSearchFilter[User]()
 
     async def test_contains_filter_narrows_results(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="alice@example.com"), self._all)
-        await service.create(UserCreate(email="bob@example.com"), self._all)
-        await service.create(UserCreate(email="charlie@other.org"), self._all)
+        service = UserService(session, self._all)
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
+        await service.create(UserCreate(email="charlie@other.org"))
 
         f = UserSearchFilter(email__contains="example")
         stmt = f.filter_sql(select(User).order_by(User.email))
@@ -205,9 +205,9 @@ class TestFilterSqlExecuted:
         assert emails == {"alice@example.com", "bob@example.com"}
 
     async def test_eq_filter_selects_single(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="alice@example.com"), self._all)
-        await service.create(UserCreate(email="bob@example.com"), self._all)
+        service = UserService(session, self._all)
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
 
         f = UserSearchFilter(email__eq="alice@example.com")
         stmt = f.filter_sql(select(User))
@@ -217,9 +217,9 @@ class TestFilterSqlExecuted:
         assert users[0].email == "alice@example.com"
 
     async def test_empty_filter_returns_all(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="a@example.com"), self._all)
-        await service.create(UserCreate(email="b@example.com"), self._all)
+        service = UserService(session, self._all)
+        await service.create(UserCreate(email="a@example.com"))
+        await service.create(UserCreate(email="b@example.com"))
 
         f = UserSearchFilter()
         stmt = f.filter_sql(select(User))
@@ -228,9 +228,9 @@ class TestFilterSqlExecuted:
         assert len(users) == 2
 
     async def test_combined_filters_with_pagination(self, session: AsyncSession) -> None:
-        service = UserService(session)
+        service = UserService(session, self._all)
         for i in range(5):
-            await service.create(UserCreate(email=f"user{i}@example.com"), self._all)
+            await service.create(UserCreate(email=f"user{i}@example.com"))
 
         f = UserSearchFilter(email__contains="example")
         stmt = f.filter_sql(select(User).order_by(User.id).limit(2))
@@ -304,17 +304,17 @@ class TestCompositeFilters:
         assert f.sql_condition() is None
 
     async def test_none_filter_sql_returns_no_rows(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="a@x.com"), AllSearchFilter[User]())
+        service = UserService(session, AllSearchFilter[User]())
+        await service.create(UserCreate(email="a@x.com"))
         f = NoneSearchFilter[User]()
         stmt = f.filter_sql(select(User))
         result = await session.execute(stmt)
         assert list(result.scalars().all()) == []
 
     async def test_and_filter_sql_narrows_results(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="alice@example.com"), AllSearchFilter[User]())
-        await service.create(UserCreate(email="bob@example.com"), AllSearchFilter[User]())
+        service = UserService(session, AllSearchFilter[User]())
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@example.com"))
         f = AndSearchFilter[User](
             filters=[
                 UserSearchFilter(email__contains="example"),
@@ -328,9 +328,9 @@ class TestCompositeFilters:
         assert rows[0].email == "alice@example.com"
 
     async def test_or_filter_sql_unions_results(self, session: AsyncSession) -> None:
-        service = UserService(session)
-        await service.create(UserCreate(email="alice@example.com"), AllSearchFilter[User]())
-        await service.create(UserCreate(email="bob@other.org"), AllSearchFilter[User]())
+        service = UserService(session, AllSearchFilter[User]())
+        await service.create(UserCreate(email="alice@example.com"))
+        await service.create(UserCreate(email="bob@other.org"))
         f = OrSearchFilter[User](
             filters=[
                 UserSearchFilter(email__contains="example"),

@@ -25,13 +25,13 @@ _ALL = AllSearchFilter[Permission]()
 
 
 async def _make_user(session: AsyncSession, email: str = "perm-test@example.com") -> uuid.UUID:
-    user = await UserService(session).create(UserCreate(email=email), AllSearchFilter[User]())
+    user = await UserService(session, AllSearchFilter[User]()).create(UserCreate(email=email))
     return user.id
 
 
 @pytest.fixture
 def service(session: AsyncSession) -> PermissionService:
-    return PermissionService(session)
+    return PermissionService(session, _ALL)
 
 
 def _create_payload(user_id: uuid.UUID, **overrides: object) -> PermissionCreate:
@@ -47,7 +47,7 @@ def _create_payload(user_id: uuid.UUID, **overrides: object) -> PermissionCreate
 class TestCreatePermission:
     async def test_create_permission(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid), _ALL)
+        perm = await service.create(_create_payload(uid))
         assert perm.id is not None
         assert perm.user_id == uid
         assert perm.action is Action.READ
@@ -56,7 +56,7 @@ class TestCreatePermission:
 
     async def test_create_with_attributes(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid, attributes=["email", "name"]), _ALL)
+        perm = await service.create(_create_payload(uid, attributes=["email", "name"]))
         assert perm.attributes == ["email", "name"]
 
     async def test_create_defaults_to_unrestricted_scope(
@@ -70,32 +70,30 @@ class TestCreatePermission:
 
     async def test_create_permission_type(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(
-            _create_payload(uid, resource_type=ResourceType.PERMISSION), _ALL
-        )
+        perm = await service.create(_create_payload(uid, resource_type=ResourceType.PERMISSION))
         assert perm.resource_type is ResourceType.PERMISSION
 
     async def test_create_all_action(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid, action=Action.ALL), _ALL)
+        perm = await service.create(_create_payload(uid, action=Action.ALL))
         assert perm.action is Action.ALL
 
 
 class TestGetPermission:
     async def test_get_existing(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        created = await service.create(_create_payload(uid), _ALL)
-        fetched = await service.get(created.id, _ALL)
+        created = await service.create(_create_payload(uid))
+        fetched = await service.get(created.id)
         assert fetched.id == created.id
 
     async def test_get_missing_raises(self, service: PermissionService) -> None:
         with pytest.raises(PermissionNotFoundError):
-            await service.get(uuid.uuid4(), _ALL)
+            await service.get(uuid.uuid4())
 
 
 class TestListPermissions:
     async def test_search_empty(self, service: PermissionService) -> None:
-        perms, next_cursor = await service.search_permissions(perm_filter=_ALL)
+        perms, next_cursor = await service.search_permissions()
         assert perms == []
         assert next_cursor is None
 
@@ -103,13 +101,12 @@ class TestListPermissions:
         uid1 = await _make_user(session, email="first@example.com")
         uid2 = await _make_user(session, email="second@example.com")
 
-        await service.create(_create_payload(uid1, resource_type=ResourceType.USER), _ALL)
-        await service.create(_create_payload(uid1, resource_type=ResourceType.PERMISSION), _ALL)
-        await service.create(_create_payload(uid2, resource_type=ResourceType.USER), _ALL)
+        await service.create(_create_payload(uid1, resource_type=ResourceType.USER))
+        await service.create(_create_payload(uid1, resource_type=ResourceType.PERMISSION))
+        await service.create(_create_payload(uid2, resource_type=ResourceType.USER))
 
         perms, _ = await service.search_permissions(
             search_filter=PermissionSearchFilter(user_id__eq=uid1),
-            perm_filter=_ALL,
         )
         assert len(perms) == 2
         assert all(p.user_id == uid1 for p in perms)
@@ -119,19 +116,18 @@ class TestListPermissions:
     ) -> None:
         uid = await _make_user(session)
         await service.create(
-            _create_payload(uid, action=Action.READ, resource_type=ResourceType.USER), _ALL
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.USER)
         )
         await service.create(
-            _create_payload(uid, action=Action.CREATE, resource_type=ResourceType.USER), _ALL
+            _create_payload(uid, action=Action.CREATE, resource_type=ResourceType.USER)
         )
         await service.create(
-            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION), _ALL
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
         )
         perms, _ = await service.search_permissions(
             search_filter=PermissionSearchFilter(
                 action__eq=Action.READ, resource_type__eq=ResourceType.USER
             ),
-            perm_filter=_ALL,
         )
         assert len(perms) == 1
         assert perms[0].action is Action.READ
@@ -140,17 +136,13 @@ class TestListPermissions:
     async def test_search_pagination(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
         for act in [Action.CREATE, Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH]:
-            await service.create(_create_payload(uid, action=act), _ALL)
-        perms, next_cursor = await service.search_permissions(limit=2, perm_filter=_ALL)
+            await service.create(_create_payload(uid, action=act))
+        perms, next_cursor = await service.search_permissions(limit=2)
         assert len(perms) == 2
         assert next_cursor is not None
-        perms2, next_cursor2 = await service.search_permissions(
-            cursor=next_cursor, limit=2, perm_filter=_ALL
-        )
+        perms2, next_cursor2 = await service.search_permissions(cursor=next_cursor, limit=2)
         assert len(perms2) == 2
-        perms3, next_cursor3 = await service.search_permissions(
-            cursor=next_cursor2, limit=2, perm_filter=_ALL
-        )
+        perms3, next_cursor3 = await service.search_permissions(cursor=next_cursor2, limit=2)
         assert len(perms3) == 1
         assert next_cursor3 is None
 
@@ -158,21 +150,21 @@ class TestListPermissions:
 class TestDeletePermission:
     async def test_delete_permission(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid), _ALL)
-        await service.delete(perm.id, _ALL)
+        perm = await service.create(_create_payload(uid))
+        await service.delete(perm.id)
         with pytest.raises(PermissionNotFoundError):
-            await service.get(perm.id, _ALL)
+            await service.get(perm.id)
 
     async def test_delete_missing_raises(self, service: PermissionService) -> None:
         with pytest.raises(PermissionNotFoundError):
-            await service.delete(uuid.uuid4(), _ALL)
+            await service.delete(uuid.uuid4())
 
 
 class TestListForUser:
     async def test_returns_all_user_permissions(self, service: PermissionService, session) -> None:
         uid = await _make_user(session)
-        await service.create(_create_payload(uid, resource_type=ResourceType.USER), _ALL)
-        await service.create(_create_payload(uid, resource_type=ResourceType.PERMISSION), _ALL)
+        await service.create(_create_payload(uid, resource_type=ResourceType.USER))
+        await service.create(_create_payload(uid, resource_type=ResourceType.PERMISSION))
         perms = await service.search_for_user(uid)
         assert len(perms) == 2
 
@@ -208,7 +200,7 @@ class TestCheckPermission:
 
         uid = await _make_user(session)
         await service.create(
-            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION), _ALL
+            _create_payload(uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
         )
         assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
         assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
@@ -217,7 +209,7 @@ class TestCheckPermission:
         """An ALL-action permission covers any specific action via the DB path."""
         uid = await _make_user(session)
         await service.create(
-            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER), _ALL
+            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER)
         )
         # Base grants already allow these; the DB ALL row also returns True.
         assert await service.check_permission(uid, Action.READ, ResourceType.USER)
@@ -237,7 +229,7 @@ class TestCheckPermission:
 
         uid = await _make_user(session)
         await service.create(
-            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER), _ALL
+            _create_payload(uid, action=Action.ALL, resource_type=ResourceType.USER)
         )
         assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
 
@@ -261,7 +253,6 @@ class TestCheckPermission:
                 resource_type=ResourceType.USER,
                 search_filter={"kind": "NoneSearchFilter"},
             ),
-            _ALL,
         )
         # A deny-all scope means the effective filter is not None (allowed) but
         # it matches no rows. check_permission returns True because a grant
@@ -291,10 +282,10 @@ class TestCascadeDelete:
         from ohev.user.user_service import UserService
 
         uid = await _make_user(session)
-        ps = PermissionService(session)
-        await ps.create(_create_payload(uid), _ALL)
+        ps = PermissionService(session, _ALL)
+        await ps.create(_create_payload(uid))
         assert await ps.count() == 1
 
-        await UserService(session).delete(uid, AllSearchFilter[User]())
+        await UserService(session, AllSearchFilter[User]()).delete(uid)
         await session.commit()
         assert await ps.count() == 0

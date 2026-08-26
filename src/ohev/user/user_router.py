@@ -4,8 +4,8 @@ Follows the uniform REST surface (AGENTS.md §3): GET /users (paginated),
 POST /users, GET/PATCH/DELETE /users/{id}. Handlers validate, call the
 service, and serialize — no business logic here. Every endpoint is guarded by
 the centralized permission checker (AGENTS.md §9); the returned
-:class:`SearchFilter` is passed to the service so search/update/delete SQL and
-create payloads are scoped to the principal.
+:class:`SearchFilter` is passed into the service constructor so search/update/
+delete SQL and create payloads are scoped to the principal.
 """
 
 from __future__ import annotations
@@ -67,13 +67,12 @@ async def search_users(
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> UserSearchResult:
-    service = UserService(session)
+    service = UserService(session, perm_filter)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     users, next_cursor = await service.search_users(
         cursor=cursor_uuid,
         limit=limit,
         search_filter=search_filter,
-        perm_filter=perm_filter,
     )
     return UserSearchResult(
         items=[UserRead.model_validate(u) for u in users],
@@ -96,8 +95,8 @@ async def count_users(
     # matches ahead of the UUID path param.
     search_filter: UserSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
-    service = UserService(session)
-    total = await service.count(perm_filter=perm_filter, search_filter=search_filter)
+    service = UserService(session, perm_filter)
+    total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
 
 
@@ -113,9 +112,9 @@ async def create_user(
         SearchFilter[User], Depends(require_permission(Action.CREATE, ResourceType.USER))
     ],
 ) -> UserRead:
-    service = UserService(session)
+    service = UserService(session, perm_filter)
     try:
-        user = await service.create(payload, perm_filter)
+        user = await service.create(payload)
     except UserPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -141,9 +140,9 @@ async def get_user(
         SearchFilter[User], Depends(require_permission(Action.READ, ResourceType.USER))
     ],
 ) -> UserRead:
-    service = UserService(session)
+    service = UserService(session, perm_filter)
     try:
-        user = await service.get(user_id, perm_filter)
+        user = await service.get(user_id)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -164,9 +163,9 @@ async def update_user(
         SearchFilter[User], Depends(require_permission(Action.UPDATE, ResourceType.USER))
     ],
 ) -> UserRead:
-    service = UserService(session)
+    service = UserService(session, perm_filter)
     try:
-        user = await service.update(user_id, payload, perm_filter)
+        user = await service.update(user_id, payload)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -192,9 +191,9 @@ async def delete_user(
         SearchFilter[User], Depends(require_permission(Action.DELETE, ResourceType.USER))
     ],
 ) -> None:
-    service = UserService(session)
+    service = UserService(session, perm_filter)
     try:
-        await service.delete(user_id, perm_filter)
+        await service.delete(user_id)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
