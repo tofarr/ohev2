@@ -30,7 +30,8 @@ import uuid
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.config import get_config
@@ -42,37 +43,42 @@ from ohev.util.search_filter import SearchFilter
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
-
-def _resolve_token_from_request(
-    x_api_key: str | None,
-    authorization: str | None,
-    request: Request,
-) -> str | None:
-    """Pick the auth token from the first present source, in priority order."""
-    if x_api_key is not None:
-        return x_api_key
-    if authorization is not None:
-        # Accept "Bearer <token>"; tolerate a bare token for robustness.
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() == "bearer" and token:
-            return token
-        return authorization
-    cookie_name = get_config().auth_cookie_name
-    return request.cookies.get(cookie_name)
+# Security schemes that double as OpenAPI documentation. Declared via
+# `Security(...)` rather than `Header()` so FastAPI registers them in
+# `components.securitySchemes` instead of surfacing them as per-operation
+# header parameters. `auto_error=False` makes them optional so the three
+# sources below are tried in priority order; FastAPI emits one security
+# requirement per scheme, so the docs present them as alternatives (either
+# header satisfies the Authorize dialog).
+_api_key_scheme = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="ApiKey",
+    auto_error=False,
+    description="Encrypted auth token (JWE) sent in the X-API-Key header.",
+)
+_bearer_scheme = HTTPBearer(
+    scheme_name="BearerAuth",
+    auto_error=False,
+    description="Encrypted auth token (JWE) sent as `Authorization: Bearer <token>`.",
+)
 
 
 async def get_current_user_id(
     request: Request,
-    x_api_key: Annotated[str | None, Header()] = None,
-    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Security(_api_key_scheme)] = None,
+    bearer: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer_scheme)] = None,
 ) -> uuid.UUID | None:
     """Resolve the current user id from an encrypted auth token, or ``None``.
 
-    Checks the ``X-API-Key`` header first, then the ``Authorization: Bearer``
-    header, then the session cookie. A missing token means anonymous access; a
-    present-but-invalid token is a 401.
+    The token is read from, in priority order: the ``X-API-Key`` header, the
+    ``Authorization: Bearer`` header, then the session cookie. A missing token
+    means anonymous access; a present-but-invalid token is a 401.
     """
-    token = _resolve_token_from_request(x_api_key, authorization, request)
+    token = x_api_key
+    if token is None and bearer is not None:
+        token = bearer.credentials
+    if token is None:
+        token = request.cookies.get(get_config().auth_cookie_name)
     if token is None:
         return None
     user_id = extract_user_id(token)
