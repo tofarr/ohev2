@@ -351,7 +351,7 @@ class TestLoginRoute:
         assert body["user"]["username"] == "alice"
         assert "password" not in body["user"]
         # Cookie set with the configured name.
-        assert "session" in resp.cookies
+        assert "ohesession" in resp.cookies
 
     async def test_login_bad_password_returns_401(self, client: AsyncClient, session) -> None:
         from ohev.user.user_models import User
@@ -366,7 +366,7 @@ class TestLoginRoute:
 
         resp = await client.post("/users/login", json={"username": "alice", "password": "wrong"})
         assert resp.status_code == 401
-        assert "session" not in resp.cookies
+        assert "ohesession" not in resp.cookies
 
     async def test_login_unknown_user_returns_401(self, client: AsyncClient) -> None:
         resp = await client.post("/users/login", json={"username": "nobody", "password": "x"})
@@ -427,14 +427,17 @@ class TestLoginRoute:
         await session.commit()
 
         # A bare client (no X-API-Key) that performs login then reuses the cookie.
+        # The cookie is Secure, so httpx will not auto-replay it over the plain
+        # http://test transport; send it explicitly via the Cookie header to
+        # exercise the cookie-fallback branch of get_current_user_id.
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
             assert login.status_code == 200
-            # The cookie is stored on the client; the follow-up GET reuses it.
-            resp = await ac.get("/users")
+            cookie_token = login.cookies["ohesession"]
+            resp = await ac.get("/users", headers={"Cookie": f"ohesession={cookie_token}"})
             assert resp.status_code == 200
 
     async def test_login_bearer_token_authorizes_request(
@@ -479,7 +482,7 @@ class TestLoginRoute:
             assert login.status_code == 200
             # The token lives in the cookie; send it as a Bearer header instead
             # to exercise the Authorization fallback path.
-            cookie_token = login.cookies["session"]
+            cookie_token = login.cookies["ohesession"]
             resp = await ac.get("/users", headers={"Authorization": f"Bearer {cookie_token}"})
             assert resp.status_code == 200
 
@@ -531,13 +534,13 @@ class TestLogoutRoute:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
             assert login.status_code == 200
-            assert "session" in ac.cookies
+            assert "ohesession" in ac.cookies
 
             logout = await ac.post("/users/logout")
             assert logout.status_code == 204
             # delete_cookie sets max-age=0, which the client applies: the
             # stored cookie is removed from the client jar.
-            assert "session" not in ac.cookies
+            assert "ohesession" not in ac.cookies
 
     async def test_logout_without_session_is_noop(self, client: AsyncClient) -> None:
         """Logging out when no session cookie exists still returns 204."""
