@@ -3,9 +3,17 @@
   //
   // Pick a config from the Run and Debug panel (Ctrl/Cmd+Shift+D) or the
   // floating debug controls. All configs use the project venv at .venv/bin/python.
-
   "version": "0.2.0",
   "configurations": [
+    {
+      "name": "Python Debugger: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    },
     // --- Run & debug the uvicorn/FastAPI server with reload + breakpoints ---
     {
       "name": "Debug: uvicorn (ohev.app:app)",
@@ -18,16 +26,15 @@
         "--host",
         "0.0.0.0",
         "--port",
-        "8000"
+        "8080"
       ],
       "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/.env",
       "python": "${command:python.interpreterPath}",
-      "justMyCode": true,
+      "justMyCode": false,
       "console": "integratedTerminal",
       "stopOnEntry": false
     },
-
     // --- Same, but no reload (more reliable breakpoint attachment) ---
     {
       "name": "Debug: uvicorn (no reload)",
@@ -44,11 +51,10 @@
       "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/.env",
       "python": "${command:python.interpreterPath}",
-      "justMyCode": true,
+      "justMyCode": false,
       "console": "integratedTerminal",
       "stopOnEntry": false
     },
-
     // --- Run the full unit test suite under the debugger ---
     {
       "name": "Debug: pytest (unit)",
@@ -67,7 +73,6 @@
       "console": "integratedTerminal",
       "stopOnEntry": false
     },
-
     // --- Debug the currently open test file ---
     {
       "name": "Debug: pytest current file",
@@ -86,7 +91,6 @@
       "console": "integratedTerminal",
       "stopOnEntry": false
     },
-
     // --- Debug a single test (cursor) — drop-in for pytest --no-cov -s ---
     // Tip: place the cursor inside a test function and use "Debug Test at Cursor".
     {
@@ -106,7 +110,6 @@
       "console": "integratedTerminal",
       "stopOnEntry": false
     },
-
     // --- E2E tests (require a running server) ---
     {
       "name": "Debug: pytest (e2e)",
