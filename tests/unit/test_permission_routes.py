@@ -7,8 +7,10 @@ import uuid
 from httpx import AsyncClient
 
 
-async def _make_user(client: AsyncClient, email: str = "perm-route@example.com") -> str:
-    resp = await client.post("/users", json={"email": email})
+async def _make_user(
+    client: AsyncClient, email: str = "perm-route@example.com", username: str = "perm-route"
+) -> str:
+    resp = await client.post("/users", json={"email": email, "username": username})
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
@@ -92,8 +94,8 @@ class TestListPermissionsRoute:
         assert body["next_cursor"] is None
 
     async def test_search_filtered_by_user(self, client: AsyncClient) -> None:
-        uid1 = await _make_user(client, email="u1@example.com")
-        uid2 = await _make_user(client, email="u2@example.com")
+        uid1 = await _make_user(client, email="u1@example.com", username="u1")
+        uid2 = await _make_user(client, email="u2@example.com", username="u2")
         await client.post("/permissions", json=_payload(uid1, resource_type="user"))
         await client.post("/permissions", json=_payload(uid1, resource_type="permission"))
         await client.post("/permissions", json=_payload(uid2, resource_type="user"))
@@ -132,8 +134,8 @@ class TestCountPermissionsRoute:
         assert resp.json()["count"] == 3
 
     async def test_count_with_user_filter(self, client: AsyncClient) -> None:
-        uid1 = await _make_user(client, email="u1@example.com")
-        uid2 = await _make_user(client, email="u2@example.com")
+        uid1 = await _make_user(client, email="u1@example.com", username="u1")
+        uid2 = await _make_user(client, email="u2@example.com", username="u2")
         await client.post("/permissions", json=_payload(uid1))
         await client.post("/permissions", json=_payload(uid2))
         resp = await client.get(f"/permissions/count?user_id__eq={uid1}")
@@ -180,9 +182,8 @@ class TestCascadeViaRoutes:
 class TestPermissionEnforcement:
     """Tests for the permission check on protected endpoints."""
 
-    async def test_missing_auth_header_anonymous_allowed(self, app) -> None:
-        # Auth is optional; without X-User-Id the request is treated as
-        # anonymous and the baseline permissions grant access (200).
+    async def test_missing_auth_token_anonymous_allowed(self, app) -> None:
+        # No auth token → anonymous; baseline permissions grant access (200).
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
@@ -190,8 +191,8 @@ class TestPermissionEnforcement:
             resp = await ac.get("/users")
         assert resp.status_code == 200
 
-    async def test_invalid_auth_header_returns_401(self, client: AsyncClient) -> None:
-        resp = await client.get("/users", headers={"X-User-Id": "not-a-uuid"})
+    async def test_invalid_auth_token_returns_401(self, client: AsyncClient) -> None:
+        resp = await client.get("/users", headers={"X-API-Key": "not-a-valid-token"})
         assert resp.status_code == 401
 
     async def test_no_patch_endpoint_on_permissions(self, client: AsyncClient) -> None:

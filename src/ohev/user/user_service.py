@@ -6,7 +6,8 @@ The service holds the effective ``perm_filter`` (the search filter from the
 centralized permission checker) as a field, set at construction, that scopes
 the SQL to rows the principal is allowed to see/modify; :meth:`create` validates
 the incoming item against it in memory (AGENTS.md §9 — authorization enforced
-in services, not just routers).
+in services, not just routers). Passwords are hashed with bcrypt
+(``util.password``) before persistence; plaintext never rests in the DB.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.user.user_models import User
 from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
+from ohev.util.password import hash_password, verify_password
 from ohev.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 
@@ -28,6 +30,10 @@ class UserNotFoundError(Exception):
 
 class UserEmailConflictError(Exception):
     """Raised when a create/update collides with an existing email."""
+
+
+class UserUsernameConflictError(Exception):
+    """Raised when a create/update collides with an existing username."""
 
 
 class UserPermissionScopeError(Exception):
@@ -53,12 +59,17 @@ class UserService:
         self,
         payload: UserCreate,
     ) -> User:
-        """Create a user. Raises UserEmailConflictError on duplicate email.
+        """Create a user. Raises UserEmailConflictError/UserUsernameConflictError on duplicates.
 
         Raises :class:`UserPermissionScopeError` if the prospective user does
         not satisfy the service's ``perm_filter`` (the principal's create scope).
         """
-        user = User(email=payload.email)
+        user = User(
+            email=payload.email,
+            username=payload.username,
+            enabled=payload.enabled,
+            password=self._hash_password(payload.password),
+        )
         if not self._perm_filter.matches(user):
             raise UserPermissionScopeError(str(payload.email))
         self._session.add(user)
@@ -66,7 +77,7 @@ class UserService:
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()
-            raise UserEmailConflictError(payload.email) from exc
+            raise _classify_integrity_error(exc, payload) from exc
         # Refresh so server-side defaults (id, created_at, updated_at) are loaded
         # before the router commits and expires attributes.
         await self._session.refresh(user)
@@ -117,15 +128,21 @@ class UserService:
         user_id: uuid.UUID,
         payload: UserUpdate,
     ) -> User:
-        """Partially update a user. Raises on missing/scoped-out user or email conflict."""
+        """Partially update a user. Raises on missing/scoped-out user or unique conflict."""
         user = await self.get(user_id)
         if payload.email is not None:
             user.email = payload.email
+        if payload.username is not None:
+            user.username = payload.username
+        if payload.enabled is not None:
+            user.enabled = payload.enabled
+        if payload.password is not None:
+            user.password = self._hash_password(payload.password)
         try:
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()
-            raise UserEmailConflictError(payload.email) from exc
+            raise _classify_integrity_error(exc, payload) from exc
         # Refresh so server-side onupdate (updated_at) is loaded before the
         # router commits and expires attributes.
         await self._session.refresh(user)
@@ -153,6 +170,65 @@ class UserService:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
+    def _hash_password(self, plaintext: str | None) -> str | None:
+        """Return a bcrypt salted hash of *plaintext*, or None to keep unset.
+
+        The hash is never reversible to plaintext (AGENTS.md §9).
+        """
+        if plaintext is None:
+            return None
+        return hash_password(plaintext)
+
+    def verify_password(self, plaintext: str, user: User) -> bool:
+        """Return True iff *plaintext* matches the user's stored hash.
+
+        Returns False when the user has no password set or the hash is malformed.
+        """
+        if not user.password:
+            return False
+        return verify_password(plaintext, user.password)
+
+    async def get_by_username(self, username: str) -> User | None:
+        """Look up a user by username, or None if no such user exists."""
+        stmt = select(User).where(User.username == username)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def authenticate(
+        self,
+        username: str,
+        password: str,
+    ) -> User | None:
+        """Return the enabled user matching *username*/*password*, else None.
+
+        A disabled user never authenticates, even with a correct password.
+        Constant-time bcrypt verification is delegated to the password utility.
+        """
+        user = await self.get_by_username(username)
+        if user is None or not user.enabled or not user.password:
+            return None
+        if not verify_password(password, user.password):
+            return None
+        return user
+
+
+def _classify_integrity_error(
+    exc: IntegrityError,
+    payload: UserCreate | UserUpdate,
+) -> Exception:
+    """Map a unique-constraint IntegrityError to the right domain conflict.
+
+    asyncpg does not expose a structured constraint name on the DBAPI
+    exception; the constraint name appears in the error message
+    (``... violates unique constraint "ix_users_username"``). Match by it so
+    callers see ``UserUsernameConflictError`` vs ``UserEmailConflictError``.
+    """
+    message = str(getattr(exc, "orig", exc))
+    name = message.lower()
+    if "username" in name:
+        return UserUsernameConflictError(getattr(payload, "username", None) or "")
+    return UserEmailConflictError(getattr(payload, "email", None) or "")
+
 
 # Re-export for type-checking convenience in callers that import from the
 # service namespace.
@@ -162,4 +238,5 @@ __all__ = [
     "UserNotFoundError",
     "UserPermissionScopeError",
     "UserService",
+    "UserUsernameConflictError",
 ]

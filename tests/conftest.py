@@ -31,7 +31,8 @@ _TEST_DB_URL = (
     else os.environ.get("OHEV_DATABASE_URL", "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev")
 )
 
-# Default test principal — sent as X-User-Id so the permission flow is exercised.
+# Default test principal — authenticated via a JWE auth token minted in the
+# client fixture (the same mechanism the login endpoint uses).
 _TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
 
 
@@ -103,17 +104,22 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest_asyncio.fixture
-async def client(app) -> AsyncGenerator[AsyncClient, None]:
-    """An async HTTP client backed by the test app.
+async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncClient, None]:
+    """An async HTTP client authenticated as the test principal.
 
-    Sends a default X-User-Id header so every request is authenticated as the
-    test principal, satisfying the permission dependencies' auth requirement.
+    Mints a JWE auth token for the test user id and sends it via the X-API-Key
+    header (the highest-priority auth source) so permission dependencies see a
+    real principal.
     """
+    from ohev.util.auth_token import create_auth_token
+
+    get_config.cache_clear()
+    token = create_auth_token(_TEST_USER_ID)
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport,
         base_url="http://test",
-        headers={"X-User-Id": str(_TEST_USER_ID)},
+        headers={"X-API-Key": token},
     ) as ac:
         yield ac
 

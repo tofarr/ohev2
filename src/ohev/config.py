@@ -48,6 +48,21 @@ class AppConfig(BaseModel):
         default_factory=lambda: ["all:user", "all:permission"],
         description="Baseline permission grants applied to all authenticated users.",
     )
+    # Auth-token lifetime applied both as the JWE `exp` claim and the cookie
+    # `max-age` so a token cannot outlive its cookie and vice-versa (AGENTS.md §9).
+    auth_token_ttl_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description="Lifetime (seconds) of JWE auth tokens and the session cookie.",
+    )
+    auth_cookie_name: str = Field(
+        default="session",
+        description="Name of the auth cookie set by the login endpoint.",
+    )
+    auth_cookie_secure: bool = Field(
+        default=False,
+        description="Mark the auth cookie Secure (HTTPS only). Off for local dev.",
+    )
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:

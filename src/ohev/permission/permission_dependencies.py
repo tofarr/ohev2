@@ -1,12 +1,18 @@
 """FastAPI dependencies for permission enforcement.
 
 `get_current_user_id` resolves the authenticated principal from the request,
-returning ``None`` when no principal is present (anonymous access). A missing
-``X-User-Id`` header is therefore *not* an authentication error: a permission
-defined with ``user_id IS NULL`` (an anonymous grant) may still authorize the
-request. Until a real auth/session layer lands (AGENTS.md §9), the user id is
-read from the ``X-User-Id`` header — a placeholder that makes the permission
-flow testable end-to-end without a session implementation.
+returning ``None`` when no principal is present (anonymous access). The
+principal is read from a JWE-encrypted auth token supplied via, in order:
+
+1. the ``X-API-Key`` header (an encrypted auth token, not a raw id),
+2. the ``Authorization: Bearer <token>`` header, or
+3. the ``session`` cookie set by the login endpoint.
+
+A token that is missing entirely means anonymous access (permissions with
+``user_id IS NULL`` may still apply). A *present but invalid/expired* token is a
+401: the client claimed a principal but the credential was bad. The token is
+decrypted with the EncryptionService; the user id is opaque to clients
+(AGENTS.md §9).
 
 `require_permission` is the centralized permission checker every protected
 endpoint depends on. It calls
@@ -24,35 +30,58 @@ import uuid
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ohev.config import get_config
 from ohev.db import get_session
 from ohev.permission.permission_models import Action, ResourceType
 from ohev.permission.permission_service import PermissionService
+from ohev.util.auth_token import extract_user_id
 from ohev.util.search_filter import SearchFilter
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
-async def get_current_user_id(
-    x_user_id: Annotated[str | None, Header()] = None,
-) -> uuid.UUID | None:
-    """Resolve the current user id from the request, or ``None`` if anonymous.
+def _resolve_token_from_request(
+    x_api_key: str | None,
+    authorization: str | None,
+    request: Request,
+) -> str | None:
+    """Pick the auth token from the first present source, in priority order."""
+    if x_api_key is not None:
+        return x_api_key
+    if authorization is not None:
+        # Accept "Bearer <token>"; tolerate a bare token for robustness.
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token
+        return authorization
+    cookie_name = get_config().auth_cookie_name
+    return request.cookies.get(cookie_name)
 
-    A missing header means anonymous access (permissions with ``user_id IS
-    NULL`` may still apply). A malformed header is a 401: the client claimed to
-    present a principal but the value was not a valid UUID.
+
+async def get_current_user_id(
+    request: Request,
+    x_api_key: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> uuid.UUID | None:
+    """Resolve the current user id from an encrypted auth token, or ``None``.
+
+    Checks the ``X-API-Key`` header first, then the ``Authorization: Bearer``
+    header, then the session cookie. A missing token means anonymous access; a
+    present-but-invalid token is a 401.
     """
-    if x_user_id is None:
+    token = _resolve_token_from_request(x_api_key, authorization, request)
+    if token is None:
         return None
-    try:
-        return uuid.UUID(x_user_id)
-    except ValueError as exc:
+    user_id = extract_user_id(token)
+    if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid X-User-Id header; expected a UUID.",
-        ) from exc
+            detail="Invalid or expired auth token.",
+        )
+    return user_id
 
 
 CurrentUserId = Annotated[uuid.UUID | None, Depends(get_current_user_id)]
