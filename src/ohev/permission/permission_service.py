@@ -1,17 +1,23 @@
 """Service layer for the permission feature.
 
-CRUD operations (no update — permissions are immutable) plus a
-`check_permission` method that resolves to a single SQL EXISTS query against
-the per-user permission table. The config-level baseline (AppConfig.
-base_permissions) is checked in-memory first; only if it does not already
-grant the request is the DB consulted (AGENTS.md §4, §5).
+CRUD operations (no update — permissions are immutable) plus the centralized
+permission checker :meth:`PermissionService.get_effective_filter`. The checker
+loads every permission grant that applies to the current principal for a given
+``(action, resource_type)`` — including the ``ALL`` wildcard action and
+anonymous (``user_id IS NULL``) grants — and combines their search filters with
+``Or`` into a single :class:`SearchFilter`. ``None`` is returned when no grant
+applies, which callers interpret as "deny" (no rows visible / no create
+allowed). The config-level baseline (``AppConfig.base_permissions``) is checked
+in-memory first and contributes an unrestricted (``All``) scope when it grants
+the request (AGENTS.md §4, §9, §10).
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +29,11 @@ from ohev.permission.permission_models import (
     ResourceType,
 )
 from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
+from ohev.util.search_filter import (
+    AllSearchFilter,
+    OrSearchFilter,
+    SearchFilter,
+)
 
 
 class PermissionNotFoundError(Exception):
@@ -33,10 +44,14 @@ class PermissionConflictError(Exception):
     """Raised when a create collides with an existing permission row."""
 
 
+class PermissionScopeError(Exception):
+    """Raised when a create payload falls outside the principal's scope."""
+
+
 class PermissionDeniedError(Exception):
     """Raised when a permission check fails."""
 
-    def __init__(self, user_id: uuid.UUID, action: str, resource_type: str) -> None:
+    def __init__(self, user_id: uuid.UUID | None, action: str, resource_type: str) -> None:
         self.user_id = user_id
         self.action = action
         self.resource_type = resource_type
@@ -51,10 +66,10 @@ _base_permissions_cache: list[Permission] | None = None
 def _load_base_permissions() -> list[Permission]:
     """Parse and cache the config-level base permission grants.
 
-    These apply to every authenticated user as a baseline. The result is cached
-    at module level so the config is parsed at most once per process.
-    `reset_base_permissions_cache()` clears it (used by tests after config
-    changes).
+    These apply to every request as a baseline (including anonymous ones). The
+    result is cached at module level so the config is parsed at most once per
+    process. `reset_base_permissions_cache()` clears it (used by tests after
+    config changes).
     """
     global _base_permissions_cache
     if _base_permissions_cache is not None:
@@ -62,7 +77,7 @@ def _load_base_permissions() -> list[Permission]:
     parsed = parse_many(" ".join(get_config().base_permissions))
     base = [
         Permission(
-            user_id=uuid.UUID(int=0),
+            user_id=None,
             action=p.action,
             resource_type=p.resource_type,
             attributes=p.attributes,
@@ -97,18 +112,31 @@ def _base_allows(
 
 
 class PermissionService:
-    """CRUD operations plus permission checking over permissions."""
+    """CRUD operations plus the centralized permission checker over permissions."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, payload: PermissionCreate) -> Permission:
+    async def create(
+        self,
+        payload: PermissionCreate,
+        perm_filter: SearchFilter[Any],
+    ) -> Permission:
+        """Create a permission.
+
+        Raises :class:`PermissionScopeError` if the prospective permission does
+        not satisfy *perm_filter* (the principal's create scope on the
+        permission resource).
+        """
         permission = Permission(
             user_id=payload.user_id,
             action=payload.action,
             resource_type=payload.resource_type,
             attributes=payload.attributes,
+            search_filter=payload.search_filter,
         )
+        if not perm_filter.matches(permission):
+            raise PermissionScopeError(str(payload))
         self._session.add(permission)
         try:
             await self._session.flush()
@@ -120,8 +148,15 @@ class PermissionService:
         await self._session.refresh(permission)
         return permission
 
-    async def get(self, permission_id: uuid.UUID) -> Permission:
-        permission = await self._session.get(Permission, permission_id)
+    async def get(
+        self,
+        permission_id: uuid.UUID,
+        perm_filter: SearchFilter[Any],
+    ) -> Permission:
+        """Retrieve a permission by id, scoped by *perm_filter*."""
+        stmt = perm_filter.filter_sql(select(Permission).where(Permission.id == permission_id))
+        result = await self._session.execute(stmt)
+        permission: Permission | None = result.scalar_one_or_none()
         if permission is None:
             raise PermissionNotFoundError(str(permission_id))
         return permission
@@ -132,13 +167,17 @@ class PermissionService:
         cursor: uuid.UUID | None = None,
         limit: int = 50,
         search_filter: PermissionSearchFilter | None = None,
+        perm_filter: SearchFilter[Any] | None = None,
     ) -> tuple[list[Permission], uuid.UUID | None]:
         """Search permissions, keyed by id.
 
-        Optional `search_filter` pushes its clauses into the SQL query via
-        `filter_sql`; `None` (or an all-`None` filter) matches everything.
+        The permission filter (*perm_filter*) scopes the SQL to rows the
+        principal may see; the optional *search_filter* (from query params) is
+        ANDed on top. `None` (or an all-`None` filter) matches everything.
         """
         stmt = select(Permission).order_by(Permission.id)
+        if perm_filter is not None:
+            stmt = perm_filter.filter_sql(stmt)
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
@@ -149,44 +188,125 @@ class PermissionService:
         next_cursor = permissions[-1].id if len(permissions) == limit else None
         return permissions, next_cursor
 
-    async def delete(self, permission_id: uuid.UUID) -> None:
-        permission = await self.get(permission_id)
+    async def delete(
+        self,
+        permission_id: uuid.UUID,
+        perm_filter: SearchFilter[Any],
+    ) -> None:
+        permission = await self.get(permission_id, perm_filter)
         await self._session.delete(permission)
         await self._session.flush()
 
     async def check_permission(
         self,
-        user_id: uuid.UUID,
+        user_id: uuid.UUID | None,
         action: Action,
         resource_type: ResourceType,
         attributes: tuple[str, ...] = (),
     ) -> bool:
         """Whether *user_id* is granted *action* on *resource_type*.
 
-        Resolves to a single SQL EXISTS query against the permissions table.
-        The config-level baseline is checked in-memory first; if it already
-        grants the request, the DB is not consulted.
+        Delegates to :meth:`get_effective_filter`: a returned filter means the
+        action is allowed (scoped by the filter); ``None`` means denial.
         """
-        if _base_allows(action.value, resource_type, attributes):
-            return True
-        return await self._db_allows(user_id, action, resource_type, attributes)
+        return await self.get_effective_filter(user_id, action, resource_type) is not None
+
+    async def get_effective_filter(
+        self,
+        user_id: uuid.UUID | None,
+        action: Action,
+        resource_type: ResourceType,
+    ) -> SearchFilter[Any] | None:
+        """Build the effective search filter for *(action, resource_type)*.
+
+        Loads every permission grant that applies to the current principal for
+        ``(action, resource_type)`` — including the ``ALL`` wildcard action and
+        anonymous (``user_id IS NULL``) grants — and combines their search
+        filters with ``Or``. The config-level baseline contributes an
+        unrestricted (``All``) scope when it grants the request.
+
+        Returns ``None`` when no grant applies, which callers interpret as
+        "deny" (no rows visible / no create allowed). A returned
+        :class:`AllSearchFilter` means the whole resource table is in scope.
+        """
+        filters: list[SearchFilter[Any]] = []
+        # Config baseline is an unrestricted (All) grant when it covers the
+        # request; it does not carry a row-level scope.
+        if _base_allows(action.value, resource_type, ()):
+            filters.append(AllSearchFilter[Any]())
+        filters.extend(
+            self._deserialize_filter(p.search_filter, resource_type)
+            for p in await self._load_permissions(user_id, action, resource_type)
+        )
+        if not filters:
+            return None
+        if len(filters) == 1:
+            return filters[0]
+        return OrSearchFilter(filters=filters)
+
+    async def _load_permissions(
+        self,
+        user_id: uuid.UUID | None,
+        action: Action,
+        resource_type: ResourceType,
+    ) -> list[Permission]:
+        """Load all DB grants matching the principal, action, and resource type.
+
+        Matches rows where: user_id is the principal or NULL (anonymous),
+        resource_type matches, and action is ALL or the exact action.
+        """
+        user_clause = (
+            Permission.user_id.is_(None)
+            if user_id is None
+            else or_(Permission.user_id == user_id, Permission.user_id.is_(None))
+        )
+        stmt = (
+            select(Permission)
+            .where(user_clause)
+            .where(Permission.resource_type == resource_type)
+            .where((Permission.action == Action.ALL) | (Permission.action == action))
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    def _deserialize_filter(
+        data: dict[str, Any] | None,
+        resource_type: ResourceType,
+    ) -> SearchFilter[Any]:
+        """Deserialize a stored search-filter dict into a SearchFilter.
+
+        A ``None`` (unrestricted) grant contributes an :class:`AllSearchFilter`.
+        The discriminated-union ``kind`` in *data* resolves the concrete
+        subclass; the resource's entity class is already captured on the
+        parameterized filter class (e.g. ``UserSearchFilter._entity_cls``).
+        """
+        if data is None:
+            return AllSearchFilter[Any]()
+        return SearchFilter.model_validate(data)
 
     async def _db_allows(
         self,
-        user_id: uuid.UUID,
+        user_id: uuid.UUID | None,
         action: Action,
         resource_type: ResourceType,
         attributes: tuple[str, ...],
     ) -> bool:
         """Single SQL EXISTS query for the per-user permission check.
 
-        Matches a row where: user_id matches, resource_type matches, action is ALL or
-        the exact action, and (attributes is NULL OR attributes ⊇ requested).
+        Matches a row where: user_id is the principal or NULL, resource_type
+        matches, action is ALL or the exact action, and (attributes is NULL OR
+        attributes ⊇ requested).
         """
+        user_clause = (
+            Permission.user_id.is_(None)
+            if user_id is None
+            else or_(Permission.user_id == user_id, Permission.user_id.is_(None))
+        )
         stmt = (
             select(literal(1))
             .select_from(Permission)
-            .where(Permission.user_id == user_id)
+            .where(user_clause)
             .where(Permission.resource_type == resource_type)
             .where((Permission.action == Action.ALL) | (Permission.action == action))
         )
@@ -217,6 +337,7 @@ __all__ = [
     "PermissionConflictError",
     "PermissionDeniedError",
     "PermissionNotFoundError",
+    "PermissionScopeError",
     "PermissionService",
     "ResourceType",
 ]

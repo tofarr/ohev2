@@ -2,14 +2,17 @@
 
 Uniform REST surface (AGENTS.md §3). Supports filtering the collection by user
 via `?user_id=…` — a query param on the collection, never a bespoke route.
-Every endpoint is guarded by a permission check (AGENTS.md §9). Permissions are
-immutable, so there is no PATCH/UPDATE endpoint — delete and re-create.
+Every endpoint is guarded by the centralized permission checker
+(AGENTS.md §9); the returned :class:`SearchFilter` is passed to the service so
+search/update/delete SQL and create payloads are scoped to the principal.
+Permissions are immutable, so there is no PATCH/UPDATE endpoint — delete and
+re-create.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -27,8 +30,10 @@ from ohev.permission.permission_schemas import (
 from ohev.permission.permission_service import (
     PermissionConflictError,
     PermissionNotFoundError,
+    PermissionScopeError,
     PermissionService,
 )
+from ohev.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/permissions", tags=["permissions"])
 
@@ -46,10 +51,12 @@ def _cursor(value: str) -> uuid.UUID:
 @router.get(
     "",
     response_model=PermissionSearchResult,
-    dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))],
 )
 async def search_permissions(
     session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))
+    ],
     # See user router: bare `Depends()` is required so FastAPI explodes the
     # filter model's fields as individual query params alongside scalar queries.
     search_filter: PermissionSearchFilter = Depends(),  # noqa: B008
@@ -59,7 +66,10 @@ async def search_permissions(
     service = PermissionService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     permissions, next_cursor = await service.search_permissions(
-        cursor=cursor_uuid, limit=limit, search_filter=search_filter
+        cursor=cursor_uuid,
+        limit=limit,
+        search_filter=search_filter,
+        perm_filter=perm_filter,
     )
     return PermissionSearchResult(
         items=[PermissionRead.model_validate(p) for p in permissions],
@@ -72,15 +82,22 @@ async def search_permissions(
     "",
     response_model=PermissionRead,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission(Action.CREATE, ResourceType.PERMISSION))],
 )
 async def create_permission(
     payload: PermissionCreate,
     session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(require_permission(Action.CREATE, ResourceType.PERMISSION))
+    ],
 ) -> PermissionRead:
     service = PermissionService(session)
     try:
-        permission = await service.create(payload)
+        permission = await service.create(payload, perm_filter)
+    except PermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission falls outside your create scope: {exc}",
+        ) from exc
     except PermissionConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -93,12 +110,17 @@ async def create_permission(
 @router.get(
     "/{permission_id}",
     response_model=PermissionRead,
-    dependencies=[Depends(require_permission(Action.READ, ResourceType.PERMISSION))],
 )
-async def get_permission(permission_id: uuid.UUID, session: SessionDep) -> PermissionRead:
+async def get_permission(
+    permission_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(require_permission(Action.READ, ResourceType.PERMISSION))
+    ],
+) -> PermissionRead:
     service = PermissionService(session)
     try:
-        permission = await service.get(permission_id)
+        permission = await service.get(permission_id, perm_filter)
     except PermissionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -110,15 +132,17 @@ async def get_permission(permission_id: uuid.UUID, session: SessionDep) -> Permi
 @router.delete(
     "/{permission_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission(Action.DELETE, ResourceType.PERMISSION))],
 )
 async def delete_permission(
     permission_id: uuid.UUID,
     session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(require_permission(Action.DELETE, ResourceType.PERMISSION))
+    ],
 ) -> None:
     service = PermissionService(session)
     try:
-        await service.delete(permission_id)
+        await service.delete(permission_id, perm_filter)
     except PermissionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

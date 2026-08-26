@@ -62,9 +62,11 @@ class TestCreatePermissionRoute:
         resp = await client.post("/permissions", json=_payload(uid, action="bogus"))
         assert resp.status_code == 422
 
-    async def test_create_missing_user_id_returns_422(self, client: AsyncClient) -> None:
+    async def test_create_without_user_id_succeeds(self, client: AsyncClient) -> None:
+        # user_id is optional (nullable) to support anonymous permissions.
         resp = await client.post("/permissions", json={"action": "read", "resource_type": "user"})
-        assert resp.status_code == 422
+        assert resp.status_code == 201
+        assert resp.json()["user_id"] is None
 
 
 class TestGetPermissionRoute:
@@ -145,14 +147,15 @@ class TestCascadeViaRoutes:
 class TestPermissionEnforcement:
     """Tests for the permission check on protected endpoints."""
 
-    async def test_missing_auth_header_returns_401(self, app) -> None:
-        # Use a client without the X-User-Id header to test the 401 path.
+    async def test_missing_auth_header_anonymous_allowed(self, app) -> None:
+        # Auth is optional; without X-User-Id the request is treated as
+        # anonymous and the baseline permissions grant access (200).
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get("/users")
-        assert resp.status_code == 401
+        assert resp.status_code == 200
 
     async def test_invalid_auth_header_returns_401(self, client: AsyncClient) -> None:
         resp = await client.get("/users", headers={"X-User-Id": "not-a-uuid"})

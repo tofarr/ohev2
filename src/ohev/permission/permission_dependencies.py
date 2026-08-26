@@ -1,14 +1,21 @@
 """FastAPI dependencies for permission enforcement.
 
-`get_current_user_id` resolves the authenticated principal from the request.
-Until a real auth/session layer lands (AGENTS.md §9), the user id is read from
-the `X-User-Id` header — a placeholder that makes the permission flow testable
-end-to-end without a session implementation.
+`get_current_user_id` resolves the authenticated principal from the request,
+returning ``None`` when no principal is present (anonymous access). A missing
+``X-User-Id`` header is therefore *not* an authentication error: a permission
+defined with ``user_id IS NULL`` (an anonymous grant) may still authorize the
+request. Until a real auth/session layer lands (AGENTS.md §9), the user id is
+read from the ``X-User-Id`` header — a placeholder that makes the permission
+flow testable end-to-end without a session implementation.
 
-`require_permission` is the guard every protected endpoint depends on. It
-combines the config-level baseline (checked in-memory) with a single SQL query
-against the per-user permissions table (AGENTS.md §9 — authorization checks
-live in services, defense in depth).
+`require_permission` is the centralized permission checker every protected
+endpoint depends on. It calls
+:meth:`PermissionService.get_effective_filter` and returns the resulting
+:class:`SearchFilter` (scoped to the resource); when no grant applies it
+returns ``None``, which the dependency converts into a 403 (AGENTS.md §9 —
+authorization checks live in services, defense in depth). The returned filter is
+applied by services to search/update/delete SQL and validated against incoming
+create payloads.
 """
 
 from __future__ import annotations
@@ -23,23 +30,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ohev.db import get_session
 from ohev.permission.permission_models import Action, ResourceType
 from ohev.permission.permission_service import PermissionService
+from ohev.util.search_filter import SearchFilter
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 async def get_current_user_id(
     x_user_id: Annotated[str | None, Header()] = None,
-) -> uuid.UUID:
-    """Resolve the current user id from the request.
+) -> uuid.UUID | None:
+    """Resolve the current user id from the request, or ``None`` if anonymous.
 
-    Placeholder for a real session/JWT extractor (AGENTS.md §9). Reads the
-    `X-User-Id` header so the permission flow is testable end-to-end.
+    A missing header means anonymous access (permissions with ``user_id IS
+    NULL`` may still apply). A malformed header is a 401: the client claimed to
+    present a principal but the value was not a valid UUID.
     """
     if x_user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing X-User-Id header",
-        )
+        return None
     try:
         return uuid.UUID(x_user_id)
     except ValueError as exc:
@@ -49,39 +55,43 @@ async def get_current_user_id(
         ) from exc
 
 
-CurrentUserId = Annotated[uuid.UUID, Depends(get_current_user_id)]
+CurrentUserId = Annotated[uuid.UUID | None, Depends(get_current_user_id)]
 
 
 def require_permission(
     action: Action,
     resource_type: ResourceType,
-) -> Callable[..., Coroutine[Any, Any, None]]:
-    """Build a FastAPI dependency that enforces *action* on *resource_type*.
+) -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
+    """Build a FastAPI dependency that checks *action* on *resource_type*.
 
     Usage::
 
-        @router.get(
-            "",
-            dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.USER))],
-        )
-        async def search_users(...): ...
+        @router.get("")
+        async def search_users(
+            perm_filter: SearchFilter[User] = Depends(
+                require_permission(Action.SEARCH, ResourceType.USER)
+            ),
+            ...,
+        ): ...
 
-    Raises 403 Forbidden when the principal is not granted the requested
-    action. Depends on the DB session and the current user id.
+    Returns the effective :class:`SearchFilter` (scoped to the resource) so
+    services can filter search/update/delete SQL and validate creates. Raises
+    403 Forbidden when no grant applies (the checker returned ``None``).
     """
 
     async def _guard(
         session: SessionDep,
         user_id: CurrentUserId,
-    ) -> None:
+    ) -> SearchFilter[Any]:
         service = PermissionService(session)
-        allowed = await service.check_permission(user_id, action, resource_type)
-        if not allowed:
+        effective = await service.get_effective_filter(user_id, action, resource_type)
+        if effective is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     f"Permission denied: action={action.value} resource_type={resource_type.value}"
                 ),
             )
+        return effective
 
     return _guard
