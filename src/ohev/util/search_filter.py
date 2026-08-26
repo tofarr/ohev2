@@ -58,6 +58,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select
 
 __all__ = [
+    "ALL_SEARCH_FILTER",
     "AllSearchFilter",
     "AndSearchFilter",
     "BaseSearchFilter",
@@ -268,6 +269,13 @@ class AllSearchFilter(SearchFilter[T]):
 
     def sql_condition(self) -> SqlCondition:
         return None
+
+
+# Shared unrestricted filter instance. AllSearchFilter is stateless and
+# ignores its type parameter, so a single Any-parameterized instance serves as
+# the default for any SearchFilter[T]. Exposed for reuse as a default argument
+# (avoids per-module duplicates and satisfies ruff B008).
+ALL_SEARCH_FILTER: AllSearchFilter[Any] = AllSearchFilter[Any]()
 
 
 class NoneSearchFilter(SearchFilter[T]):

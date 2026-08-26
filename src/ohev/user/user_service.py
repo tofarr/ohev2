@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ohev.user.user_models import User
 from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
-from ohev.util.search_filter import SearchFilter
+from ohev.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 
 class UserNotFoundError(Exception):
@@ -47,7 +47,7 @@ class UserService:
     async def create(
         self,
         payload: UserCreate,
-        perm_filter: SearchFilter[User],
+        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
     ) -> User:
         """Create a user. Raises UserEmailConflictError on duplicate email.
 
@@ -115,7 +115,7 @@ class UserService:
         self,
         user_id: uuid.UUID,
         payload: UserUpdate,
-        perm_filter: SearchFilter[User],
+        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
     ) -> User:
         """Partially update a user. Raises on missing/scoped-out user or email conflict."""
         user = await self.get(user_id, perm_filter)

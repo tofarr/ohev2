@@ -30,6 +30,7 @@ from ohev.permission.permission_models import (
 )
 from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
 from ohev.util.search_filter import (
+    ALL_SEARCH_FILTER,
     AllSearchFilter,
     OrSearchFilter,
     SearchFilter,
@@ -120,7 +121,7 @@ class PermissionService:
     async def create(
         self,
         payload: PermissionCreate,
-        perm_filter: SearchFilter[Any],
+        perm_filter: SearchFilter[Any] = ALL_SEARCH_FILTER,
     ) -> Permission:
         """Create a permission.
 
