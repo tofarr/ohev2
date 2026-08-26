@@ -5,7 +5,8 @@ POST /users, GET/PATCH/DELETE /users/{id}. Handlers validate, call the
 service, and serialize — no business logic here. Every endpoint is guarded by
 the centralized permission checker (AGENTS.md §9); the returned
 :class:`SearchFilter` is passed into the service constructor so search/update/
-delete SQL and create payloads are scoped to the principal.
+delete SQL and create payloads are scoped to the principal. Login/logout and
+OAuth2 token endpoints live in the auth package (`ohev.auth.auth_router`).
 """
 
 from __future__ import annotations
@@ -13,19 +14,14 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.config import get_config
-from ohev.permission.permission_dependencies import (
-    SessionDep,
-    require_permission,
-)
+from ohev.db import SessionDep
+from ohev.permission.permission_dependencies import require_permission
 from ohev.permission.permission_models import Action, ResourceType
 from ohev.user.user_models import User
 from ohev.user.user_schemas import (
-    LoginResponse,
     UserCreate,
-    UserLogin,
     UserRead,
     UserSearchFilter,
     UserSearchResult,
@@ -38,25 +34,10 @@ from ohev.user.user_service import (
     UserService,
     UserUsernameConflictError,
 )
-from ohev.util.auth_token import create_auth_token
 from ohev.util.schemas import CountResult
 from ohev.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-def _set_auth_cookie(response: Response, token: str) -> None:
-    """Set the session cookie carrying the JWE auth token (AGENTS.md §9)."""
-    cfg = get_config()
-    response.set_cookie(
-        key=cfg.auth_cookie_name,
-        value=token,
-        max_age=cfg.auth_token_ttl_seconds,
-        httponly=True,
-        samesite="lax",
-        secure=cfg.auth_cookie_secure,
-        path="/",
-    )
 
 
 def _cursor(value: str) -> uuid.UUID:
@@ -229,53 +210,3 @@ async def delete_user(
             detail=f"User not found: {exc}",
         ) from exc
     await session.commit()
-
-
-@router.post(
-    "/login",
-    response_model=LoginResponse,
-)
-async def login(
-    payload: UserLogin,
-    session: SessionDep,
-    response: Response,
-) -> LoginResponse:
-    """Authenticate by username/password and set a JWE auth cookie.
-
-    Does not require a permission grant: it is the entry point that mints an
-    auth token. Returns 401 on bad credentials, a disabled account, or no
-    password set.
-    """
-    service = UserService(session)
-    user = await service.authenticate(payload.username, payload.password)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password.",
-        )
-    token = create_auth_token(user.id)
-    _set_auth_cookie(response, token)
-    await session.commit()
-    return LoginResponse(user=UserRead.model_validate(user))
-
-
-@router.post(
-    "/logout",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def logout(response: Response) -> None:
-    """Clear the session cookie, ending the authenticated session.
-
-    Mirrors ``login``: like login it needs no permission grant, since clearing
-    a cookie is harmless when none is present and is the entry point's inverse.
-    The cookie is expired by setting ``max_age=0`` so browsers delete it
-    immediately (AGENTS.md §9).
-    """
-    cfg = get_config()
-    response.delete_cookie(
-        key=cfg.auth_cookie_name,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=cfg.auth_cookie_secure,
-    )

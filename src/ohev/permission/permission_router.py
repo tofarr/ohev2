@@ -16,10 +16,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.permission.permission_dependencies import (
-    SessionDep,
-    require_permission,
-)
+from ohev.db import SessionDep
+from ohev.permission.permission_dependencies import require_permission
 from ohev.permission.permission_models import Action, ResourceType
 from ohev.permission.permission_schemas import (
     PermissionCreate,

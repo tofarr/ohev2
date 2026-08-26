@@ -53,7 +53,10 @@ class TestListUsersRoute:
         resp = await client.get("/users")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["items"] == []
+        # The conftest seeds a test-principal user, so the collection is never
+        # truly empty; assert only the seeded row is present.
+        assert len(body["items"]) == 1
+        assert body["items"][0]["username"] == "test-principal"
         assert body["next_cursor"] is None
         assert body["limit"] == 50
 
@@ -93,7 +96,8 @@ class TestListUsersRoute:
         resp = await client.get("/users?email__contains=EXAMPLE")
         assert resp.status_code == 200
         emails = {u["email"] for u in resp.json()["items"]}
-        assert emails == {"Alice@example.com", "bob@example.com"}
+        # The seeded test-principal (test@example.com) also matches EXAMPLE.
+        assert emails == {"Alice@example.com", "bob@example.com", "test@example.com"}
 
     async def test_search_email_contains_no_match(self, client: AsyncClient) -> None:
         await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
@@ -141,14 +145,16 @@ class TestCountUsersRoute:
     async def test_count_empty(self, client: AsyncClient) -> None:
         resp = await client.get("/users/count")
         assert resp.status_code == 200
-        assert resp.json() == {"count": 0}
+        # The conftest seeds a test-principal user.
+        assert resp.json() == {"count": 1}
 
     async def test_count_after_creates(self, client: AsyncClient) -> None:
         for i in range(3):
             await client.post("/users", json={"email": f"c{i}@example.com", "username": f"c{i}"})
         resp = await client.get("/users/count")
         assert resp.status_code == 200
-        assert resp.json()["count"] == 3
+        # 3 created + 1 seeded test-principal.
+        assert resp.json()["count"] == 4
 
     async def test_count_with_email_filter(self, client: AsyncClient) -> None:
         await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
@@ -163,7 +169,8 @@ class TestCountUsersRoute:
         await client.delete(f"/users/{create.json()['id']}")
         resp = await client.get("/users/count")
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        # keep + 1 seeded test-principal (del was deleted).
+        assert resp.json()["count"] == 2
 
 
 class TestUpdateUserRoute:
@@ -329,7 +336,7 @@ class TestPermissionEnforcement:
 
 
 class TestLoginRoute:
-    """POST /users/login mints a JWE auth cookie."""
+    """POST /auth/login mints a JWE auth cookie."""
 
     async def test_login_success_sets_cookie_and_returns_user(
         self, client: AsyncClient, session
@@ -344,12 +351,11 @@ class TestLoginRoute:
         )
         await session.commit()
 
-        resp = await client.post("/users/login", json={"username": "alice", "password": "hunter2"})
+        resp = await client.post("/auth/login", json={"username": "alice", "password": "hunter2"})
         assert resp.status_code == 200
         body = resp.json()
-        assert body["token_type"] == "bearer"
-        assert body["user"]["username"] == "alice"
-        assert "password" not in body["user"]
+        assert body["username"] == "alice"
+        assert body["token_type"] == "cookie"
         # Cookie set with the configured name.
         assert "ohesession" in resp.cookies
 
@@ -364,12 +370,12 @@ class TestLoginRoute:
         )
         await session.commit()
 
-        resp = await client.post("/users/login", json={"username": "alice", "password": "wrong"})
+        resp = await client.post("/auth/login", json={"username": "alice", "password": "wrong"})
         assert resp.status_code == 401
         assert "ohesession" not in resp.cookies
 
     async def test_login_unknown_user_returns_401(self, client: AsyncClient) -> None:
-        resp = await client.post("/users/login", json={"username": "nobody", "password": "x"})
+        resp = await client.post("/auth/login", json={"username": "nobody", "password": "x"})
         assert resp.status_code == 401
 
     async def test_login_disabled_user_returns_401(self, client: AsyncClient, session) -> None:
@@ -388,7 +394,7 @@ class TestLoginRoute:
         )
         await session.commit()
 
-        resp = await client.post("/users/login", json={"username": "alice", "password": "hunter2"})
+        resp = await client.post("/auth/login", json={"username": "alice", "password": "hunter2"})
         assert resp.status_code == 401
 
     async def test_login_token_authenticates_subsequent_request(
@@ -434,7 +440,7 @@ class TestLoginRoute:
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            login = await ac.post("/auth/login", json={"username": "alice", "password": "hunter2"})
             assert login.status_code == 200
             cookie_token = login.cookies["ohesession"]
             resp = await ac.get("/users", headers={"Cookie": f"ohesession={cookie_token}"})
@@ -478,7 +484,7 @@ class TestLoginRoute:
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            login = await ac.post("/auth/login", json={"username": "alice", "password": "hunter2"})
             assert login.status_code == 200
             # The token lives in the cookie; send it as a Bearer header instead
             # to exercise the Authorization fallback path.
@@ -491,7 +497,7 @@ class TestLogoutRoute:
     """POST /users/logout clears the session cookie."""
 
     async def test_logout_returns_204(self, client: AsyncClient) -> None:
-        resp = await client.post("/users/logout")
+        resp = await client.post("/auth/logout")
         assert resp.status_code == 204
 
     async def test_logout_clears_session_cookie(
@@ -532,11 +538,11 @@ class TestLogoutRoute:
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            login = await ac.post("/auth/login", json={"username": "alice", "password": "hunter2"})
             assert login.status_code == 200
             assert "ohesession" in ac.cookies
 
-            logout = await ac.post("/users/logout")
+            logout = await ac.post("/auth/logout")
             assert logout.status_code == 204
             # delete_cookie sets max-age=0, which the client applies: the
             # stored cookie is removed from the client jar.
@@ -544,5 +550,111 @@ class TestLogoutRoute:
 
     async def test_logout_without_session_is_noop(self, client: AsyncClient) -> None:
         """Logging out when no session cookie exists still returns 204."""
-        resp = await client.post("/users/logout")
+        resp = await client.post("/auth/logout")
         assert resp.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# User router error paths (conflicts, not-found, count)
+# ---------------------------------------------------------------------------
+
+
+class TestUserRouterErrorPaths:
+    async def test_count_endpoint(self, client: AsyncClient) -> None:
+        resp = await client.get("/users/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] >= 1
+
+    async def test_create_duplicate_email_409(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="dup@example.com", username="dup1", password="hunter2")
+        )
+        await session.commit()
+        resp = await client.post(
+            "/users",
+            json={
+                "email": "dup@example.com",
+                "username": "dup2",
+                "password": "hunter2",
+            },
+        )
+        assert resp.status_code == 409
+
+    async def test_create_duplicate_username_409(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="uniq@example.com", username="samename", password="hunter2")
+        )
+        await session.commit()
+        resp = await client.post(
+            "/users",
+            json={
+                "email": "other@example.com",
+                "username": "samename",
+                "password": "hunter2",
+            },
+        )
+        assert resp.status_code == 409
+
+    async def test_get_unknown_user_404(self, client: AsyncClient) -> None:
+        resp = await client.get(f"/users/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_update_unknown_user_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(f"/users/{uuid.uuid4()}", json={"email": "x@example.com"})
+        assert resp.status_code == 404
+
+    async def test_update_user_email_conflict(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="a@example.com", username="ua", password="hunter2")
+        )
+        target = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="b@example.com", username="ub", password="hunter2")
+        )
+        await session.commit()
+        resp = await client.patch(f"/users/{target.id}", json={"email": "a@example.com"})
+        assert resp.status_code == 409
+
+    async def test_update_user_username_conflict(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="c@example.com", username="uc", password="hunter2")
+        )
+        target = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="d@example.com", username="ud", password="hunter2")
+        )
+        await session.commit()
+        resp = await client.patch(f"/users/{target.id}", json={"username": "uc"})
+        assert resp.status_code == 409
+
+    async def test_update_user_success(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        target = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="upd@example.com", username="upd", password="hunter2")
+        )
+        await session.commit()
+        resp = await client.patch(f"/users/{target.id}", json={"enabled": False})
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False

@@ -55,6 +55,7 @@ class ResourceType(enum.StrEnum):
 
     USER = "user"
     PERMISSION = "permission"
+    API_KEY = "api_key"
 
 
 class Permission(Base):

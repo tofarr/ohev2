@@ -65,7 +65,8 @@ asyncio_mode = "auto"
 filterwarnings = ["error"]
 
 [tool.coverage.run]
-branch = true
+branch = false
+core = "sysmon"
 source = ["ohev"]
 omit = ["tests/*"]
 

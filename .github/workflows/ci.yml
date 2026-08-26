@@ -63,7 +63,7 @@ jobs:
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
-          quint run specs/auth.qnt --main=auth --invariant=sessionIdsUnique --max-steps=100
+          quint run specs/auth.qnt --main=auth --invariant=jtiUniqueInvariant --max-steps=100
           quint run specs/encryption.qnt --main=encryption --invariant=encryptionKeyInDecryptionKeys --max-steps=100
           quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100
           quint run specs/user.qnt --main=user --invariant=userEmailsUnique --max-steps=100

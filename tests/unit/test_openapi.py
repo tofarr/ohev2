@@ -19,7 +19,13 @@ def openapi_spec(app: FastAPI) -> dict[str, object]:
     return app.openapi()
 
 
-_PUBLIC_PATHS = {"/health", "/users/login"}
+_PUBLIC_PATHS = {
+    "/health",
+    "/auth/login",
+    "/auth/logout",
+    "/auth/token",
+    "/auth/refresh",
+}
 
 
 def _protected_ops(spec: dict[str, object]) -> list[tuple[str, str, dict[str, object]]]:
@@ -73,4 +79,7 @@ def test_protected_endpoints_carry_security(
 def test_health_and_login_are_public(openapi_spec: dict[str, object]) -> None:
     paths = openapi_spec["paths"]  # type: ignore[index]
     assert not paths["/health"]["get"].get("security")  # type: ignore[index]
-    assert not paths["/users/login"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/login"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/token"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/refresh"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/logout"]["post"].get("security")  # type: ignore[index]

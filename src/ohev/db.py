@@ -7,8 +7,9 @@ All feature models import `Base` from here so Alembic autogenerate sees a single
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Annotated, Any
 
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -71,3 +72,9 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     factory = get_session_factory()
     async with factory() as session:
         yield session
+
+
+# Shared request-scoped session dependency. Lives here (not in a feature
+# module) so routers, services, and the auth dependency all import it from one
+# place rather than each feature redeclaring it.
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
