@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from ohev.app import create_app
 from ohev.config import get_config
 from ohev.db import Base, reset_engine_factory
-from ohev.permission.models.permission import Permission  # noqa: F401
-from ohev.user.models.user import User  # noqa: F401
+from ohev.permission.permission_models import Permission  # noqa: F401
+from ohev.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
 # to the default localhost DSN used by docker-compose.
@@ -39,7 +39,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point AppConfig at the test database and reset cached engine/factory."""
     get_config.cache_clear()
     reset_engine_factory()
-    from ohev.permission.services import reset_base_permissions_cache
+    from ohev.permission.permission_service import reset_base_permissions_cache
 
     reset_base_permissions_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")

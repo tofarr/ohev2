@@ -12,11 +12,11 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.models.permission import Action, Permission, ResourceType
-from ohev.permission.schemas import PermissionCreate
-from ohev.permission.services import PermissionService, reset_base_permissions_cache
-from ohev.user.schemas import UserCreate
-from ohev.user.services import UserService
+from ohev.permission.permission_models import Action, Permission, ResourceType
+from ohev.permission.permission_schemas import PermissionCreate
+from ohev.permission.permission_service import PermissionService, reset_base_permissions_cache
+from ohev.user.user_schemas import UserCreate
+from ohev.user.user_service import UserService
 
 
 def _perm(

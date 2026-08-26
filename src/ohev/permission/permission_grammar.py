@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ohev.permission.models.permission import Action, Permission, ResourceType
+from ohev.permission.permission_models import Action, Permission, ResourceType
 
 _ACTION_VALUES = {a.value for a in Action}
 _SEPARATOR = ":"

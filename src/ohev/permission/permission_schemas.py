@@ -7,8 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ohev.permission.models.permission import Action, Permission, ResourceType
-from ohev.utilities.search_filter import BaseSearchFilter
+from ohev.permission.permission_models import Action, Permission, ResourceType
+from ohev.util.search_filter import BaseSearchFilter
 
 
 class PermissionCreate(BaseModel):

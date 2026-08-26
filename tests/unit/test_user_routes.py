@@ -7,7 +7,7 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-from ohev.permission.services import reset_base_permissions_cache
+from ohev.permission.permission_service import reset_base_permissions_cache
 
 
 class TestCreateUserRoute:
@@ -214,11 +214,11 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.models.permission import Action, ResourceType
-        from ohev.permission.schemas import PermissionCreate
-        from ohev.permission.services import PermissionService
-        from ohev.user.schemas import UserCreate
-        from ohev.user.services import UserService
+        from ohev.permission.permission_models import Action, ResourceType
+        from ohev.permission.permission_schemas import PermissionCreate
+        from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
 
         # Create the principal user directly in the DB (bypassing the API,
         # which is itself permission-guarded).
@@ -251,11 +251,11 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.models.permission import Action, ResourceType
-        from ohev.permission.schemas import PermissionCreate
-        from ohev.permission.services import PermissionService
-        from ohev.user.schemas import UserCreate
-        from ohev.user.services import UserService
+        from ohev.permission.permission_models import Action, ResourceType
+        from ohev.permission.permission_schemas import PermissionCreate
+        from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
 
         principal = await UserService(session).create(UserCreate(email="principal@example.com"))
         principal_id = principal.id

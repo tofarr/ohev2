@@ -14,10 +14,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.models.user import User
-from ohev.user.schemas import UserCreate
-from ohev.user.services import UserService
-from ohev.utilities.search_filter import BaseSearchFilter, SearchFilter
+from ohev.user.user_models import User
+from ohev.user.user_schemas import UserCreate
+from ohev.user.user_service import UserService
+from ohev.util.search_filter import BaseSearchFilter, SearchFilter
 
 
 class UserSearchFilter(BaseSearchFilter[User]):

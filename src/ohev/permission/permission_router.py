@@ -13,18 +13,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.permission.dependencies import (
+from ohev.permission.permission_dependencies import (
     SessionDep,
     require_permission,
 )
-from ohev.permission.models.permission import Action, ResourceType
-from ohev.permission.schemas import (
+from ohev.permission.permission_models import Action, ResourceType
+from ohev.permission.permission_schemas import (
     PermissionCreate,
     PermissionRead,
     PermissionSearchFilter,
     PermissionSearchResult,
 )
-from ohev.permission.services import (
+from ohev.permission.permission_service import (
     PermissionConflictError,
     PermissionNotFoundError,
     PermissionService,

@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from ohev.permission.models.permission import Action, Permission, ResourceType
-from ohev.permission.services import (
+from ohev.permission.permission_grammar import (
     PermissionParseError,
     from_components,
     is_valid,
@@ -16,6 +15,7 @@ from ohev.permission.services import (
     parse_many,
     to_string,
 )
+from ohev.permission.permission_models import Action, Permission, ResourceType
 
 
 class TestParseAction:
