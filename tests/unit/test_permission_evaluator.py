@@ -1,8 +1,8 @@
 """Unit tests for permission matching and the check_permission service method.
 
-The model-level `matches_action` and `matches_attributes` methods are pure and
-tested without a database. The `check_permission` service method is DB-backed
-and tested via the session fixture.
+The model-level `matches_action` method is pure and tested without a database.
+The `check_permission` service method is DB-backed and tested via the session
+fixture.
 """
 
 from __future__ import annotations
@@ -28,13 +28,11 @@ def _perm(
     *,
     action: Action = Action.READ,
     resource_type: ResourceType = ResourceType.USER,
-    attributes: list[str] | None = None,
 ) -> Permission:
     return Permission(
         user_id=uuid.uuid4(),
         action=action,
         resource_type=resource_type,
-        attributes=attributes,
     )
 
 
@@ -57,24 +55,6 @@ class TestActionMatching:
 
     def test_use_action_matches(self) -> None:
         assert _perm(action=Action.USE).matches_action("use")
-
-
-class TestAttributeMatching:
-    def test_no_attribute_restriction_covers_all(self) -> None:
-        perm = _perm()
-        assert perm.matches_attributes(["email", "name"])
-
-    def test_attribute_subset_covers_requested(self) -> None:
-        perm = _perm(attributes=["email", "name"])
-        assert perm.matches_attributes(["email"])
-
-    def test_attribute_subset_denies_unlisted(self) -> None:
-        perm = _perm(attributes=["email"])
-        assert not perm.matches_attributes(["email", "password"])
-
-    def test_empty_requested_attributes_allowed(self) -> None:
-        perm = _perm(attributes=["email"])
-        assert perm.matches_attributes([])
 
 
 class TestCheckPermissionDB:

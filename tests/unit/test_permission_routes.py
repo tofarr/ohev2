@@ -33,15 +33,6 @@ class TestCreatePermissionRoute:
         assert body["resource_type"] == "user"
         assert uuid.UUID(body["id"])
 
-    async def test_create_with_attributes(self, client: AsyncClient) -> None:
-        uid = await _make_user(client)
-        resp = await client.post(
-            "/permissions",
-            json=_payload(uid, attributes=["email", "name"]),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["attributes"] == ["email", "name"]
-
     async def test_create_permission_type(self, client: AsyncClient) -> None:
         uid = await _make_user(client)
         resp = await client.post(

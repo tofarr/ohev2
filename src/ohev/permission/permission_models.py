@@ -1,15 +1,17 @@
 """ORM model for the permission feature.
 
 A Permission is an immutable grant record: a *principal* (user) is granted an
-*action* over a *resource type*, optionally restricted to a subset of
-*attributes* and optionally scoped by a *search filter*. The shape is
-intentionally minimal and extensible:
+*action* over a *resource type*, optionally scoped by a *search filter*. The
+shape is intentionally minimal and extensible:
 
   - action ∈ {create, read, update, delete, search, use, all}
   - type   ∈ {user, permission, …}  (extensible enum; column: resource_type)
-  - attributes = ["email", "name"] | None  (None ⇒ all attributes)
   - search_filter = {"kind": "UserSearchFilter", ...} | None
     (None ⇒ unrestricted — the whole resource table is in scope)
+
+Attribute-level filtering is not modeled on the permission itself; when a
+different attribute set is needed, define a distinct schema/router over the
+same underlying model that filters out the unwanted attributes.
 
 ``user_id`` is nullable: a ``None`` principal represents a permission that
 applies even when no user is logged in (anonymous access). Permissions are
@@ -25,8 +27,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy import Enum, ForeignKey, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ohev.db import Base
@@ -60,8 +62,7 @@ class ResourceType(enum.StrEnum):
 class Permission(Base):
     """A single immutable authorization grant.
 
-    ``(user_id, action, resource_type, attributes, search_filter)`` identifies
-    a grant. ``user_id`` may be ``None`` for permissions that apply to
+    ``(user_id, action, resource_type, search_filter)`` identifies a grant. ``user_id`` may be ``None`` for permissions that apply to
     anonymous (not-logged-in) principals. There is no ``updated_at`` and no
     update operation — permissions are delete-and-recreate.
     """
@@ -98,11 +99,6 @@ class Permission(Base):
         index=True,
         default=ResourceType.USER,
     )
-    attributes: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String),
-        default=None,
-        comment="Optional subset of attributes; null means all attributes.",
-    )
     # Serialized SearchFilter (discriminated-union dict with a `kind` key).
     # NULL means "no restriction" — the entire resource table is in scope.
     search_filter: Mapped[dict[str, Any] | None] = mapped_column(
@@ -125,14 +121,3 @@ class Permission(Base):
         if self.action is Action.ALL:
             return True
         return self.action.value == requested
-
-    def matches_attributes(self, requested: list[str]) -> bool:
-        """Whether this permission covers the requested attributes.
-
-        `attributes is None` means all attributes are covered. Otherwise every
-        requested attribute must be present in the allowed set.
-        """
-        if self.attributes is None:
-            return True
-        allowed = set(self.attributes)
-        return all(a in allowed for a in requested)

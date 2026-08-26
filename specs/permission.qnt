@@ -1,11 +1,11 @@
 // Permission specification: ABAC model, grammar round-trip, evaluator,
 // immutability, and config baseline.
 //
-// Models the Permission entity (ABAC grant: principal + action + resource type
-// + attribute subset), the compact string grammar that round-trips a permission
-// to/from a string, the evaluator that checks whether a permission set
-// authorizes a request, and the config-level baseline grants that apply to
-// every authenticated user.
+// Models the Permission entity (ABAC grant: principal + action + resource
+// type + row-level scope), the compact string grammar that round-trips a
+// permission to/from a string, the evaluator that checks whether a permission
+// set authorizes a request, and the config-level baseline grants that apply
+// to every authenticated user.
 //
 // Invariants:
 //   - permission ids are unique
@@ -32,7 +32,6 @@ module permission {
     userId: str,   // may be null in the real model (anonymous); str here for simplicity
     act: Action,
     resourceType: ResourceType,
-    attributes: Set[str],
     scope: Scope,
   }
 
@@ -40,7 +39,6 @@ module permission {
   type BaseGrant = {
     act: Action,
     resourceType: ResourceType,
-    attributes: Set[str],
   }
 
   var permissions: Set[Permission]
@@ -49,8 +47,8 @@ module permission {
   // Immutable config-level baseline (fixed for the spec's lifetime).
   pure val basePermissions: Set[BaseGrant] =
     Set(
-      { act: Wildcard, resourceType: TUser, attributes: Set() },
-      { act: Wildcard, resourceType: TPermission, attributes: Set() }
+      { act: Wildcard, resourceType: TUser },
+      { act: Wildcard, resourceType: TPermission }
     )
 
   action init = all {
@@ -87,28 +85,14 @@ module permission {
   pure def matchesAction(p: Permission, requested: str): bool =
     actionMatches(p.act, requested)
 
-  // Whether an attribute set covers the requested attributes.
-  // An empty attribute set means all attributes are covered.
-  pure def attributesMatch(attrs: Set[str], requested: Set[str]): bool =
-    or {
-      attrs == Set(),
-      requested.forall(a => attrs.contains(a)),
-    }
-
-  // Whether a permission's attribute set covers the requested attributes.
-  pure def matchesAttributes(p: Permission, requested: Set[str]): bool =
-    attributesMatch(p.attributes, requested)
-
   // Whether a single permission authorizes the request.
   pure def permissionAllows(
     p: Permission,
     actVerb: str,
     resourceType: ResourceType,
-    attributes: Set[str],
   ): bool = all {
     p.resourceType == resourceType,
     matchesAction(p, actVerb),
-    matchesAttributes(p, attributes),
   }
 
   // Whether a base grant covers the request.
@@ -116,29 +100,25 @@ module permission {
     g: BaseGrant,
     actVerb: str,
     resourceType: ResourceType,
-    attributes: Set[str],
   ): bool = all {
     g.resourceType == resourceType,
     actionMatches(g.act, actVerb),
-    attributesMatch(g.attributes, attributes),
   }
 
   // Whether any base grant authorizes the request.
   pure def baseAllows(
     actVerb: str,
     resourceType: ResourceType,
-    attributes: Set[str],
   ): bool =
-    basePermissions.exists(g => baseGrantAllows(g, actVerb, resourceType, attributes))
+    basePermissions.exists(g => baseGrantAllows(g, actVerb, resourceType))
 
   // Whether any permission in the set authorizes the request.
   pure def isAllowed(
     perms: Set[Permission],
     actVerb: str,
     resourceType: ResourceType,
-    attributes: Set[str],
   ): bool =
-    perms.exists(p => permissionAllows(p, actVerb, resourceType, attributes))
+    perms.exists(p => permissionAllows(p, actVerb, resourceType))
 
   // Combined check: base grants OR per-user permissions.
   // This mirrors the runtime: base checked in-memory, DB queried only if base
@@ -147,11 +127,10 @@ module permission {
     perms: Set[Permission],
     actVerb: str,
     resourceType: ResourceType,
-    attributes: Set[str],
   ): bool =
     or {
-      baseAllows(actVerb, resourceType, attributes),
-      isAllowed(perms, actVerb, resourceType, attributes),
+      baseAllows(actVerb, resourceType),
+      isAllowed(perms, actVerb, resourceType),
     }
 
   // --- Effective search filter (row-level scope) ---
@@ -189,7 +168,7 @@ module permission {
     actVerb: str,
     resourceType: ResourceType,
   ): Scope = {
-    if (baseAllows(actVerb, resourceType, Set()))
+    if (baseAllows(actVerb, resourceType))
       SAll
     else {
       val applicable = applicablePerms(perms, userId, actVerb, resourceType)
@@ -278,17 +257,7 @@ module permission {
     userId: "u1",
     act: Read,
     resourceType: TUser,
-    attributes: Set(),
     scope: SAll,
-  }
-
-  pure val attrSubsetPerm: Permission = {
-    id: "p1",
-    userId: "u1",
-    act: Read,
-    resourceType: TUser,
-    attributes: Set("email", "name"),
-    scope: SPred,
   }
 
   pure val wildcardPerm: Permission = {
@@ -296,7 +265,6 @@ module permission {
     userId: "u1",
     act: Wildcard,
     resourceType: TPermission,
-    attributes: Set(),
     scope: SAll,
   }
 
@@ -328,7 +296,6 @@ module permission {
         userId: "u1",
         act: Update,
         resourceType: TUser,
-        attributes: Set(),
         scope: SAll,
       }))
       .fail()
@@ -340,7 +307,6 @@ module permission {
       userId: "u1",
       act: Wildcard,
       resourceType: TUser,
-      attributes: Set(),
       scope: SAll,
     }, "delete"))
   }
@@ -351,37 +317,27 @@ module permission {
       userId: "u1",
       act: Search,
       resourceType: TUser,
-      attributes: Set(),
       scope: SAll,
     }, "search"))
   }
 
-  run attributeSubsetRestrictsAccess = all {
-    assert(matchesAttributes(attrSubsetPerm, Set("email"))),
-    assert(matchesAttributes(attrSubsetPerm, Set("email", "name"))),
-    assert(not(matchesAttributes(attrSubsetPerm, Set("email", "password")))),
-  }
-
-  run emptyAttributesAllowsAll =
-    assert(matchesAttributes(readAllUsers, Set("email", "name", "password")))
-
   run evaluatorAllowsMatchingPermission =
-    assert(isAllowed(Set(readAllUsers), "read", TUser, Set()))
+    assert(isAllowed(Set(readAllUsers), "read", TUser))
 
   run evaluatorDeniesNonMatchingResource =
-    assert(not(isAllowed(Set(readAllUsers), "read", TPermission, Set())))
+    assert(not(isAllowed(Set(readAllUsers), "read", TPermission)))
 
   run evaluatorDeniesNonMatchingAction =
-    assert(not(isAllowed(Set(readAllUsers), "update", TUser, Set())))
+    assert(not(isAllowed(Set(readAllUsers), "update", TUser)))
 
   run baseAllowsAllUsers =
-    assert(baseAllows("read", TUser, Set()))
+    assert(baseAllows("read", TUser))
 
   run baseAllowsAllPermissions =
-    assert(baseAllows("create", TPermission, Set()))
+    assert(baseAllows("create", TPermission))
 
   run checkPermissionAllowsViaBase =
-    assert(checkPermission(Set(), "delete", TUser, Set()))
+    assert(checkPermission(Set(), "delete", TUser))
 
   run checkPermissionAllowsViaUserPerm = {
     init
@@ -393,12 +349,10 @@ module permission {
             userId: "u1",
             act: Read,
             resourceType: TPermission,
-            attributes: Set(),
             scope: SAll,
           }),
           "read",
           TPermission,
-          Set(),
         )),
         permissions' = permissions,
         knownUsers' = knownUsers,
@@ -461,7 +415,6 @@ module permission {
             userId: "u1",
             act: Read,
             resourceType: TUser,
-            attributes: Set(),
             scope: SAll,
           }),
           "u1",
@@ -494,7 +447,6 @@ module permission {
             userId: "u1",
             act: Read,
             resourceType: TUser,
-            attributes: Set(),
             scope: SPred,
           }),
           "u1",
@@ -516,7 +468,6 @@ module permission {
             userId: "",
             act: Search,
             resourceType: TUser,
-            attributes: Set(),
             scope: SAll,
           }),
           "u1",

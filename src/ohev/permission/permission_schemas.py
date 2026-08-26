@@ -28,7 +28,6 @@ class PermissionCreate(BaseModel):
     )
     action: Action = Action.READ
     resource_type: ResourceType
-    attributes: list[str] | None = None
     search_filter: dict[str, Any] | None = Field(
         default=None,
         description="Serialized search filter scoping the grant; null = unrestricted.",
@@ -44,7 +43,6 @@ class PermissionRead(BaseModel):
     user_id: uuid.UUID | None
     action: Action
     resource_type: ResourceType
-    attributes: list[str] | None
     search_filter: dict[str, Any] | None
     created_at: datetime
 

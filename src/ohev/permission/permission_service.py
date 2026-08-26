@@ -81,7 +81,6 @@ def _load_base_permissions() -> list[Permission]:
             user_id=None,
             action=p.action,
             resource_type=p.resource_type,
-            attributes=p.attributes,
         )
         for p in parsed
     ]
@@ -98,15 +97,12 @@ def reset_base_permissions_cache() -> None:
 def _base_allows(
     action: str,
     resource_type: ResourceType,
-    attributes: tuple[str, ...],
 ) -> bool:
     """Whether the config baseline grants the request (no I/O)."""
     for perm in _load_base_permissions():
         if perm.resource_type is not resource_type:
             continue
         if not perm.matches_action(action):
-            continue
-        if not perm.matches_attributes(list(attributes)):
             continue
         return True
     return False
@@ -133,7 +129,6 @@ class PermissionService:
             user_id=payload.user_id,
             action=payload.action,
             resource_type=payload.resource_type,
-            attributes=payload.attributes,
             search_filter=payload.search_filter,
         )
         if not perm_filter.matches(permission):
@@ -145,7 +140,7 @@ class PermissionService:
             await self._session.rollback()
             raise PermissionConflictError(str(payload)) from exc
         # Refresh so server-side defaults (id, created_at) are loaded before
-        # the router commits and expires attributes.
+        # the router commits and expires the ORM object.
         await self._session.refresh(permission)
         return permission
 
@@ -203,7 +198,6 @@ class PermissionService:
         user_id: uuid.UUID | None,
         action: Action,
         resource_type: ResourceType,
-        attributes: tuple[str, ...] = (),
     ) -> bool:
         """Whether *user_id* is granted *action* on *resource_type*.
 
@@ -233,7 +227,7 @@ class PermissionService:
         filters: list[SearchFilter[Any]] = []
         # Config baseline is an unrestricted (All) grant when it covers the
         # request; it does not carry a row-level scope.
-        if _base_allows(action.value, resource_type, ()):
+        if _base_allows(action.value, resource_type):
             filters.append(AllSearchFilter[Any]())
         filters.extend(
             self._deserialize_filter(p.search_filter, resource_type)
@@ -291,13 +285,11 @@ class PermissionService:
         user_id: uuid.UUID | None,
         action: Action,
         resource_type: ResourceType,
-        attributes: tuple[str, ...],
     ) -> bool:
         """Single SQL EXISTS query for the per-user permission check.
 
         Matches a row where: user_id is the principal or NULL, resource_type
-        matches, action is ALL or the exact action, and (attributes is NULL OR
-        attributes ⊇ requested).
+        matches, and action is ALL or the exact action.
         """
         user_clause = (
             Permission.user_id.is_(None)
@@ -311,12 +303,6 @@ class PermissionService:
             .where(Permission.resource_type == resource_type)
             .where((Permission.action == Action.ALL) | (Permission.action == action))
         )
-        if attributes:
-            # PostgreSQL array containment operator: attributes @> requested
-            stmt = stmt.where(
-                (Permission.attributes.is_(None))
-                | (Permission.attributes.op("@>")(list(attributes)))
-            )
         result = await self._session.execute(stmt.limit(1))
         return result.scalar_one_or_none() is not None
 

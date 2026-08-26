@@ -23,7 +23,6 @@ class TestParseAction:
         p = parse("read:user")
         assert p.action is Action.READ
         assert p.resource_type is ResourceType.USER
-        assert p.attributes is None
 
     def test_wildcard_action(self) -> None:
         p = parse("all:permission")
@@ -64,20 +63,6 @@ class TestParseType:
             parse("read:sandboxes")
 
 
-class TestParseAttributes:
-    def test_single_attribute(self) -> None:
-        p = parse("read.email:user")
-        assert p.attributes == ["email"]
-
-    def test_multiple_attributes(self) -> None:
-        p = parse("read.email,name:user")
-        assert p.attributes == ["email", "name"]
-
-    def test_no_attributes_means_none(self) -> None:
-        p = parse("read:user")
-        assert p.attributes is None
-
-
 class TestParseErrors:
     @pytest.mark.parametrize("s", ["", "  ", "read", "read:user:extra", "read:"])
     def test_malformed(self, s: str) -> None:
@@ -111,8 +96,6 @@ class TestRoundTrip:
             "delete:user",
             "search:permission",
             "use:user",
-            "read.email,name:user",
-            "read.email:permission",
         ],
     )
     def test_roundtrip(self, s: str) -> None:
@@ -120,7 +103,6 @@ class TestRoundTrip:
         rebuilt = from_components(
             action=p.action,
             resource_type=p.resource_type,
-            attributes=p.attributes,
         )
         assert rebuilt == s
 
@@ -131,9 +113,8 @@ class TestRoundTrip:
             user_id=uuid.uuid4(),
             action=Action.READ,
             resource_type=ResourceType.USER,
-            attributes=["email"],
         )
-        assert to_string(perm) == "read.email:user"
+        assert to_string(perm) == "read:user"
 
     def test_to_string_all_selector(self) -> None:
         import uuid

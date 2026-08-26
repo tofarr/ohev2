@@ -2,10 +2,9 @@
 
 Grammar (URI-path inspired, matches the plural-noun REST resources)::
 
-    <action>[.<attr>...]:<type>
+    <action>:<type>
 
 - ``action`` ∈ {create, read, update, delete, search, use, all}  (all = wildcard / all actions)
-- ``.attr`` suffix, comma-separated, scopes to attributes; absent = all attributes
 - ``type`` is a resource type noun (e.g. ``user``, ``permission``)
 
 A leading principal segment is *not* part of the permission string itself; the
@@ -13,7 +12,6 @@ principal (user id) is carried by the enclosing Permission row. Examples::
 
     read:user
     all:permission
-    read.email,name:user
     use:permission
 
 These functions are pure and fully unit-tested. They do not touch the database.
@@ -27,8 +25,6 @@ from ohev.permission.permission_models import Action, Permission, ResourceType
 
 _ACTION_VALUES = {a.value for a in Action}
 _SEPARATOR = ":"
-_ATTR_SEPARATOR = "."
-_ATTR_LIST_SEPARATOR = ","
 _TYPE_VALUES = {t.value for t in ResourceType}
 
 
@@ -42,7 +38,6 @@ class ParsedPermission:
 
     action: Action
     resource_type: ResourceType
-    attributes: list[str] | None
 
 
 def parse(permission_str: str) -> ParsedPermission:
@@ -55,10 +50,10 @@ def parse(permission_str: str) -> ParsedPermission:
     if not text:
         raise PermissionParseError("empty permission string")
 
-    # Split action[.attrs] : type
+    # Split action : type
     parts = text.split(_SEPARATOR)
     if len(parts) != 2:
-        raise PermissionParseError(f"expected '<action>[.attrs]:<type>', got {text!r}")
+        raise PermissionParseError(f"expected '<action>:<type>', got {text!r}")
 
     action_segment = parts[0]
     type_segment = parts[1]
@@ -66,33 +61,24 @@ def parse(permission_str: str) -> ParsedPermission:
     if not type_segment:
         raise PermissionParseError("type is empty")
 
-    action, attributes = _parse_action_segment(action_segment)
+    action = _parse_action(action_segment)
     resource_type = _parse_type(type_segment)
 
     return ParsedPermission(
         action=action,
         resource_type=resource_type,
-        attributes=attributes,
     )
 
 
-def _parse_action_segment(segment: str) -> tuple[Action, list[str] | None]:
-    """Split '<action>[.<attr>,<attr>]' into (Action, attributes|None)."""
+def _parse_action(segment: str) -> Action:
+    """Map an action segment to an Action enum value."""
     if not segment:
         raise PermissionParseError("action segment is empty")
-    bits = segment.split(_ATTR_SEPARATOR)
-    action_token = bits[0]
-    if action_token not in _ACTION_VALUES:
+    if segment not in _ACTION_VALUES:
         raise PermissionParseError(
-            f"unknown action {action_token!r}; expected one of {sorted(_ACTION_VALUES)}"
+            f"unknown action {segment!r}; expected one of {sorted(_ACTION_VALUES)}"
         )
-    action = Action(action_token)
-    # Attributes are comma-separated within the first dot-segment after the action.
-    attr_bits: list[str] = []
-    if len(bits) > 1:
-        attr_bits = [b for b in bits[1].split(_ATTR_LIST_SEPARATOR) if b]
-    attributes = attr_bits or None
-    return action, attributes
+    return Action(segment)
 
 
 def _parse_type(type_segment: str) -> ResourceType:
@@ -109,7 +95,6 @@ def to_string(permission: Permission) -> str:
     return from_components(
         action=permission.action,
         resource_type=permission.resource_type,
-        attributes=permission.attributes,
     )
 
 
@@ -117,13 +102,9 @@ def from_components(
     *,
     action: Action,
     resource_type: ResourceType,
-    attributes: list[str] | None,
 ) -> str:
     """Build a permission string from explicit components."""
-    action_token = action.value
-    if attributes:
-        action_token += _ATTR_SEPARATOR + _ATTR_LIST_SEPARATOR.join(attributes)
-    return _SEPARATOR.join([action_token, resource_type.value])
+    return _SEPARATOR.join([action.value, resource_type.value])
 
 
 def parse_many(joined: str) -> list[ParsedPermission]:

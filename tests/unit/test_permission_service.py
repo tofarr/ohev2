@@ -54,11 +54,6 @@ class TestCreatePermission:
         assert perm.resource_type is ResourceType.USER
         assert perm.created_at is not None
 
-    async def test_create_with_attributes(self, service: PermissionService, session) -> None:
-        uid = await _make_user(session)
-        perm = await service.create(_create_payload(uid, attributes=["email", "name"]), _ALL)
-        assert perm.attributes == ["email", "name"]
-
     async def test_create_defaults_to_unrestricted_scope(
         self, service: PermissionService, session
     ) -> None:
