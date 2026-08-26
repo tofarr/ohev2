@@ -172,14 +172,15 @@ class TestDeleteUserRoute:
 class TestPermissionEnforcement:
     """Tests for the permission check on user endpoints."""
 
-    async def test_missing_auth_header_returns_401(self, app) -> None:
-        # Use a client without the X-User-Id header to test the 401 path.
+    async def test_missing_auth_header_anonymous_allowed(self, app) -> None:
+        # Auth is optional; without X-User-Id the request is treated as
+        # anonymous and the baseline permissions grant access (200).
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get("/users")
-        assert resp.status_code == 401
+        assert resp.status_code == 200
 
     async def test_invalid_auth_header_returns_401(self, client: AsyncClient) -> None:
         resp = await client.get("/users", headers={"X-User-Id": "not-a-uuid"})
@@ -214,15 +215,19 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, ResourceType
+        from ohev.permission.permission_models import Action, Permission, ResourceType
         from ohev.permission.permission_schemas import PermissionCreate
         from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_models import User
         from ohev.user.user_schemas import UserCreate
         from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
 
         # Create the principal user directly in the DB (bypassing the API,
         # which is itself permission-guarded).
-        principal = await UserService(session).create(UserCreate(email="principal@example.com"))
+        principal = await UserService(session).create(
+            UserCreate(email="principal@example.com"), AllSearchFilter[User]()
+        )
         principal_id = principal.id
 
         service = PermissionService(session)
@@ -231,7 +236,8 @@ class TestPermissionEnforcement:
                 user_id=principal_id,
                 action=Action.SEARCH,
                 resource_type=ResourceType.USER,
-            )
+            ),
+            AllSearchFilter[Permission](),
         )
         await session.commit()
 
@@ -251,13 +257,17 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, ResourceType
+        from ohev.permission.permission_models import Action, Permission, ResourceType
         from ohev.permission.permission_schemas import PermissionCreate
         from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_models import User
         from ohev.user.user_schemas import UserCreate
         from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
 
-        principal = await UserService(session).create(UserCreate(email="principal@example.com"))
+        principal = await UserService(session).create(
+            UserCreate(email="principal@example.com"), AllSearchFilter[User]()
+        )
         principal_id = principal.id
 
         service = PermissionService(session)
@@ -266,7 +276,8 @@ class TestPermissionEnforcement:
                 user_id=principal_id,
                 action=Action.SEARCH,
                 resource_type=ResourceType.USER,
-            )
+            ),
+            AllSearchFilter[Permission](),
         )
         await session.commit()
 

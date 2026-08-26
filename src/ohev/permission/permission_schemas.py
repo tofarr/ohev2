@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,14 +13,26 @@ from ohev.util.search_filter import BaseSearchFilter
 
 
 class PermissionCreate(BaseModel):
-    """Payload to create a permission. Permissions are immutable (no update)."""
+    """Payload to create a permission. Permissions are immutable (no update).
+
+    ``user_id`` is optional: omitting it creates a permission for the
+    anonymous (not-logged-in) principal. ``search_filter`` scopes the grant to
+    a subset of the resource; omitting it means the whole table is in scope.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None = Field(
+        default=None,
+        description="Principal the grant applies to; null = anonymous.",
+    )
     action: Action = Action.READ
     resource_type: ResourceType
     attributes: list[str] | None = None
+    search_filter: dict[str, Any] | None = Field(
+        default=None,
+        description="Serialized search filter scoping the grant; null = unrestricted.",
+    )
 
 
 class PermissionRead(BaseModel):
@@ -28,10 +41,11 @@ class PermissionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None
     action: Action
     resource_type: ResourceType
     attributes: list[str] | None
+    search_filter: dict[str, Any] | None
     created_at: datetime
 
 

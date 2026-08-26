@@ -52,11 +52,28 @@ from datetime import datetime
 from typing import Any, Generic, TypeVar, cast
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
+from pydantic import field_validator
+from sqlalchemy import and_, false, or_
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select
 
-__all__ = ["BaseSearchFilter", "SearchFilter"]
+__all__ = [
+    "AllSearchFilter",
+    "AndSearchFilter",
+    "BaseSearchFilter",
+    "NoneSearchFilter",
+    "OrSearchFilter",
+    "SearchFilter",
+]
 
 T = TypeVar("T")
+S = TypeVar("S", bound=Select[Any])
+
+# A SQL boolean expression (the WHERE clause fragment a filter contributes).
+# `None` means "no restriction" — the filter matches every row, so it adds no
+# clause. This keeps `AllSearchFilter` and an unset `BaseSearchFilter` uniform:
+# both contribute `None` and therefore no WHERE.
+SqlCondition = ColumnElement[bool] | None
 
 # Operators recognized on the `<attribute>__<op>` field-name convention.
 # Each maps to (sql_builder, in_memory_predicate). The SQL builder receives
@@ -140,9 +157,26 @@ class SearchFilter(DiscriminatedUnionMixin, ABC, Generic[T]):  # noqa: UP046
         raise NotImplementedError
 
     @abstractmethod
-    def filter_sql(self, stmt: Select[tuple[T]]) -> Select[tuple[T]]:
-        """Return *stmt* with this filter's WHERE clauses applied."""
+    def sql_condition(self) -> SqlCondition:
+        """SQL boolean expression this filter contributes to a WHERE clause.
+
+        Returning ``None`` means "no restriction" (matches every row); the
+        default :meth:`filter_sql` adds no clause in that case. Composite
+        filters combine their children's conditions here so a single
+        ``WHERE`` is produced.
+        """
         raise NotImplementedError
+
+    def filter_sql(self, stmt: S) -> S:
+        """Return *stmt* with this filter's WHERE clause applied.
+
+        Delegates to :meth:`sql_condition`; ``None`` (no restriction) leaves
+        the statement untouched.
+        """
+        condition = self.sql_condition()
+        if condition is None:
+            return stmt
+        return stmt.where(condition)
 
 
 class BaseSearchFilter(SearchFilter[T]):
@@ -168,23 +202,43 @@ class BaseSearchFilter(SearchFilter[T]):
                 return False
         return True
 
-    def filter_sql(self, stmt: Select[tuple[T]]) -> Select[tuple[T]]:
+    def sql_condition(self) -> SqlCondition:
+        clauses: list[ColumnElement[bool]] = []
+        for attr, op, value in self._active_clauses():
+            sql_builder, _ = _OPS[op]
+            column = self._column(attr)
+            clauses.append(sql_builder(column, value))
+        if not clauses:
+            return None
+        if len(clauses) == 1:
+            return clauses[0]
+        return and_(*clauses)
+
+    def filter_sql(self, stmt: S) -> S:
+        # Overridden only to surface a clear error for an unparameterized
+        # entity; the common path delegates to sql_condition via the base.
         entity = type(self)._entity_cls
         if not isinstance(entity, type):
             raise TypeError(
                 f"{type(self).__name__} is not parameterized with a concrete entity "
                 "type; subclass as BaseSearchFilter[YourEntity] to enable SQL filtering."
             )
-        for attr, op, value in self._active_clauses():
-            sql_builder, _ = _OPS[op]
-            column = getattr(entity, attr, None)
-            if column is None:
-                raise AttributeError(
-                    f"{entity.__name__!r} has no attribute {attr!r} "
-                    f"required by filter field {attr!r}__{op}"
-                )
-            stmt = stmt.where(sql_builder(column, value))
-        return stmt
+        return super().filter_sql(stmt)
+
+    def _column(self, attr: str) -> Any:
+        entity = type(self)._entity_cls
+        if not isinstance(entity, type):
+            raise TypeError(
+                f"{type(self).__name__} is not parameterized with a concrete entity "
+                "type; subclass as BaseSearchFilter[YourEntity] to enable SQL filtering."
+            )
+        column = getattr(entity, attr, None)
+        if column is None:
+            raise AttributeError(
+                f"{entity.__name__!r} has no attribute {attr!r} "
+                f"required by filter field {attr!r}__op"
+            )
+        return column
 
     def _active_clauses(self) -> Iterator[tuple[str, str, Any]]:
         """Yield (attribute, operator, value) for every set filter field.
@@ -200,3 +254,103 @@ class BaseSearchFilter(SearchFilter[T]):
             if value is None:
                 continue
             yield head, op, value
+
+
+class AllSearchFilter(SearchFilter[T]):
+    """Constant filter that matches every item (no restriction).
+
+    The identity for conjunction: ``And([... All, f]) == f``. Its SQL
+    condition is ``None`` (no WHERE clause).
+    """
+
+    def matches(self, item: T) -> bool:
+        return True
+
+    def sql_condition(self) -> SqlCondition:
+        return None
+
+
+class NoneSearchFilter(SearchFilter[T]):
+    """Constant filter that matches no item.
+
+    Its SQL condition is ``false`` so any statement filtered by it yields
+    zero rows. The identity for disjunction: ``Or([... None, f]) == f``.
+    """
+
+    def matches(self, item: T) -> bool:
+        return False
+
+    def sql_condition(self) -> SqlCondition:
+        return false()
+
+
+class AndSearchFilter(SearchFilter[T]):
+    """Conjunction of a list of search filters.
+
+    An item matches iff it matches every child filter. The SQL condition is
+    the ``AND`` of the children's conditions; a child with ``None`` condition
+    (e.g. :class:`AllSearchFilter`) contributes nothing. An empty filter
+    matches everything (empty conjunction is true).
+    """
+
+    filters: list[Any]
+
+    @field_validator("filters", mode="before")
+    @classmethod
+    def _resolve_children(cls, value: Any) -> Any:
+        """Resolve child dicts via the unparameterized base so the full
+        discriminated-union registry (all subclasses) is available — a
+        parameterized ``SearchFilter[T]`` has an empty subclass registry."""
+        if not isinstance(value, list):
+            return value
+        return [SearchFilter.model_validate(v) if isinstance(v, dict) else v for v in value]
+
+    def matches(self, item: T) -> bool:
+        return all(f.matches(item) for f in self.filters)
+
+    def sql_condition(self) -> SqlCondition:
+        conditions: list[ColumnElement[bool]] = [
+            c for c in (f.sql_condition() for f in self.filters) if c is not None
+        ]
+        if not conditions:
+            return None
+        if len(conditions) == 1:
+            return conditions[0]
+        return and_(*conditions)
+
+
+class OrSearchFilter(SearchFilter[T]):
+    """Disjunction of a list of search filters.
+
+    An item matches iff it matches at least one child filter. The SQL
+    condition is the ``OR`` of the children's conditions; if any child has a
+    ``None`` condition (matches everything) the disjunction matches
+    everything. An empty filter matches nothing (empty disjunction is false).
+    """
+
+    filters: list[Any]
+
+    @field_validator("filters", mode="before")
+    @classmethod
+    def _resolve_children(cls, value: Any) -> Any:
+        """Resolve child dicts via the unparameterized base (see AndSearchFilter)."""
+        if not isinstance(value, list):
+            return value
+        return [SearchFilter.model_validate(v) if isinstance(v, dict) else v for v in value]
+
+    def matches(self, item: T) -> bool:
+        return any(f.matches(item) for f in self.filters)
+
+    def sql_condition(self) -> SqlCondition:
+        conditions: list[ColumnElement[bool]] = [
+            c for c in (f.sql_condition() for f in self.filters) if c is not None
+        ]
+        # Any child that matches everything (None condition) makes the whole
+        # disjunction match everything.
+        if any(f.sql_condition() is None for f in self.filters):
+            return None
+        if not conditions:
+            return false()
+        if len(conditions) == 1:
+            return conditions[0]
+        return or_(*conditions)

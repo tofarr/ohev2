@@ -2,8 +2,10 @@
 
 Follows the uniform REST surface (AGENTS.md §3): GET /users (paginated),
 POST /users, GET/PATCH/DELETE /users/{id}. Handlers validate, call the
-service, and serialize — no business logic here. Every endpoint is guarded
-by a permission check (AGENTS.md §9).
+service, and serialize — no business logic here. Every endpoint is guarded by
+the centralized permission checker (AGENTS.md §9); the returned
+:class:`SearchFilter` is passed to the service so search/update/delete SQL and
+create payloads are scoped to the principal.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from ohev.permission.permission_dependencies import (
     require_permission,
 )
 from ohev.permission.permission_models import Action, ResourceType
+from ohev.user.user_models import User
 from ohev.user.user_schemas import (
     UserCreate,
     UserRead,
@@ -28,8 +31,10 @@ from ohev.user.user_schemas import (
 from ohev.user.user_service import (
     UserEmailConflictError,
     UserNotFoundError,
+    UserPermissionScopeError,
     UserService,
 )
+from ohev.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -47,10 +52,12 @@ def _cursor(value: str) -> uuid.UUID:
 @router.get(
     "",
     response_model=UserSearchResult,
-    dependencies=[Depends(require_permission(Action.SEARCH, ResourceType.USER))],
 )
 async def search_users(
     session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[User], Depends(require_permission(Action.SEARCH, ResourceType.USER))
+    ],
     # `Depends()` (bare) lets FastAPI use the type annotation as the dependency
     # callable and explode the model's fields as individual query params. A
     # factory or `Annotated[..., Query()]` would NOT populate fields from query
@@ -65,6 +72,7 @@ async def search_users(
         cursor=cursor_uuid,
         limit=limit,
         search_filter=search_filter,
+        perm_filter=perm_filter,
     )
     return UserSearchResult(
         items=[UserRead.model_validate(u) for u in users],
@@ -77,12 +85,22 @@ async def search_users(
     "",
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission(Action.CREATE, ResourceType.USER))],
 )
-async def create_user(payload: UserCreate, session: SessionDep) -> UserRead:
+async def create_user(
+    payload: UserCreate,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[User], Depends(require_permission(Action.CREATE, ResourceType.USER))
+    ],
+) -> UserRead:
     service = UserService(session)
     try:
-        user = await service.create(payload)
+        user = await service.create(payload, perm_filter)
+    except UserPermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User falls outside your create scope: {exc}",
+        ) from exc
     except UserEmailConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -95,12 +113,17 @@ async def create_user(payload: UserCreate, session: SessionDep) -> UserRead:
 @router.get(
     "/{user_id}",
     response_model=UserRead,
-    dependencies=[Depends(require_permission(Action.READ, ResourceType.USER))],
 )
-async def get_user(user_id: uuid.UUID, session: SessionDep) -> UserRead:
+async def get_user(
+    user_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[User], Depends(require_permission(Action.READ, ResourceType.USER))
+    ],
+) -> UserRead:
     service = UserService(session)
     try:
-        user = await service.get(user_id)
+        user = await service.get(user_id, perm_filter)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -112,12 +135,18 @@ async def get_user(user_id: uuid.UUID, session: SessionDep) -> UserRead:
 @router.patch(
     "/{user_id}",
     response_model=UserRead,
-    dependencies=[Depends(require_permission(Action.UPDATE, ResourceType.USER))],
 )
-async def update_user(user_id: uuid.UUID, payload: UserUpdate, session: SessionDep) -> UserRead:
+async def update_user(
+    user_id: uuid.UUID,
+    payload: UserUpdate,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[User], Depends(require_permission(Action.UPDATE, ResourceType.USER))
+    ],
+) -> UserRead:
     service = UserService(session)
     try:
-        user = await service.update(user_id, payload)
+        user = await service.update(user_id, payload, perm_filter)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -135,12 +164,17 @@ async def update_user(user_id: uuid.UUID, payload: UserUpdate, session: SessionD
 @router.delete(
     "/{user_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission(Action.DELETE, ResourceType.USER))],
 )
-async def delete_user(user_id: uuid.UUID, session: SessionDep) -> None:
+async def delete_user(
+    user_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[User], Depends(require_permission(Action.DELETE, ResourceType.USER))
+    ],
+) -> None:
     service = UserService(session)
     try:
-        await service.delete(user_id)
+        await service.delete(user_id, perm_filter)
     except UserNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

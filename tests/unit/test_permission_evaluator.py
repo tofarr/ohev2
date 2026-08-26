@@ -15,8 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ohev.permission.permission_models import Action, Permission, ResourceType
 from ohev.permission.permission_schemas import PermissionCreate
 from ohev.permission.permission_service import PermissionService, reset_base_permissions_cache
+from ohev.user.user_models import User
 from ohev.user.user_schemas import UserCreate
 from ohev.user.user_service import UserService
+from ohev.util.search_filter import AllSearchFilter
+
+# Unrestricted permission filter for service-level CRUD tests.
+_ALL = AllSearchFilter[Permission]()
 
 
 def _perm(
@@ -78,7 +83,7 @@ class TestCheckPermissionDB:
     async def _make_user(
         self, session: AsyncSession, email: str = "check@example.com"
     ) -> uuid.UUID:
-        user = await UserService(session).create(UserCreate(email=email))
+        user = await UserService(session).create(UserCreate(email=email), AllSearchFilter[User]())
         return user.id
 
     async def test_base_grant_allows_without_db(self, session: AsyncSession) -> None:
@@ -103,7 +108,10 @@ class TestCheckPermissionDB:
         service = PermissionService(session)
         uid = await self._make_user(session)
         await service.create(
-            PermissionCreate(user_id=uid, action=Action.READ, resource_type=ResourceType.PERMISSION)
+            PermissionCreate(
+                user_id=uid, action=Action.READ, resource_type=ResourceType.PERMISSION
+            ),
+            _ALL,
         )
         assert await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
         assert not await service.check_permission(uid, Action.CREATE, ResourceType.PERMISSION)
@@ -123,14 +131,15 @@ class TestCheckPermissionDB:
         service = PermissionService(session)
         uid = await self._make_user(session)
         await service.create(
-            PermissionCreate(user_id=uid, action=Action.ALL, resource_type=ResourceType.USER)
+            PermissionCreate(user_id=uid, action=Action.ALL, resource_type=ResourceType.USER),
+            _ALL,
         )
         assert not await service.check_permission(uid, Action.READ, ResourceType.PERMISSION)
 
-    async def test_attribute_subset_denies_unlisted(
+    async def test_deny_all_search_filter(
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A permission with attributes subset denies unlisted attributes."""
+        """A permission with a None (deny-all) search filter still counts as a grant."""
         from ohev.config import get_config
 
         get_config.cache_clear()
@@ -146,15 +155,15 @@ class TestCheckPermissionDB:
                 user_id=uid,
                 action=Action.READ,
                 resource_type=ResourceType.USER,
-                attributes=["email"],
-            )
+                search_filter={"kind": "NoneSearchFilter"},
+            ),
+            _ALL,
         )
-        assert await service.check_permission(
-            uid, Action.READ, ResourceType.USER, attributes=("email",)
-        )
-        assert not await service.check_permission(
-            uid, Action.READ, ResourceType.USER, attributes=("email", "password")
-        )
+        # A grant exists, so check_permission returns True; the deny-all scope
+        # is enforced when the effective filter is applied to SQL.
+        assert await service.check_permission(uid, Action.READ, ResourceType.USER)
+        eff = await service.get_effective_filter(uid, Action.READ, ResourceType.USER)
+        assert eff is not None
 
     async def test_no_permission_denied(
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch

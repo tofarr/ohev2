@@ -22,15 +22,21 @@ module permission {
   // Resource types a permission may scope. Extensible as new entities land.
   type ResourceType = TUser | TPermission
 
+  // A row-level scope: All (unrestricted) or None (nothing) or a predicate
+  // over the resource. The real implementation uses SearchFilter subclasses;
+  // the spec models the two constants plus a generic predicate.
+  type Scope = SAll | SNone | SPred
+
   type Permission = {
     id: str,
-    userId: str,
+    userId: str,   // may be null in the real model (anonymous); str here for simplicity
     act: Action,
     resourceType: ResourceType,
     attributes: Set[str],
+    scope: Scope,
   }
 
-  // Config-level baseline grants applied to every authenticated user.
+  // Config-level baseline grants applied to every request (including anonymous).
   type BaseGrant = {
     act: Action,
     resourceType: ResourceType,
@@ -148,6 +154,63 @@ module permission {
       isAllowed(perms, actVerb, resourceType, attributes),
     }
 
+  // --- Effective search filter (row-level scope) ---
+
+  // Whether a permission applies to a principal (matches userId or is
+  // anonymous — userId == "" models the NULL/anonymous principal).
+  pure def appliesToPrincipal(p: Permission, userId: str): bool =
+    or { p.userId == "", p.userId == userId }
+
+  // The set of permissions that apply to (userId, action, resourceType).
+  // Action wildcard (ALL) covers any action; anonymous perms (userId == "")
+  // apply to every principal.
+  pure def applicablePerms(
+    perms: Set[Permission],
+    userId: str,
+    actVerb: str,
+    resourceType: ResourceType,
+  ): Set[Permission] =
+    perms.filter(p =>
+      and {
+        appliesToPrincipal(p, userId),
+        p.resourceType == resourceType,
+        actionMatches(p.act, actVerb),
+      })
+
+  // The effective scope for (userId, action, resourceType). Returns:
+  //   - SAll if the config baseline grants the request (unrestricted);
+  //   - otherwise the OR of applicable permissions' scopes;
+  //   - SNone (deny) if no permission applies.
+  // This is what the centralized permission checker returns; SNone means the
+  // caller denies (no rows visible / no create allowed).
+  pure def effectiveScope(
+    perms: Set[Permission],
+    userId: str,
+    actVerb: str,
+    resourceType: ResourceType,
+  ): Scope = {
+    if (baseAllows(actVerb, resourceType, Set()))
+      SAll
+    else {
+      val applicable = applicablePerms(perms, userId, actVerb, resourceType)
+      if (applicable == Set())
+        SNone
+      else if (applicable.exists(p => p.scope == SAll))
+        SAll
+      else
+        // OR of the (non-All) scopes — modeled as SPred (a predicate).
+        SPred
+    }
+  }
+
+  // Whether the effective scope permits an item that satisfies predicate `pred`.
+  pure def scopePermits(s: Scope, pred: (str) => bool): bool =
+    match s {
+      | SAll => true
+      | SNone => false
+      | SPred => pred("x")
+    }
+
   // --- Actions ---
 
   // Register a known user (principal).
@@ -216,6 +279,7 @@ module permission {
     act: Read,
     resourceType: TUser,
     attributes: Set(),
+    scope: SAll,
   }
 
   pure val attrSubsetPerm: Permission = {
@@ -224,6 +288,7 @@ module permission {
     act: Read,
     resourceType: TUser,
     attributes: Set("email", "name"),
+    scope: SPred,
   }
 
   pure val wildcardPerm: Permission = {
@@ -232,6 +297,7 @@ module permission {
     act: Wildcard,
     resourceType: TPermission,
     attributes: Set(),
+    scope: SAll,
   }
 
   // --- Tests ---
@@ -263,6 +329,7 @@ module permission {
         act: Update,
         resourceType: TUser,
         attributes: Set(),
+        scope: SAll,
       }))
       .fail()
   }
@@ -274,6 +341,7 @@ module permission {
       act: Wildcard,
       resourceType: TUser,
       attributes: Set(),
+      scope: SAll,
     }, "delete"))
   }
 
@@ -284,6 +352,7 @@ module permission {
       act: Search,
       resourceType: TUser,
       attributes: Set(),
+      scope: SAll,
     }, "search"))
   }
 
@@ -325,6 +394,7 @@ module permission {
             act: Read,
             resourceType: TPermission,
             attributes: Set(),
+            scope: SAll,
           }),
           "read",
           TPermission,
@@ -371,5 +441,96 @@ module permission {
         permissions' = permissions,
         knownUsers' = knownUsers,
       })
+  }
+
+  // --- Effective scope tests ---
+
+  // With an empty permission set and the baseline granting the request, the
+  // effective scope is SAll (unrestricted).
+  run effectiveScopeBaseGrantsAll =
+    assert(effectiveScope(Set(), "u1", "read", TUser) == SAll)
+
+  // An applicable permission with SAll scope yields SAll.
+  run effectiveScopeApplicableAll = {
+    init
+      .then(registerUser("u1"))
+      .then(all {
+        assert(effectiveScope(
+          Set({
+            id: "p1",
+            userId: "u1",
+            act: Read,
+            resourceType: TUser,
+            attributes: Set(),
+            scope: SAll,
+          }),
+          "u1",
+          "read",
+          TUser,
+        ) == SAll),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // No applicable permission yields SNone (deny).
+  run effectiveScopeNoPermissionDenies = {
+    init
+      .then(all {
+        assert(effectiveScope(Set(), "u1", "read", TPermission) == SNone),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // An applicable predicate-scoped permission yields SPred.
+  run effectiveScopePredicateScope = {
+    init
+      .then(registerUser("u1"))
+      .then(all {
+        assert(effectiveScope(
+          Set({
+            id: "p1",
+            userId: "u1",
+            act: Read,
+            resourceType: TUser,
+            attributes: Set(),
+            scope: SPred,
+          }),
+          "u1",
+          "read",
+          TUser,
+        ) == SPred),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // An anonymous permission (userId == "") applies to every principal.
+  run effectiveScopeAnonymousAppliesToAll = {
+    init
+      .then(all {
+        assert(effectiveScope(
+          Set({
+            id: "p1",
+            userId: "",
+            act: Search,
+            resourceType: TUser,
+            attributes: Set(),
+            scope: SAll,
+          }),
+          "u1",
+          "search",
+          TUser,
+        ) == SAll),
+        permissions' = permissions,
+        knownUsers' = knownUsers,
+      })
+  }
+
+  // SAll permits everything; SNone permits nothing.
+  run scopePermitsConstants = all {
+    assert(scopePermits(SAll, _ => false)),
+    assert(not(scopePermits(SNone, _ => true))),
   }
 }
