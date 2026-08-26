@@ -141,11 +141,19 @@ class UserService:
         await self._session.delete(user)
         await self._session.flush()
 
-    async def count(self, perm_filter: SearchFilter[User] | None = None) -> int:
-        """Total user count, optionally scoped by *perm_filter* (used by tests/fixtures)."""
+    async def count(
+        self,
+        perm_filter: SearchFilter[User] | None = None,
+        search_filter: UserSearchFilter | None = None,
+    ) -> int:
+        """Total user count, scoped by the principal's *perm_filter* and the
+        optional *search_filter* (the same query-param filter the collection
+        endpoint accepts). Both default to unrestricted (used by tests/fixtures)."""
         stmt = select(func.count()).select_from(User)
         if perm_filter is not None:
             stmt = perm_filter.filter_sql(stmt)
+        if search_filter is not None:
+            stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 

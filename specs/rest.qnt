@@ -17,6 +17,7 @@ module rest {
     | KRemove
     | KAction
     | KNested
+    | KCount
 
   // A route is a kind plus the resource path segments that identify it.
   type Route = {
@@ -37,6 +38,7 @@ module rest {
       | KRemove => Delete
       | KAction => Post
       | KNested => Get
+      | KCount => Get
     }
 
   // A route is standard iff its kind is one of the known kinds.
@@ -49,6 +51,7 @@ module rest {
       | KRemove => true
       | KAction => true
       | KNested => true
+      | KCount => true
     }
 
   // Helpers to construct routes concisely.
@@ -61,6 +64,9 @@ module rest {
   pure def actionRoute(resource: str, id: str, act: str): Route =
     { kind: KAction, resource: resource, id: id, actionName: act, child: "" }
 
+  pure def countRoute(resource: str): Route =
+    { kind: KCount, resource: resource, id: "", actionName: "", child: "" }
+
   // Tests
 
   run listIsGet = {
@@ -71,11 +77,17 @@ module rest {
     assert(verbFor(actionRoute("sandboxes", "sb1", "start")) == Post)
   }
 
+  run countIsGet = {
+    assert(verbFor(countRoute("users")) == Get)
+  }
+
   run standardRoutes = all {
     assert(isStandard(collection("users"))),
     assert(isStandard(createRoute("users"))),
     assert(isStandard(collection("permissions"))),
     assert(isStandard(createRoute("permissions"))),
     assert(isStandard(actionRoute("sandboxes", "sb1", "stop"))),
+    assert(isStandard(countRoute("users"))),
+    assert(isStandard(countRoute("permissions"))),
   }
 }

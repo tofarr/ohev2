@@ -326,8 +326,19 @@ class PermissionService:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def count(self) -> int:
+    async def count(
+        self,
+        perm_filter: SearchFilter[Any] | None = None,
+        search_filter: PermissionSearchFilter | None = None,
+    ) -> int:
+        """Total permission count, scoped by the principal's *perm_filter* and
+        the optional *search_filter* (the same query-param filter the collection
+        endpoint accepts). Both default to unrestricted."""
         stmt = select(func.count()).select_from(Permission)
+        if perm_filter is not None:
+            stmt = perm_filter.filter_sql(stmt)
+        if search_filter is not None:
+            stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
