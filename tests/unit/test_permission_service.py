@@ -24,8 +24,14 @@ from ohev.util.search_filter import AllSearchFilter
 _ALL = AllSearchFilter[Permission]()
 
 
-async def _make_user(session: AsyncSession, email: str = "perm-test@example.com") -> uuid.UUID:
-    user = await UserService(session, AllSearchFilter[User]()).create(UserCreate(email=email))
+async def _make_user(
+    session: AsyncSession,
+    email: str = "perm-test@example.com",
+    username: str = "perm-test",
+) -> uuid.UUID:
+    user = await UserService(session, AllSearchFilter[User]()).create(
+        UserCreate(email=email, username=username)
+    )
     return user.id
 
 
@@ -98,8 +104,8 @@ class TestListPermissions:
         assert next_cursor is None
 
     async def test_search_filtered_by_user(self, service: PermissionService, session) -> None:
-        uid1 = await _make_user(session, email="first@example.com")
-        uid2 = await _make_user(session, email="second@example.com")
+        uid1 = await _make_user(session, email="first@example.com", username="first")
+        uid2 = await _make_user(session, email="second@example.com", username="second")
 
         await service.create(_create_payload(uid1, resource_type=ResourceType.USER))
         await service.create(_create_payload(uid1, resource_type=ResourceType.PERMISSION))

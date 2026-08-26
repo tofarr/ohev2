@@ -22,6 +22,16 @@ class User(Base):
         server_default=func.gen_random_uuid(),
     )
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    enabled: Mapped[bool] = mapped_column(
+        default=True,
+        server_default="true",
+    )
+    password: Mapped[str | None] = mapped_column(
+        String(2048),
+        default=None,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
         server_default=func.now(),

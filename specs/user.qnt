@@ -12,6 +12,12 @@ module user {
   type User = {
     id: str,
     email: str,
+    username: str,
+    enabled: bool,
+    // Empty string models "no password set"; a non-empty string models opaque
+    // ciphertext. The invariant is that plaintext never persists: the stored
+    // value is never equal to the plaintext input.
+    password: str,
     createdAt: int,
     updatedAt: int,
   }
@@ -30,10 +36,28 @@ module user {
   def emailUnique(u1: User, u2: User): bool =
     u1.email == u2.email implies u1 == u2
 
-  // Create a user; id and email must not already exist.
+  // No two users share the same username.
+  def usernameUnique(u1: User, u2: User): bool =
+    u1.username == u2.username implies u1 == u2
+
+  // A username must be non-empty.
+  def usernameNonEmpty(u: User): bool =
+    u.username != ""
+
+  // Password is never stored as plaintext. The stored value is a salted hash
+  // (modeled as "HASH"); it is never equal to the plaintext and is not
+  // reversible. Verification re-hashes the candidate and compares.
+  def passwordHashedAtRest(u: User, plaintext: str): bool =
+    (plaintext == "" and u.password == "") or
+    (plaintext != "" and u.password == "HASH")
+
+  // Create a user; id, email and username must not already exist, username
+  // must be non-empty. `enabled` defaults to true when not specified.
   action create(u: User): bool = all {
     not(users.exists(x => x.id == u.id)),
     not(users.exists(x => x.email == u.email)),
+    not(users.exists(x => x.username == u.username)),
+    usernameNonEmpty(u),
     users' = users.union(Set(u)),
     true
   }
@@ -44,7 +68,49 @@ module user {
     not(users.exists(x => x.id != id and x.email == newEmail)),
     users' = users.map(u =>
       if (u.id == id)
-        { id: u.id, email: newEmail, createdAt: u.createdAt, updatedAt: now }
+        { id: u.id, email: newEmail, username: u.username, enabled: u.enabled,
+          password: u.password, createdAt: u.createdAt, updatedAt: now }
+      else
+        u),
+    true
+  }
+
+  // Update a user's username; must be non-empty and not collide.
+  action updateUsername(id: str, newUsername: str, now: int): bool = all {
+    users.exists(u => u.id == id),
+    newUsername != "",
+    not(users.exists(x => x.id != id and x.username == newUsername)),
+    users' = users.map(u =>
+      if (u.id == id)
+        { id: u.id, email: u.email, username: newUsername, enabled: u.enabled,
+          password: u.password, createdAt: u.createdAt, updatedAt: now }
+      else
+        u),
+    true
+  }
+
+  // Enable or disable a user.
+  action setEnabled(id: str, isEnabled: bool, now: int): bool = all {
+    users.exists(u => u.id == id),
+    users' = users.map(u =>
+      if (u.id == id)
+        { id: u.id, email: u.email, username: u.username, enabled: isEnabled,
+          password: u.password, createdAt: u.createdAt, updatedAt: now }
+      else
+        u),
+    true
+  }
+
+  // Set a user's password. The stored value is a salted hash (never the
+  // plaintext); modeled here by recording a "HASH" marker distinct from the
+  // input and not reversible to it.
+  action setPassword(id: str, plaintext: str, now: int): bool = all {
+    users.exists(u => u.id == id),
+    users' = users.map(u =>
+      if (u.id == id)
+        { id: u.id, email: u.email, username: u.username, enabled: u.enabled,
+          password: if (plaintext == "") "" else "HASH",
+          createdAt: u.createdAt, updatedAt: now }
       else
         u),
     true
@@ -57,6 +123,16 @@ module user {
     true
   }
 
+  // Authenticate a username/password pair. Succeeds iff a user with that
+  // username exists, is enabled, has a stored hash, and the plaintext verifies
+  // against it (modeled: non-empty plaintext against "HASH"). Read-only.
+  action authenticate(username: str, plaintext: str): bool = all {
+    users.exists(u =>
+      u.username == username and u.enabled and u.password == "HASH" and plaintext != ""),
+    users' = users,
+    true
+  }
+
   // Search: returns the subset of users matching a predicate. The predicate
   // encodes the `<attr>__<op>` clauses from search_filter.qnt; an always-true
   // predicate (empty filter) returns every user. Search is read-only.
@@ -65,6 +141,9 @@ module user {
 
   pure def matchesEmailContains(u: User, fragment: str): bool =
     u.email == fragment
+
+  pure def matchesUsernameContains(u: User, fragment: str): bool =
+    u.username == fragment
 
   action step: bool = all {
     users' = users,
@@ -76,38 +155,116 @@ module user {
     users.forall(u1 =>
       users.forall(u2 => idUnique(u1, u2)))
 
-  // Invariant: all emails are unique (case-insensitive).
+  // Invariant: all emails are unique.
   val userEmailsUnique: bool =
     users.forall(u1 =>
       users.forall(u2 => emailUnique(u1, u2)))
 
+  // Invariant: all usernames are unique.
+  val userUsernamesUnique: bool =
+    users.forall(u1 =>
+      users.forall(u2 => usernameUnique(u1, u2)))
+
+  // Invariant: every username is non-empty.
+  val usernamesNonEmpty: bool =
+    users.forall(u => usernameNonEmpty(u))
+
   // Tests
 
   run createUser = {
-    init.then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .then(all {
-        assert(users.contains({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 })),
+        assert(users.contains({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 })),
         users' = users,
       })
   }
 
   run cannotReuseId = {
-    init.then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "u1", email: "bob@example.com", createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u1", email: "bob@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotReuseEmail = {
-    init.then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "u2", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "alice@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .fail()
+  }
+
+  run cannotReuseUsername = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .fail()
+  }
+
+  run cannotCreateEmptyUsername = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .fail()
+  }
+
+  run canDisableUser = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(setEnabled("u1", false, 1))
+      .then(all {
+        assert(users.exists(u => u.id == "u1" and not(u.enabled))),
+        users' = users,
+      })
+  }
+
+  run passwordStoredAsHash = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(setPassword("u1", "hunter2", 1))
+      .then(all {
+        assert(users.exists(u => u.id == "u1" and passwordHashedAtRest(u, "hunter2"))),
+        assert(not(users.exists(u => u.id == "u1" and u.password == "hunter2"))),
+        users' = users,
+      })
+  }
+
+  run authenticateSucceeds = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(setPassword("u1", "hunter2", 1))
+      .then(authenticate("alice", "hunter2"))
+      .then(all {
+        users' = users,
+      })
+  }
+
+  run authenticateFailsForDisabledUser = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(setPassword("u1", "hunter2", 1))
+      .then(setEnabled("u1", false, 2))
+      .then(authenticate("alice", "hunter2"))
+      .fail()
+  }
+
+  run authenticateFailsForEmptyPassword = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(authenticate("alice", "any"))
+      .fail()
+  }
+
+  run canUpdateUsername = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(updateUsername("u1", "alice2", 1))
+      .then(all {
+        assert(users.exists(u => u.id == "u1" and u.username == "alice2")),
+        users' = users,
+      })
+  }
+
+  run cannotUpdateToExistingUsername = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(updateUsername("u1", "bob", 1))
       .fail()
   }
 
   run canDeleteUser = {
-    init.then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .then(remove("u1"))
       .then(all {
-        assert(not(users.contains({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))),
+        assert(not(users.contains({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))),
         assert(users.size() == 0),
         users' = users,
       })
@@ -116,8 +273,8 @@ module user {
   // An empty filter (always-true predicate) returns every user.
   run searchEmptyFilterReturnsAll = {
     init
-      .then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "u2", email: "bob@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .then(all {
         assert(search(_ => true).size() == 2),
         users' = users,
@@ -127,8 +284,8 @@ module user {
   // A filter narrows the result set to matching users.
   run searchFilterNarrowsResults = {
     init
-      .then(create({ id: "u1", email: "alice@example.com", createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "u2", email: "bob@example.com", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "bob@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .then(all {
         assert(search(u => matchesEmailContains(u, "alice@example.com")).size() == 1),
         users' = users,

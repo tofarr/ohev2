@@ -81,9 +81,14 @@ class TestCheckPermissionDB:
     """DB-backed tests for PermissionService.check_permission."""
 
     async def _make_user(
-        self, session: AsyncSession, email: str = "check@example.com"
+        self,
+        session: AsyncSession,
+        email: str = "check@example.com",
+        username: str = "check",
     ) -> uuid.UUID:
-        user = await UserService(session, AllSearchFilter[User]()).create(UserCreate(email=email))
+        user = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email=email, username=username)
+        )
         return user.id
 
     async def test_base_grant_allows_without_db(self, session: AsyncSession) -> None:

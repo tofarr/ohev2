@@ -12,7 +12,7 @@ from ohev.permission.permission_service import reset_base_permissions_cache
 
 class TestCreateUserRoute:
     async def test_create_user(self, client: AsyncClient) -> None:
-        resp = await client.post("/users", json={"email": "alice@example.com"})
+        resp = await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
         assert resp.status_code == 201
         body = resp.json()
         assert body["email"] == "alice@example.com"
@@ -20,20 +20,20 @@ class TestCreateUserRoute:
         assert body["created_at"] is not None
 
     async def test_create_duplicate_email_returns_409(self, client: AsyncClient) -> None:
-        payload = {"email": "dup@example.com"}
-        resp = await client.post("/users", json=payload)
-        assert resp.status_code == 201
-        resp2 = await client.post("/users", json=payload)
+        await client.post("/users", json={"email": "dup@example.com", "username": "dup"})
+        resp2 = await client.post("/users", json={"email": "dup@example.com", "username": "dup2"})
         assert resp2.status_code == 409
 
     async def test_create_invalid_email_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.post("/users", json={"email": "not-an-email"})
+        resp = await client.post(
+            "/users", json={"email": "not-an-email", "username": "not-an-email"}
+        )
         assert resp.status_code == 422
 
 
 class TestGetUserRoute:
     async def test_get_existing_user(self, client: AsyncClient) -> None:
-        create = await client.post("/users", json={"email": "bob@example.com"})
+        create = await client.post("/users", json={"email": "bob@example.com", "username": "bob"})
         uid = create.json()["id"]
         resp = await client.get(f"/users/{uid}")
         assert resp.status_code == 200
@@ -59,7 +59,7 @@ class TestListUsersRoute:
 
     async def test_search_with_limit(self, client: AsyncClient) -> None:
         for i in range(3):
-            await client.post("/users", json={"email": f"u{i}@example.com"})
+            await client.post("/users", json={"email": f"u{i}@example.com", "username": f"u{i}"})
         resp = await client.get("/users?limit=2")
         body = resp.json()
         assert len(body["items"]) == 2
@@ -68,7 +68,7 @@ class TestListUsersRoute:
 
     async def test_search_pagination(self, client: AsyncClient) -> None:
         for i in range(4):
-            await client.post("/users", json={"email": f"p{i}@example.com"})
+            await client.post("/users", json={"email": f"p{i}@example.com", "username": f"p{i}"})
         resp1 = await client.get("/users?limit=2")
         cursor = resp1.json()["next_cursor"]
         assert cursor is not None
@@ -87,43 +87,45 @@ class TestListUsersRoute:
         assert resp.status_code == 422
 
     async def test_search_email_contains_filter(self, client: AsyncClient) -> None:
-        await client.post("/users", json={"email": "Alice@Example.com"})
-        await client.post("/users", json={"email": "bob@example.com"})
-        await client.post("/users", json={"email": "charlie@other.org"})
+        await client.post("/users", json={"email": "Alice@Example.com", "username": "alice"})
+        await client.post("/users", json={"email": "bob@example.com", "username": "bob"})
+        await client.post("/users", json={"email": "charlie@other.org", "username": "charlie"})
         resp = await client.get("/users?email__contains=EXAMPLE")
         assert resp.status_code == 200
         emails = {u["email"] for u in resp.json()["items"]}
         assert emails == {"Alice@example.com", "bob@example.com"}
 
     async def test_search_email_contains_no_match(self, client: AsyncClient) -> None:
-        await client.post("/users", json={"email": "alice@example.com"})
+        await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
         resp = await client.get("/users?email__contains=nonexistent")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
     async def test_search_created_at_gte_filter(self, client: AsyncClient) -> None:
-        create1 = await client.post("/users", json={"email": "old@example.com"})
+        create1 = await client.post("/users", json={"email": "old@example.com", "username": "old"})
         # Use the DB-side created_at as cutoff to avoid clock/precision skew.
         cutoff = create1.json()["created_at"]
-        await client.post("/users", json={"email": "new@example.com"})
+        await client.post("/users", json={"email": "new@example.com", "username": "new"})
         resp = await client.get(f"/users?created_at__gte={cutoff}")
         assert resp.status_code == 200
         ids = {u["id"] for u in resp.json()["items"]}
         assert create1.json()["id"] in ids
 
     async def test_search_created_at_lt_filter(self, client: AsyncClient) -> None:
-        create1 = await client.post("/users", json={"email": "old@example.com"})
+        create1 = await client.post("/users", json={"email": "old@example.com", "username": "old"})
         cutoff = create1.json()["created_at"]
-        await client.post("/users", json={"email": "new@example.com"})
+        await client.post("/users", json={"email": "new@example.com", "username": "new"})
         resp = await client.get(f"/users?created_at__lt={cutoff}")
         assert resp.status_code == 200
         ids = {u["id"] for u in resp.json()["items"]}
         assert create1.json()["id"] not in ids
 
     async def test_search_combined_filters(self, client: AsyncClient) -> None:
-        await client.post("/users", json={"email": "alice@example.com"})
-        await client.post("/users", json={"email": "bob@example.com"})
-        create3 = await client.post("/users", json={"email": "alice@other.org"})
+        await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
+        await client.post("/users", json={"email": "bob@example.com", "username": "bob"})
+        create3 = await client.post(
+            "/users", json={"email": "alice@other.org", "username": "alice2"}
+        )
         cutoff = create3.json()["created_at"]
         resp = await client.get(f"/users?email__contains=alice&created_at__gte={cutoff}")
         assert resp.status_code == 200
@@ -143,21 +145,21 @@ class TestCountUsersRoute:
 
     async def test_count_after_creates(self, client: AsyncClient) -> None:
         for i in range(3):
-            await client.post("/users", json={"email": f"c{i}@example.com"})
+            await client.post("/users", json={"email": f"c{i}@example.com", "username": f"c{i}"})
         resp = await client.get("/users/count")
         assert resp.status_code == 200
         assert resp.json()["count"] == 3
 
     async def test_count_with_email_filter(self, client: AsyncClient) -> None:
-        await client.post("/users", json={"email": "alice@example.com"})
-        await client.post("/users", json={"email": "bob@example.com"})
+        await client.post("/users", json={"email": "alice@example.com", "username": "alice"})
+        await client.post("/users", json={"email": "bob@example.com", "username": "bob"})
         resp = await client.get("/users/count?email__contains=alice")
         assert resp.status_code == 200
         assert resp.json()["count"] == 1
 
     async def test_count_excludes_deleted(self, client: AsyncClient) -> None:
-        create = await client.post("/users", json={"email": "del@example.com"})
-        await client.post("/users", json={"email": "keep@example.com"})
+        create = await client.post("/users", json={"email": "del@example.com", "username": "del"})
+        await client.post("/users", json={"email": "keep@example.com", "username": "keep"})
         await client.delete(f"/users/{create.json()['id']}")
         resp = await client.get("/users/count")
         assert resp.status_code == 200
@@ -166,27 +168,31 @@ class TestCountUsersRoute:
 
 class TestUpdateUserRoute:
     async def test_update_email(self, client: AsyncClient) -> None:
-        create = await client.post("/users", json={"email": "old@example.com"})
+        create = await client.post("/users", json={"email": "old@example.com", "username": "old"})
         uid = create.json()["id"]
-        resp = await client.patch(f"/users/{uid}", json={"email": "new@example.com"})
+        resp = await client.patch(
+            f"/users/{uid}", json={"email": "new@example.com", "username": "new"}
+        )
         assert resp.status_code == 200
         assert resp.json()["email"] == "new@example.com"
 
     async def test_update_no_fields(self, client: AsyncClient) -> None:
-        create = await client.post("/users", json={"email": "keep@example.com"})
+        create = await client.post("/users", json={"email": "keep@example.com", "username": "keep"})
         uid = create.json()["id"]
         resp = await client.patch(f"/users/{uid}", json={})
         assert resp.status_code == 200
         assert resp.json()["email"] == "keep@example.com"
 
     async def test_update_missing_user_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.patch(f"/users/{uuid.uuid4()}", json={"email": "x@example.com"})
+        resp = await client.patch(
+            f"/users/{uuid.uuid4()}", json={"email": "x@example.com", "username": "x"}
+        )
         assert resp.status_code == 404
 
 
 class TestDeleteUserRoute:
     async def test_delete_user(self, client: AsyncClient) -> None:
-        create = await client.post("/users", json={"email": "del@example.com"})
+        create = await client.post("/users", json={"email": "del@example.com", "username": "del"})
         uid = create.json()["id"]
         resp = await client.delete(f"/users/{uid}")
         assert resp.status_code == 204
@@ -201,9 +207,8 @@ class TestDeleteUserRoute:
 class TestPermissionEnforcement:
     """Tests for the permission check on user endpoints."""
 
-    async def test_missing_auth_header_anonymous_allowed(self, app) -> None:
-        # Auth is optional; without X-User-Id the request is treated as
-        # anonymous and the baseline permissions grant access (200).
+    async def test_missing_auth_token_anonymous_allowed(self, app) -> None:
+        # No auth token at all → anonymous; baseline permissions grant 200.
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
@@ -211,8 +216,9 @@ class TestPermissionEnforcement:
             resp = await ac.get("/users")
         assert resp.status_code == 200
 
-    async def test_invalid_auth_header_returns_401(self, client: AsyncClient) -> None:
-        resp = await client.get("/users", headers={"X-User-Id": "not-a-uuid"})
+    async def test_invalid_auth_token_returns_401(self, client: AsyncClient) -> None:
+        # A present-but-invalid token is a 401 (client claimed a principal).
+        resp = await client.get("/users", headers={"X-API-Key": "not-a-valid-token"})
         assert resp.status_code == 401
 
     async def test_denied_without_permission(
@@ -229,7 +235,7 @@ class TestPermissionEnforcement:
 
         resp = await client.get("/users")
         assert resp.status_code == 403
-        resp = await client.post("/users", json={"email": "x@example.com"})
+        resp = await client.post("/users", json={"email": "x@example.com", "username": "x"})
         assert resp.status_code == 403
 
     async def test_allowed_with_db_permission(
@@ -250,12 +256,13 @@ class TestPermissionEnforcement:
         from ohev.user.user_models import User
         from ohev.user.user_schemas import UserCreate
         from ohev.user.user_service import UserService
+        from ohev.util.auth_token import create_auth_token
         from ohev.util.search_filter import AllSearchFilter
 
         # Create the principal user directly in the DB (bypassing the API,
         # which is itself permission-guarded).
         principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="principal@example.com")
+            UserCreate(email="principal@example.com", username="principal")
         )
         principal_id = principal.id
 
@@ -269,8 +276,9 @@ class TestPermissionEnforcement:
         )
         await session.commit()
 
-        # Use the principal's id as X-User-Id for this request.
-        resp = await client.get("/users", headers={"X-User-Id": str(principal_id)})
+        # Mint a real JWE token for the principal and send it as X-API-Key.
+        token = create_auth_token(principal_id)
+        resp = await client.get("/users", headers={"X-API-Key": token})
         assert resp.status_code == 200
 
     async def test_partial_permission_denies_other_action(
@@ -291,10 +299,11 @@ class TestPermissionEnforcement:
         from ohev.user.user_models import User
         from ohev.user.user_schemas import UserCreate
         from ohev.user.user_service import UserService
+        from ohev.util.auth_token import create_auth_token
         from ohev.util.search_filter import AllSearchFilter
 
         principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="principal@example.com")
+            UserCreate(email="principal@example.com", username="principal")
         )
         principal_id = principal.id
 
@@ -308,11 +317,168 @@ class TestPermissionEnforcement:
         )
         await session.commit()
 
-        resp = await client.get("/users", headers={"X-User-Id": str(principal_id)})
+        token = create_auth_token(principal_id)
+        resp = await client.get("/users", headers={"X-API-Key": token})
         assert resp.status_code == 200
         resp = await client.post(
             "/users",
-            json={"email": "new@example.com"},
-            headers={"X-User-Id": str(principal_id)},
+            json={"email": "new@example.com", "username": "new"},
+            headers={"X-API-Key": token},
         )
         assert resp.status_code == 403
+
+
+class TestLoginRoute:
+    """POST /users/login mints a JWE auth cookie."""
+
+    async def test_login_success_sets_cookie_and_returns_user(
+        self, client: AsyncClient, session
+    ) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        )
+        await session.commit()
+
+        resp = await client.post("/users/login", json={"username": "alice", "password": "hunter2"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["token_type"] == "bearer"
+        assert body["user"]["username"] == "alice"
+        assert "password" not in body["user"]
+        # Cookie set with the configured name.
+        assert "session" in resp.cookies
+
+    async def test_login_bad_password_returns_401(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        )
+        await session.commit()
+
+        resp = await client.post("/users/login", json={"username": "alice", "password": "wrong"})
+        assert resp.status_code == 401
+        assert "session" not in resp.cookies
+
+    async def test_login_unknown_user_returns_401(self, client: AsyncClient) -> None:
+        resp = await client.post("/users/login", json={"username": "nobody", "password": "x"})
+        assert resp.status_code == 401
+
+    async def test_login_disabled_user_returns_401(self, client: AsyncClient, session) -> None:
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(
+                email="alice@example.com",
+                username="alice",
+                password="hunter2",
+                enabled=False,
+            )
+        )
+        await session.commit()
+
+        resp = await client.post("/users/login", json={"username": "alice", "password": "hunter2"})
+        assert resp.status_code == 401
+
+    async def test_login_token_authenticates_subsequent_request(
+        self, app, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cookie minted by login authorizes a follow-up request via the
+        cookie fallback in get_current_user_id."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        from ohev.permission.permission_models import Action, Permission, ResourceType
+        from ohev.permission.permission_schemas import PermissionCreate
+        from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        principal = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        )
+        principal_id = principal.id
+        psvc = PermissionService(session, AllSearchFilter[Permission]())
+        await psvc.create(
+            PermissionCreate(
+                user_id=principal_id,
+                action=Action.SEARCH,
+                resource_type=ResourceType.USER,
+            ),
+        )
+        await session.commit()
+
+        # A bare client (no X-API-Key) that performs login then reuses the cookie.
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            assert login.status_code == 200
+            # The cookie is stored on the client; the follow-up GET reuses it.
+            resp = await ac.get("/users")
+            assert resp.status_code == 200
+
+    async def test_login_bearer_token_authorizes_request(
+        self, app, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bearer-token fallback in get_current_user_id accepts the login token."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        from ohev.permission.permission_models import Action, Permission, ResourceType
+        from ohev.permission.permission_schemas import PermissionCreate
+        from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        principal = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        )
+        principal_id = principal.id
+        psvc = PermissionService(session, AllSearchFilter[Permission]())
+        await psvc.create(
+            PermissionCreate(
+                user_id=principal_id,
+                action=Action.SEARCH,
+                resource_type=ResourceType.USER,
+            ),
+        )
+        await session.commit()
+
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            assert login.status_code == 200
+            # The token lives in the cookie; send it as a Bearer header instead
+            # to exercise the Authorization fallback path.
+            cookie_token = login.cookies["session"]
+            resp = await ac.get("/users", headers={"Authorization": f"Bearer {cookie_token}"})
+            assert resp.status_code == 200

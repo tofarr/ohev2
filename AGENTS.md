@@ -135,7 +135,7 @@ reject the change.
 
 ## 9. Auth
 
-* Password hashing via bcrypt (passlib). Never log or serialize password hashes.
+* Password hashing via bcrypt (`util.password`). Never log or serialize password hashes.
 * Signed cookies for sessions; OAuth flows for federated identity.
 * Authorization checks live in services (not just routers) — defense in depth.
 
