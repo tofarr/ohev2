@@ -1,6 +1,6 @@
 """nullable user_id and search_filter on permissions
 
-Revision ID: 0002_permission_nullable_user_and_search_filter
+Revision ID: 0002_perm_nullable_search_filter
 Revises: 0001_users_permissions
 Create Date: 2026-06-05
 
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0002_permission_nullable_user_and_search_filter"
+revision: str = "0002_perm_nullable_search_filter"
 down_revision: str | None = "0001_users_permissions"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
