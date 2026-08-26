@@ -6,7 +6,7 @@ principal is read from a JWE-encrypted auth token supplied via, in order:
 
 1. the ``X-API-Key`` header (an encrypted auth token, not a raw id),
 2. the ``Authorization: Bearer <token>`` header, or
-3. the ``session`` cookie set by the login endpoint.
+3. the ``ohesession`` cookie set by the login endpoint.
 
 A token that is missing entirely means anonymous access (permissions with
 ``user_id IS NULL`` may still apply). A *present but invalid/expired* token is a

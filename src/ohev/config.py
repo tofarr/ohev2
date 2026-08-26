@@ -56,13 +56,13 @@ class AppConfig(BaseModel):
         description="Lifetime (seconds) of JWE auth tokens and the session cookie.",
     )
     auth_cookie_name: str = Field(
-        default="session",
+        default="ohesession",
         description="Name of the auth cookie set by the login endpoint.",
     )
-    auth_cookie_secure: bool = Field(
-        default=False,
-        description="Mark the auth cookie Secure (HTTPS only). Off for local dev.",
-    )
+    # The session cookie is always Secure (AGENTS.md §9). Hardcoded rather than
+    # configurable: a plaintext-transport session cookie is a credential leak,
+    # so the flag must never be turned off via the environment.
+    auth_cookie_secure: bool = True
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:

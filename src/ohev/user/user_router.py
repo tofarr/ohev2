@@ -257,3 +257,25 @@ async def login(
     _set_auth_cookie(response, token)
     await session.commit()
     return LoginResponse(user=UserRead.model_validate(user))
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def logout(response: Response) -> None:
+    """Clear the session cookie, ending the authenticated session.
+
+    Mirrors ``login``: like login it needs no permission grant, since clearing
+    a cookie is harmless when none is present and is the entry point's inverse.
+    The cookie is expired by setting ``max_age=0`` so browsers delete it
+    immediately (AGENTS.md §9).
+    """
+    cfg = get_config()
+    response.delete_cookie(
+        key=cfg.auth_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=cfg.auth_cookie_secure,
+    )
