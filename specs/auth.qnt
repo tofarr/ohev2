@@ -29,6 +29,12 @@ module auth {
     true
   }
 
+  // Destroy a session (logout). Idempotent: removing a non-existent session is a no-op.
+  action destroy(sessionId: str): bool = all {
+    sessions' = sessions.filter(s => s.id != sessionId),
+    true
+  }
+
   // A session belongs to a user; ownership check for authorization.
   pure def owns(sessionUser: str, resourceOwner: str): bool =
     sessionUser == resourceOwner
@@ -52,5 +58,22 @@ module auth {
     init.then(create({ id: "s1", userId: "u1", expiresAt: 100 }))
       .then(create({ id: "s1", userId: "u2", expiresAt: 200 }))
       .fail()
+  }
+
+  run destroyRemovesSession = {
+    init.then(create({ id: "s1", userId: "u1", expiresAt: 100 }))
+      .then(destroy("s1"))
+      .then(all {
+        assert(not(sessions.contains({ id: "s1", userId: "u1", expiresAt: 100 }))),
+        sessions' = sessions,
+      })
+  }
+
+  run destroyMissingSessionIsNoop = {
+    init.then(destroy("nope"))
+      .then(all {
+        assert(sessions == Set()),
+        sessions' = sessions,
+      })
   }
 }

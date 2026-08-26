@@ -482,3 +482,64 @@ class TestLoginRoute:
             cookie_token = login.cookies["session"]
             resp = await ac.get("/users", headers={"Authorization": f"Bearer {cookie_token}"})
             assert resp.status_code == 200
+
+
+class TestLogoutRoute:
+    """POST /users/logout clears the session cookie."""
+
+    async def test_logout_returns_204(self, client: AsyncClient) -> None:
+        resp = await client.post("/users/logout")
+        assert resp.status_code == 204
+
+    async def test_logout_clears_session_cookie(
+        self, app, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After logout the session cookie is expired (max-age=0) so the
+        client drops it and subsequent requests are unauthenticated."""
+        from ohev.config import get_config
+
+        get_config.cache_clear()
+        reset_base_permissions_cache()
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
+        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
+        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
+
+        from ohev.permission.permission_models import Action, Permission, ResourceType
+        from ohev.permission.permission_schemas import PermissionCreate
+        from ohev.permission.permission_service import PermissionService
+        from ohev.user.user_models import User
+        from ohev.user.user_schemas import UserCreate
+        from ohev.user.user_service import UserService
+        from ohev.util.search_filter import AllSearchFilter
+
+        principal = await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        )
+        psvc = PermissionService(session, AllSearchFilter[Permission]())
+        await psvc.create(
+            PermissionCreate(
+                user_id=principal.id,
+                action=Action.SEARCH,
+                resource_type=ResourceType.USER,
+            ),
+        )
+        await session.commit()
+
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            login = await ac.post("/users/login", json={"username": "alice", "password": "hunter2"})
+            assert login.status_code == 200
+            assert "session" in ac.cookies
+
+            logout = await ac.post("/users/logout")
+            assert logout.status_code == 204
+            # delete_cookie sets max-age=0, which the client applies: the
+            # stored cookie is removed from the client jar.
+            assert "session" not in ac.cookies
+
+    async def test_logout_without_session_is_noop(self, client: AsyncClient) -> None:
+        """Logging out when no session cookie exists still returns 204."""
+        resp = await client.post("/users/logout")
+        assert resp.status_code == 204
