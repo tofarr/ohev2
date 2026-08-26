@@ -19,9 +19,42 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 * `mypy --strict` clean (no `Any` without explicit `# type: ignore` + reason).
 * Unit coverage ≥ 90%. New code without tests blocks merge.
 * Quint specs compile and pass.
-* Playwright e2e suite green (runs daily).
+* Playwright e2e suite green. The full suite runs daily and also on every PR
+  (see `.github/workflows/e2e-daily.yml` and the `e2e` job in
+  `.github/workflows/ci.yml`).
 
 If a change can't meet a gate, flag it explicitly rather than silently bypassing it.
+
+### 2.1 Pre-PR verification — run locally before opening a PR
+
+Do not push a branch and rely on CI to catch failures. Run these commands
+locally and ensure they are green *before* opening (or updating) a pull request:
+
+1. **lint-type-coverage** (mirrors the `lint-type-coverage` CI job):
+   ```
+   uv run ruff check .
+   uv run ruff format --check .
+   uv run mypy
+   uv run pytest -q
+   ```
+2. **e2e** (mirrors the `e2e` CI job; requires Docker for the service stack):
+   ```
+   uv run playwright install --with-deps chromium
+   docker compose up -d
+   OHEV_DATABASE_URL=postgresql+asyncpg://ohev:ohev@localhost:5432/ohev uv run alembic upgrade head
+   uv run pytest tests/e2e -q --no-cov
+   docker compose down
+   ```
+3. **specs** (only when behavior changed, per §7):
+   ```
+   quint typecheck specs/*.qnt
+   quint test specs/<spec>.qnt --main=<spec>
+   ```
+
+If any step fails, fix it before opening the PR — do not open the PR and
+address CI failures reactively. If the environment cannot run a step (e.g.
+Docker unavailable), say so explicitly in the PR description rather than
+skipping it silently.
 
 ## 3. REST API consistency
 
@@ -113,6 +146,7 @@ reject the change.
 - [ ] Methods short, single-purpose (§4).
 - [ ] New code has tests; coverage gate green (§2, §5).
 - [ ] ruff + mypy strict clean (§2).
+- [ ] e2e suite green locally (§2.1).
 - [ ] Spec updated and passing if behavior changed (§7).
 - [ ] No secrets/hardcoded credentials (§9).
 - [ ] Comments follow §6.
