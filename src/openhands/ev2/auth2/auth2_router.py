@@ -7,7 +7,7 @@ Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 * ``GET  /auth2/callback``  — exchange the IdP code, JIT-provision the user,
   persist the encrypted IdP refresh token, set a session cookie, and redirect
   to the client's redirect URI with our authorization code + the original
-  state. Returns a JSON body too for SPA/CLI flows.
+  state.
 * ``POST /auth2/token``     — exchange our authorization code for an access +
   refresh token pair (RFC 6749 §4.1.3). Also handles the refresh grant.
 * ``POST /auth2/refresh``   — rotate the access + refresh pair via the IdP.
@@ -21,12 +21,12 @@ import uuid
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
 from openhands.ev2.auth2.auth2_models import OAuthClient
 from openhands.ev2.auth2.auth2_schemas import (
-    CallbackResponse,
     OAuthClientCreate,
     OAuthClientRead,
     OAuthClientSearchResult,
@@ -51,13 +51,17 @@ from openhands.ev2.util.search_filter import SearchFilter
 router = APIRouter(prefix="/auth2", tags=["auth2"])
 
 
-def _callback_url(request: Request) -> str:
-    """Derive the absolute callback URL from the incoming request."""
-    base_url = str(request.base_url).rstrip("/")
+def _callback_url() -> str:
+    """Derive the absolute callback URL from application config.
+
+    Config-driven (rather than ``request.base_url``) so the URL is correct
+    behind K8s ingresses / proxies that rewrite Host or scheme.
+    """
+    base_url = get_config().base_url.rstrip("/")
     return f"{base_url}/auth2/callback"
 
 
-def _set_session_cookie(response: Response, user_id: uuid.UUID) -> None:
+def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
     """Set a JWE session cookie so browser flows authenticate subsequently.
 
     Reuses the legacy cookie token (mints without a DB session) so the existing
@@ -92,7 +96,6 @@ def _error_status(exc: Auth2Error) -> int:
 
 @router.get("/authorize")
 async def authorize(
-    request: Request,
     session: SessionDep,
     response_type: Annotated[str, Query()],
     client_id: Annotated[str, Query()],
@@ -101,7 +104,7 @@ async def authorize(
     scope: Annotated[str | None, Query()] = None,
     code_challenge: Annotated[str | None, Query()] = None,
     code_challenge_method: Annotated[str | None, Query()] = None,
-) -> Response:
+) -> RedirectResponse:
     """Validate the client + redirect URI and redirect to the IdP."""
     if response_type != "code":
         raise HTTPException(
@@ -117,37 +120,35 @@ async def authorize(
             scope=scope,
             code_challenge=code_challenge,
             code_challenge_method=code_challenge_method,
-            callback_url=_callback_url(request),
+            callback_url=_callback_url(),
         )
     except Auth2Error as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
     finally:
         await service.aclose()
-    return Response(
+    return RedirectResponse(
+        url=url,
         status_code=status.HTTP_302_FOUND,
-        headers={"Location": url},
     )
 
 
-@router.get("/callback", response_model=CallbackResponse)
+@router.get("/callback")
 async def callback(
-    request: Request,
     session: SessionDep,
-    response: Response,
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
-) -> CallbackResponse:
+) -> RedirectResponse:
     """Exchange the IdP code and redirect to the client with our auth code.
 
-    Sets a session cookie and returns a JSON body for SPA flows. The browser
-    is redirected to ``redirect_uri?code=…&state=…``.
+    Sets a session cookie on the redirect response and sends the browser to
+    ``redirect_uri?code=…&state=…``.
     """
     service = Auth2Service(session)
     try:
         ctx = await service.handle_callback(
             code=code,
             state=state,
-            callback_url=_callback_url(request),
+            callback_url=_callback_url(),
         )
     except Auth2Error as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
@@ -155,20 +156,16 @@ async def callback(
         await service.aclose()
     await session.commit()
 
-    _set_session_cookie(response, ctx.user_id)
-    # Redirect the browser to the client's redirect_uri with our code + state.
     params: dict[str, str] = {"code": ctx.auth_code}
     if ctx.client_state is not None:
         params["state"] = ctx.client_state
     location = f"{ctx.redirect_uri}?{urlencode(params)}"
-    response.headers["Location"] = location
-    response.status_code = status.HTTP_302_FOUND
-    return CallbackResponse(
-        access_token="",
-        refresh_token="",
-        token_type="Bearer",
-        expires_in=ctx.expires_in,
+    response = RedirectResponse(
+        url=location,
+        status_code=status.HTTP_302_FOUND,
     )
+    _set_session_cookie(response, ctx.user_id)
+    return response
 
 
 @router.post("/token", response_model=TokenResponse)

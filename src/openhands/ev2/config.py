@@ -151,6 +151,14 @@ class AppConfig(BaseModel):
         ge=1,
         description="Lifetime (seconds) of auth2 access tokens (JWE).",
     )
+    # Public base URL of this service. Used to derive the OAuth callback URL
+    # (and any other absolute URLs handed to the IdP / clients). Sourced from
+    # config rather than the incoming request so it is correct behind K8s
+    # ingresses / proxies that rewrite Host / scheme.
+    base_url: str = Field(
+        default="http://localhost:8000",
+        description="Public base URL of this service (scheme + host[:port]).",
+    )
 
     # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
