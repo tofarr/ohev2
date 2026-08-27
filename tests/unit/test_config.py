@@ -8,6 +8,24 @@ from pydantic import SecretStr
 from openhands.ev2.config import AppConfig, EncryptionKeyConfig
 
 
+def _cfg(**overrides: object) -> AppConfig:
+    """Shorthand for tests that only vary a few fields.
+
+    Supplies the required IdP fields and an encryption key so tests can focus
+    on the field under test.
+    """
+    defaults: dict[str, object] = {
+        "idp_url": "https://idp.example.com",
+        "idp_client_id": "test-client",
+        "idp_client_secret": SecretStr("test-secret"),
+        "encryption_key": EncryptionKeyConfig(
+            id="primary", value=SecretStr("test-secret-at-least-32-bytes-long!!")
+        ),
+    }
+    defaults.update(overrides)
+    return AppConfig(**defaults)  # type: ignore[arg-type]
+
+
 class TestEncryptionKeyConfig:
     """Tests for EncryptionKeyConfig model."""
 
@@ -39,7 +57,7 @@ class TestAppConfig:
     """Tests for AppConfig model."""
 
     def test_encryption_key_auto_added_to_decryption_keys(self) -> None:
-        config = AppConfig(
+        config = _cfg(
             encryption_key=EncryptionKeyConfig(id="primary", value=SecretStr("secret")),
         )
         assert len(config.decryption_keys) == 1
@@ -47,7 +65,7 @@ class TestAppConfig:
 
     def test_encryption_key_not_duplicated_if_present(self) -> None:
         enc_key = EncryptionKeyConfig(id="primary", value=SecretStr("secret"))
-        config = AppConfig(
+        config = _cfg(
             encryption_key=enc_key,
             decryption_keys=[enc_key],
         )
@@ -55,7 +73,7 @@ class TestAppConfig:
         assert config.decryption_keys[0].id == "primary"
 
     def test_encryption_key_prepended_to_existing_decryption_keys(self) -> None:
-        config = AppConfig(
+        config = _cfg(
             encryption_key=EncryptionKeyConfig(id="new", value=SecretStr("new-secret")),
             decryption_keys=[
                 EncryptionKeyConfig(id="old-1", value=SecretStr("old-1")),
@@ -68,7 +86,7 @@ class TestAppConfig:
         assert config.decryption_keys[2].id == "old-2"
 
     def test_decryption_keys_with_matching_id_not_duplicated(self) -> None:
-        config = AppConfig(
+        config = _cfg(
             encryption_key=EncryptionKeyConfig(id="shared", value=SecretStr("secret")),
             decryption_keys=[
                 EncryptionKeyConfig(id="other", value=SecretStr("other")),
@@ -80,13 +98,13 @@ class TestAppConfig:
         assert ids.count("shared") == 1
 
     def test_default_base_permissions(self) -> None:
-        config = AppConfig(
+        config = _cfg(
             encryption_key=EncryptionKeyConfig(value=SecretStr("secret")),
         )
         assert config.base_permissions == ["all:user", "all:permission"]
 
     def test_custom_base_permissions(self) -> None:
-        config = AppConfig(
+        config = _cfg(
             encryption_key=EncryptionKeyConfig(value=SecretStr("secret")),
             base_permissions=["read:user", "create:permission"],
         )
@@ -101,6 +119,9 @@ class TestGetConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
+        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
 
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "env-secret")
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_ID", "env-key")
@@ -116,6 +137,9 @@ class TestGetConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
+        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
 
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "read:user")
@@ -130,6 +154,9 @@ class TestGetConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
+        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
 
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
         monkeypatch.setenv("OHEV_DECRYPTION_KEYS_0_ID", "old-key")
@@ -142,4 +169,76 @@ class TestGetConfig:
         assert "default" in ids
         assert "old-key" in ids
 
+        get_config.cache_clear()
+
+
+class TestAuth2Config:
+    """Tests for the federated OAuth (auth2) config fields."""
+
+    def test_idp_required_fields(self) -> None:
+        config = _cfg()
+        assert config.idp_url == "https://idp.example.com"
+        assert config.idp_client_id == "test-client"
+        assert config.idp_client_secret.get_secret_value() == "test-secret"
+
+    def test_idp_optional_oidc_fields_default_none(self) -> None:
+        config = _cfg()
+        assert config.idp_user_id_field is None
+        assert config.idp_email_field is None
+        assert config.idp_role_field is None
+
+    def test_idp_drift_tolerance_default(self) -> None:
+        config = _cfg()
+        assert config.idp_expire_drift_tolerance >= 0
+
+    def test_idp_scopes_default(self) -> None:
+        config = _cfg()
+        assert config.idp_scopes
+        assert all(isinstance(s, str) for s in config.idp_scopes)
+
+    def test_idp_paths_default(self) -> None:
+        config = _cfg()
+        assert config.idp_authorize_path
+        assert config.idp_token_path
+
+    def test_cleanup_interval_default(self) -> None:
+        config = _cfg()
+        assert config.cleanup_interval >= 0
+
+    def test_idp_delete_expired_seconds_default(self) -> None:
+        config = _cfg()
+        assert config.idp_delete_expired_seconds > 0
+
+    def test_auth2_access_token_ttl_default(self) -> None:
+        config = _cfg()
+        assert config.auth2_access_token_ttl_seconds > 0
+
+    def test_missing_idp_url_raises(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AppConfig(  # type: ignore[call-arg]
+                idp_client_id="c",
+                idp_client_secret=SecretStr("s"),
+            )
+
+    def test_loads_auth2_fields_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from openhands.ev2.config import get_config
+
+        get_config.cache_clear()
+        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
+        monkeypatch.setenv("OHEV_IDP_USER_ID_FIELD", "oid")
+        monkeypatch.setenv("OHEV_IDP_EMAIL_FIELD", "mail")
+        monkeypatch.setenv("OHEV_IDP_EXPIRE_DRIFT_TOLERANCE", "120")
+        monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "600")
+        monkeypatch.setenv("OHEV_IDP_DELETE_EXPIRED_SECONDS", "7200")
+        config = get_config()
+        assert config.idp_user_id_field == "oid"
+        assert config.idp_email_field == "mail"
+        assert config.idp_expire_drift_tolerance == 120
+        assert config.cleanup_interval == 600
+        assert config.idp_delete_expired_seconds == 7200
         get_config.cache_clear()

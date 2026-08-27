@@ -25,6 +25,11 @@ _PUBLIC_PATHS = {
     "/auth/logout",
     "/auth/token",
     "/auth/refresh",
+    # auth2 OAuth entry points — public by design (they mint credentials).
+    "/auth2/authorize",
+    "/auth2/callback",
+    "/auth2/token",
+    "/auth2/refresh",
 }
 
 

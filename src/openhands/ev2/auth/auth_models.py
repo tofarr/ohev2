@@ -58,6 +58,10 @@ class TokenType(enum.StrEnum):
     API_KEY = "api_key"
     ACCESS_TOKEN = "access_token"
     REFRESH_TOKEN = "refresh_token"
+    # auth2 (federated OAuth) refresh token. Exchange-only: never accepted as a
+    # bearer credential by AuthService.authenticate. Handled by the auth2
+    # refresh endpoint, which validates it against the idp_refresh_tokens row.
+    IDP_REFRESH_TOKEN = "idp_refresh_token"
 
 
 class AuthToken(BaseModel):

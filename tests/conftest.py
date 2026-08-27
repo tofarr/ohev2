@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from openhands.ev2.app import create_app
 from openhands.ev2.auth.auth_models import ApiKey  # noqa: F401
+from openhands.ev2.auth2.auth2_models import (  # noqa: F401
+    IdpRefreshToken,
+    OAuthClient,
+    OAuthClientRedirectUri,
+)
 from openhands.ev2.config import get_config
 from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.permission.permission_models import Permission  # noqa: F401
@@ -54,6 +59,14 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "all:user")
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_2", "all:api_key")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_3", "all:oauth_client")
+    # Federated OAuth (auth2) — required config fields. Tests that exercise the
+    # real IdP HTTP flow override the URL / mock httpx.
+    monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+    monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
+    monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+    # Keep the background cleanup loop out of the test process.
+    monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "0")
 
 
 @pytest_asyncio.fixture

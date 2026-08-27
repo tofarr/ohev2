@@ -1,0 +1,129 @@
+"""Pydantic schemas for the federated OAuth (auth2) feature."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from openhands.ev2.auth2.auth2_models import OAuthClient
+from openhands.ev2.util.search_filter import BaseSearchFilter
+
+
+class AuthorizeRequest(BaseModel):
+    """Query parameters for ``GET /auth2/authorize`` (RFC 6749 §4.1.1).
+
+    The project acts as an OAuth provider to the client and as a client to the
+    IdP, so the same parameters are forwarded to the IdP after the redirect URI
+    is validated against the client's allow-list.
+    """
+
+    response_type: str = Field(description="Must be 'code'.")
+    client_id: str
+    redirect_uri: str
+    state: str | None = Field(default=None, description="Opaque client state echoed back.")
+    scope: str | None = Field(default=None, description="Optional space-delimited scopes.")
+    # PKCE (RFC 7636) — optional but recommended.
+    code_challenge: str | None = Field(default=None)
+    code_challenge_method: str | None = Field(default="plain")
+
+
+class TokenRequest(BaseModel):
+    """Body for ``POST /auth2/token`` (RFC 6749 §4.1.3).
+
+    Supports the ``authorization_code`` and ``refresh_token`` grant types.
+    Client credentials are validated against the ``oauth_clients`` table.
+    """
+
+    grant_type: str = Field(description="'authorization_code' or 'refresh_token'.")
+    code: str | None = Field(default=None, description="Authorization code (auth code grant).")
+    redirect_uri: str | None = Field(default=None, description="Must match the authorize request.")
+    client_id: str
+    client_secret: str
+    code_verifier: str | None = Field(default=None, description="PKCE code verifier.")
+    refresh_token: str | None = Field(default=None, description="Refresh token (refresh grant).")
+
+
+class TokenResponse(BaseModel):
+    """OAuth2 token response (RFC 6749 §5.1).
+
+    ``access_token`` is a JWE the client sends as ``Authorization: Bearer``;
+    ``refresh_token`` is a JWE the client posts to ``/auth2/refresh``.
+    """
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "Bearer"
+    expires_in: int = Field(description="Access-token lifetime in seconds.")
+    id_token: str | None = Field(default=None, description="Optional id_token passthrough.")
+
+
+class CallbackResponse(BaseModel):
+    """Response body returned by ``GET /auth2/callback``.
+
+    The browser is redirected to the client's redirect_uri with a ``code`` and
+    the original ``state``; this body is also returned (and a session cookie
+    set) for non-browser / SPA flows that prefer a JSON response.
+    """
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "Bearer"
+    expires_in: int
+
+
+class OAuthClientCreate(BaseModel):
+    """Payload to register an OAuth client."""
+
+    client_id: str = Field(min_length=1, max_length=128)
+    client_secret: str = Field(min_length=1)
+    name: str | None = Field(default=None, max_length=255)
+    redirect_uris: list[str] = Field(
+        default_factory=list,
+        description="Permitted redirect URIs; wildcard segments (*) allowed.",
+    )
+    enabled: bool = True
+
+
+class OAuthClientUpdate(BaseModel):
+    """Partial update of an OAuth client."""
+
+    name: str | None = None
+    client_secret: str | None = None
+    redirect_uris: list[str] | None = None
+    enabled: bool | None = None
+
+
+class OAuthClientRead(BaseModel):
+    """OAuth client representation returned by the API.
+
+    The raw client_secret is never returned.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    client_id: str
+    name: str | None
+    enabled: bool
+    redirect_uris: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class OAuthClientSearchFilter(BaseSearchFilter[OAuthClient]):
+    """Optional filter clauses for ``GET /auth2/clients``."""
+
+    name__contains: str | None = Field(default=None)
+    enabled__eq: bool | None = Field(default=None)
+    created_at__gte: datetime | None = Field(default=None)
+    created_at__lt: datetime | None = Field(default=None)
+
+
+class OAuthClientSearchResult(BaseModel):
+    """Paginated collection of OAuth clients."""
+
+    items: list[OAuthClientRead]
+    next_cursor: str | None = Field(default=None)
+    limit: int
