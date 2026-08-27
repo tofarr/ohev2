@@ -19,7 +19,6 @@ from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
     IdpRefreshToken,
     OAuthClient,
-    OAuthClientAllowedOrigin,
     OAuthClientRedirectUri,
 )
 from openhands.ev2.auth2.auth2_service import (
@@ -28,7 +27,6 @@ from openhands.ev2.auth2.auth2_service import (
     IdpError,
     InvalidClientError,
     InvalidGrantError,
-    InvalidOriginError,
     InvalidRedirectUriError,
     _claim,
     _decode_id_token,
@@ -85,14 +83,12 @@ async def _create_client(
     client_id: str = "client-1",
     client_secret: str = "secret-1",
     redirect_uris: list[str] | None = None,
-    allowed_origins: list[str] | None = None,
 ) -> OAuthClient:
     return await service.create_client(
         client_id=client_id,
         client_secret=client_secret,
         name="Test Client",
         redirect_uris=redirect_uris or ["https://app.example.com/cb"],
-        allowed_origins=allowed_origins or [],
         enabled=True,
     )
 
@@ -186,28 +182,6 @@ class TestClientManagement:
         client = await _create_client(service, redirect_uris=["https://a/cb"])
         await service.replace_redirect_uris(client, ["https://c/cb", "https://d/cb"])
         assert await service.list_redirect_uris(client) == ["https://c/cb", "https://d/cb"]
-
-    async def test_list_allowed_origins(self, service: Auth2Service) -> None:
-        client = await _create_client(
-            service, allowed_origins=["https://app.example.com", "https://www.example.com"]
-        )
-        origins = await service.list_allowed_origins(client)
-        assert origins == ["https://app.example.com", "https://www.example.com"]
-
-    async def test_replace_allowed_origins(self, service: Auth2Service) -> None:
-        client = await _create_client(service, allowed_origins=["https://a.example.com"])
-        await service.replace_allowed_origins(client, ["https://b.example.com"])
-        assert await service.list_allowed_origins(client) == ["https://b.example.com"]
-
-    async def test_delete_client_cascades_origins(self, service: Auth2Service) -> None:
-        client = await _create_client(service, allowed_origins=["https://app.example.com"])
-        await service.delete_client(client)
-        from sqlalchemy import select
-
-        result = await service._session.execute(
-            select(OAuthClientAllowedOrigin).where(OAuthClientAllowedOrigin.client_id == client.id)
-        )
-        assert result.scalars().all() == []
 
     async def test_search_clients_pagination(self, service: Auth2Service) -> None:
         await _create_client(service, client_id="c1")
@@ -344,105 +318,6 @@ class TestAuthorizeRedirect:
         state = parse_qs(urlparse(url).query)["state"][0]
         pending = service._decode_pending_auth(state)
         assert pending["response_type"] == "cookie"
-
-    async def test_cookie_flow_unrestricted_when_no_allowed_origins(
-        self, service: Auth2Service
-    ) -> None:
-        # An empty allowed-origins list means no origin restriction: a cookie
-        # flow starts even with a missing/disallowed origin.
-        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
-        url = await service.build_authorize_redirect(
-            client_id="client-1",
-            redirect_uri="https://app.example.com/cb",
-            state=None,
-            scope=None,
-            code_challenge=None,
-            code_challenge_method=None,
-            callback_url=_CALLBACK,
-            response_type="cookie",
-            origin="https://evil.example.com",
-        )
-        assert url.startswith(f"{_IDP_BASE}/authorize?")
-
-    async def test_cookie_flow_rejects_disallowed_origin(self, service: Auth2Service) -> None:
-        await _create_client(
-            service,
-            redirect_uris=["https://app.example.com/cb"],
-            allowed_origins=["https://app.example.com"],
-        )
-        with pytest.raises(InvalidOriginError):
-            await service.build_authorize_redirect(
-                client_id="client-1",
-                redirect_uri="https://app.example.com/cb",
-                state=None,
-                scope=None,
-                code_challenge=None,
-                code_challenge_method=None,
-                callback_url=_CALLBACK,
-                response_type="cookie",
-                origin="https://evil.example.com",
-            )
-
-    async def test_cookie_flow_rejects_missing_origin_when_restricted(
-        self, service: Auth2Service
-    ) -> None:
-        await _create_client(
-            service,
-            redirect_uris=["https://app.example.com/cb"],
-            allowed_origins=["https://app.example.com"],
-        )
-        with pytest.raises(InvalidOriginError):
-            await service.build_authorize_redirect(
-                client_id="client-1",
-                redirect_uri="https://app.example.com/cb",
-                state=None,
-                scope=None,
-                code_challenge=None,
-                code_challenge_method=None,
-                callback_url=_CALLBACK,
-                response_type="cookie",
-                origin=None,
-            )
-
-    async def test_cookie_flow_accepts_allowed_origin(self, service: Auth2Service) -> None:
-        await _create_client(
-            service,
-            redirect_uris=["https://app.example.com/cb"],
-            allowed_origins=["https://app.example.com"],
-        )
-        url = await service.build_authorize_redirect(
-            client_id="client-1",
-            redirect_uri="https://app.example.com/cb",
-            state=None,
-            scope=None,
-            code_challenge=None,
-            code_challenge_method=None,
-            callback_url=_CALLBACK,
-            response_type="cookie",
-            origin="https://app.example.com",
-        )
-        assert url.startswith(f"{_IDP_BASE}/authorize?")
-
-    async def test_code_flow_skips_origin_check(self, service: Auth2Service) -> None:
-        # The code flow is for confidential clients; the origin allow-list does
-        # not apply even when configured and the origin is disallowed.
-        await _create_client(
-            service,
-            redirect_uris=["https://app.example.com/cb"],
-            allowed_origins=["https://app.example.com"],
-        )
-        url = await service.build_authorize_redirect(
-            client_id="client-1",
-            redirect_uri="https://app.example.com/cb",
-            state=None,
-            scope=None,
-            code_challenge=None,
-            code_challenge_method=None,
-            callback_url=_CALLBACK,
-            response_type="code",
-            origin="https://evil.example.com",
-        )
-        assert url.startswith(f"{_IDP_BASE}/authorize?")
 
 
 # ---------------------------------------------------------------------------

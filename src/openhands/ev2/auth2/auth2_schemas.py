@@ -80,13 +80,6 @@ class OAuthClientCreate(BaseModel):
         default_factory=list,
         description="Permitted redirect URIs; wildcard segments (*) allowed.",
     )
-    allowed_origins: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Permitted browser origins (scheme://host[:port]) that may initiate "
-            "a response_type=cookie flow (XSRF defense). Empty means unrestricted."
-        ),
-    )
     enabled: bool = True
 
 
@@ -96,7 +89,6 @@ class OAuthClientUpdate(BaseModel):
     name: str | None = None
     client_secret: str | None = None
     redirect_uris: list[str] | None = None
-    allowed_origins: list[str] | None = None
     enabled: bool | None = None
 
 
@@ -113,7 +105,6 @@ class OAuthClientRead(BaseModel):
     name: str | None
     enabled: bool
     redirect_uris: list[str]
-    allowed_origins: list[str]
     created_at: datetime
     updated_at: datetime
 

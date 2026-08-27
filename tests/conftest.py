@@ -21,7 +21,6 @@ from openhands.ev2.auth.auth_models import ApiKey  # noqa: F401
 from openhands.ev2.auth2.auth2_models import (  # noqa: F401
     IdpRefreshToken,
     OAuthClient,
-    OAuthClientAllowedOrigin,
     OAuthClientRedirectUri,
 )
 from openhands.ev2.config import get_config
