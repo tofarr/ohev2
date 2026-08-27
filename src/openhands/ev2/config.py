@@ -7,7 +7,7 @@ environment variables with a structured prefix scheme.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 from openhands.agent_server.env_parser import from_env
 from pydantic import BaseModel, Field, SecretStr, field_serializer, model_validator
@@ -86,6 +86,15 @@ class AppConfig(BaseModel):
     # configurable: a plaintext-transport session cookie is a credential leak,
     # so the flag must never be turned off via the environment.
     auth_cookie_secure: bool = True
+    # SameSite attribute for the session cookie. Defaults to "strict" (the
+    # strongest browser-side XSRF mitigation): the cookie is never sent on
+    # cross-site requests, including top-level navigations from another origin.
+    # The auth2 cookie flow is a same-site flow (the client app and API share a
+    # site), so strict does not break it. Set to "lax" only if a deployment
+    # genuinely needs the cookie on cross-site top-level GET navigations (SSO
+    # redirect scenarios), or "none" when the client app is on a different site
+    # (then ``auth_cookie_secure`` keeps it HTTPS-only). "none" requires Secure.
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = "strict"
 
     # ------------------------------------------------------------------ #
     # Federated OAuth (auth2) — IdP configuration.

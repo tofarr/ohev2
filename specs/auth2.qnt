@@ -42,6 +42,10 @@ module auth2 {
     codeConsumed: bool,
     rowExpiresAt: int, // IdP refresh-token row expiry (drift-adjusted)
     responseType: ResponseType,
+    // XSRF defense: when non-empty, a cookie-flow authorize requires the
+    // browser origin to match one of these serialized origins.
+    allowedOrigins: Set[str],
+    originAllowed: bool, // whether the browser origin satisfied allowedOrigins
   }
 
   var flows: Set[Flow]
@@ -52,8 +56,17 @@ module auth2 {
 
   // authorize: start a flow. Requires an enabled client. The response type
   // (code vs cookie) is recorded so the callback knows whether to mint a code.
-  action authorize(id: FlowId, clientEnabled: bool, now: int, rt: ResponseType): bool = all {
+  // For the COOKIE flow, when the client has configured allowed origins the
+  // browser origin must match one (originAllowed); otherwise the flow is not
+  // started (XSRF defense). An empty allowedOrigins set means unrestricted.
+  pure def originOk(rt: ResponseType, allowed: Set[str], origin: str): bool =
+    if (rt == Cookie and allowed.size() > 0)
+      allowed.contains(origin)
+      else true
+
+  action authorize(id: FlowId, clientEnabled: bool, now: int, rt: ResponseType, allowed: Set[str], origin: str): bool = all {
     clientEnabled,
+    originOk(rt, allowed, origin),
     not(flows.exists(f => f.id == id)),
     flows' = flows.union(Set({
       id: id,
@@ -62,6 +75,8 @@ module auth2 {
       codeConsumed: false,
       rowExpiresAt: now + 3600,
       responseType: rt,
+      allowedOrigins: allowed,
+      originAllowed: originOk(rt, allowed, origin),
     })),
   }
 
@@ -71,13 +86,15 @@ module auth2 {
   pure def toCoded(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Coded, clientEnabled: g.clientEnabled,
-        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType,
+        allowedOrigins: g.allowedOrigins, originAllowed: g.originAllowed }
     else g
 
   pure def toGrantedDirect(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
-        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType,
+        allowedOrigins: g.allowedOrigins, originAllowed: g.originAllowed }
     else g
 
   pure def applyCallback(g: Flow, id: FlowId): Flow =
@@ -94,7 +111,8 @@ module auth2 {
   pure def toGranted(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
-        codeConsumed: true, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+        codeConsumed: true, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType,
+        allowedOrigins: g.allowedOrigins, originAllowed: g.originAllowed }
     else g
 
   action exchangeCode(id: FlowId): bool = all {
@@ -106,7 +124,8 @@ module auth2 {
   pure def extendRow(g: Flow, id: FlowId, now: int): Flow =
     if (g.id == id)
       { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
-        codeConsumed: g.codeConsumed, rowExpiresAt: now + 3600, responseType: g.responseType }
+        codeConsumed: g.codeConsumed, rowExpiresAt: now + 3600, responseType: g.responseType,
+        allowedOrigins: g.allowedOrigins, originAllowed: g.originAllowed }
     else g
 
   action refresh(id: FlowId, now: int): bool = all {
@@ -118,7 +137,8 @@ module auth2 {
   pure def toExpired(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Expired, clientEnabled: g.clientEnabled,
-        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType,
+        allowedOrigins: g.allowedOrigins, originAllowed: g.originAllowed }
     else g
 
   action expire(id: FlowId, now: int): bool = all {
@@ -156,13 +176,24 @@ module auth2 {
   def cookieFlowNeverCodedInvariant: bool =
     flows.forall(f => f.responseType == Cookie implies f.state != Coded)
 
+  // A COOKIE flow can only be started from an allowed origin: when the client
+  // has configured allowed origins, originAllowed must be true for any COOKIE
+  // flow that exists (the authorize action rejects disallowed origins).
+  def cookieFlowOriginAllowedInvariant: bool =
+    flows.forall(f =>
+      f.responseType == Cookie and f.allowedOrigins.size() > 0 implies f.originAllowed)
+
   // ------------------------------------------------------------------ #
   // Tests
   // ------------------------------------------------------------------ #
 
+  // An empty allowed-origins set means "unrestricted" — used by the CODE-flow
+  // tests and the unrestricted COOKIE-flow tests.
+  val noRestriction: Set[str] = Set()
+
   run happyPath = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(refresh("f1", 200))
@@ -174,7 +205,7 @@ module auth2 {
 
   run codeCannotBeReplayed = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(exchangeCode("f1"))
@@ -183,14 +214,14 @@ module auth2 {
 
   run callbackRequiresPending = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(exchangeCode("f1"))
       .fail()
   }
 
   run refreshRejectedAfterExpiry = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -200,7 +231,7 @@ module auth2 {
 
   run cleanupRemovesExpired = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -213,7 +244,7 @@ module auth2 {
 
   run cleanupSkipsFreshExpiry = {
     init
-      .then(authorize("f1", true, 100, Code))
+      .then(authorize("f1", true, 100, Code, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -226,7 +257,7 @@ module auth2 {
 
   run disabledClientCannotAuthorize = {
     init
-      .then(authorize("f1", false, 100, Code))
+      .then(authorize("f1", false, 100, Code, noRestriction, "https://app.example.com"))
       .fail()
   }
 
@@ -234,7 +265,7 @@ module auth2 {
   // never CODED and exchangeCode cannot apply to it.
   run cookieFlowSkipsCode = {
     init
-      .then(authorize("f1", true, 100, Cookie))
+      .then(authorize("f1", true, 100, Cookie, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(all {
         assert(flows.exists(f => f.id == "f1" and f.state == Granted and not(f.codeConsumed))),
@@ -244,9 +275,27 @@ module auth2 {
 
   run cookieFlowCannotExchangeCode = {
     init
-      .then(authorize("f1", true, 100, Cookie))
+      .then(authorize("f1", true, 100, Cookie, noRestriction, "https://app.example.com"))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .fail()
+  }
+
+  // XSRF: a COOKIE flow with a configured allow-list rejects a disallowed
+  // origin (the authorize action does not start the flow).
+  run cookieFlowRejectsDisallowedOrigin = {
+    init
+      .then(authorize("f1", true, 100, Cookie, Set("https://app.example.com"), "https://evil.example.com"))
+      .fail()
+  }
+
+  run cookieFlowAcceptsAllowedOrigin = {
+    init
+      .then(authorize("f1", true, 100, Cookie, Set("https://app.example.com"), "https://app.example.com"))
+      .then(callback("f1"))
+      .then(all {
+        assert(flows.exists(f => f.id == "f1" and f.state == Granted and f.originAllowed)),
+        flows' = flows,
+      })
   }
 }

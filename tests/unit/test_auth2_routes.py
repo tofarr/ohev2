@@ -50,6 +50,7 @@ class TestOAuthClientCrud:
         assert body["client_id"] == "route-client-1"
         assert body["name"] == "Route Client"
         assert body["redirect_uris"] == ["https://app.example.com/cb"]
+        assert body["allowed_origins"] == []
         assert body["enabled"] is True
         assert "client_secret" not in body
         cid = body["id"]
@@ -90,13 +91,19 @@ class TestOAuthClientCrud:
         cid = create.json()["id"]
         resp = await client.patch(
             f"/auth2/clients/{cid}",
-            json={"name": "Renamed", "enabled": False, "redirect_uris": ["https://b/cb"]},
+            json={
+                "name": "Renamed",
+                "enabled": False,
+                "redirect_uris": ["https://b/cb"],
+                "allowed_origins": ["https://app.example.com"],
+            },
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["name"] == "Renamed"
         assert body["enabled"] is False
         assert body["redirect_uris"] == ["https://b/cb"]
+        assert body["allowed_origins"] == ["https://app.example.com"]
 
     async def test_delete_client(self, client: AsyncClient) -> None:
         create = await client.post(
@@ -236,7 +243,10 @@ class TestFullOAuthFlowRoute:
             cb_qs = parse_qs(urlparse(cb_location).query)
             assert cb_qs["state"] == ["client-state"]
             our_code = cb_qs["code"][0]
-            assert cb.cookies.get("ohesession")  # session cookie set
+            # response_type=code: NO session cookie is minted. The client is a
+            # confidential (token-based) one that exchanges the code at /token;
+            # it must never receive a browser session.
+            assert not cb.cookies.get("ohesession")
 
             # 3. token exchange
             tok = await c.post(
@@ -381,6 +391,66 @@ class TestFullOAuthFlowRoute:
             assert cb_qs["state"] == ["client-state"]
             # The session cookie is set (the sole credential for this flow).
             assert cb.cookies.get("ohesession")
+
+    @respx.mock
+    async def test_cookie_flow_rejects_disallowed_origin(self, app) -> None:
+        # XSRF defense: with allowed_origins configured, a cookie-flow authorize
+        # from a disallowed Origin is rejected with 403 (no IdP redirect).
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth2/clients",
+                json={
+                    "client_id": "origin-flow",
+                    "client_secret": "secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                    "allowed_origins": ["https://app.example.com"],
+                },
+            )
+            auth = await c.get(
+                "/auth2/authorize",
+                params={
+                    "response_type": "cookie",
+                    "client_id": "origin-flow",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                headers={"Origin": "https://evil.example.com"},
+                follow_redirects=False,
+            )
+            assert auth.status_code == 403
+
+    @respx.mock
+    async def test_cookie_flow_accepts_allowed_origin(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth2/clients",
+                json={
+                    "client_id": "origin-ok",
+                    "client_secret": "secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                    "allowed_origins": ["https://app.example.com"],
+                },
+            )
+            auth = await c.get(
+                "/auth2/authorize",
+                params={
+                    "response_type": "cookie",
+                    "client_id": "origin-ok",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                headers={"Origin": "https://app.example.com"},
+                follow_redirects=False,
+            )
+            assert auth.status_code == 302
 
     async def test_token_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(

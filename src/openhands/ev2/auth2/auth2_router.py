@@ -24,7 +24,7 @@ import uuid
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
@@ -38,11 +38,13 @@ from openhands.ev2.auth2.auth2_schemas import (
     TokenResponse,
 )
 from openhands.ev2.auth2.auth2_service import (
+    _RESPONSE_TYPE_COOKIE,
     Auth2Error,
     Auth2Service,
     IdpError,
     InvalidClientError,
     InvalidGrantError,
+    InvalidOriginError,
     InvalidRedirectUriError,
 )
 from openhands.ev2.config import get_config
@@ -69,6 +71,8 @@ def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
 
     Reuses the legacy cookie token (mints without a DB session) so the existing
     ``get_current_user_id`` dependency authenticates auth2 sessions unchanged.
+    SameSite is config-driven and defaults to ``strict`` (strongest XSRF
+    mitigation); the cookie flow is a same-site flow so strict does not break it.
     """
     from openhands.ev2.util.auth_token import create_auth_token
 
@@ -79,7 +83,7 @@ def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
         value=cookie_token,
         max_age=cfg.auth_cookie_timeout_seconds,
         httponly=True,
-        samesite="lax",
+        samesite=cfg.auth_cookie_samesite,
         secure=cfg.auth_cookie_secure,
         path="/",
     )
@@ -90,6 +94,8 @@ def _error_status(exc: Auth2Error) -> int:
         return status.HTTP_401_UNAUTHORIZED
     if isinstance(exc, InvalidRedirectUriError):
         return status.HTTP_400_BAD_REQUEST
+    if isinstance(exc, InvalidOriginError):
+        return status.HTTP_403_FORBIDDEN
     if isinstance(exc, InvalidGrantError):
         return status.HTTP_400_BAD_REQUEST
     if isinstance(exc, IdpError):
@@ -97,8 +103,29 @@ def _error_status(exc: Auth2Error) -> int:
     return status.HTTP_400_BAD_REQUEST
 
 
+def _browser_origin(request: Request) -> str | None:
+    """Derive the serialized browser origin of a request (XSRF check).
+
+    Prefers the ``Origin`` header (sent on cross-origin fetch/XHR/POST). Falls
+    back to the origin of the ``Referer`` URL (sent on navigations). Returns
+    ``None`` when neither header is present.
+    """
+    origin = request.headers.get("origin")
+    if origin:
+        return origin
+    referer = request.headers.get("referer")
+    if referer:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(referer)
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    return None
+
+
 @router.get("/authorize")
 async def authorize(
+    request: Request,
     session: SessionDep,
     response_type: Annotated[Literal["code", "cookie"], Query()],
     client_id: Annotated[str, Query()],
@@ -118,7 +145,9 @@ async def authorize(
       ``/auth2/token``.
     * ``cookie`` — a browser-oriented variant. After the IdP redirects back,
       the callback sets a session cookie and returns **no** code; the browser
-      is authenticated by the cookie alone.
+      is authenticated by the cookie alone. The browser origin of the request
+      (``Origin``/``Referer``) is checked against the client's configured
+      allowed origins (XSRF defense).
 
     Any other value is rejected by the OpenAPI-declared enum (HTTP 422).
     """
@@ -133,6 +162,7 @@ async def authorize(
             code_challenge_method=code_challenge_method,
             callback_url=_callback_url(),
             response_type=response_type,
+            origin=_browser_origin(request),
         )
     except Auth2Error as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
@@ -181,7 +211,12 @@ async def callback(
         url=location,
         status_code=status.HTTP_302_FOUND,
     )
-    _set_session_cookie(response, ctx.user_id)
+    # The session cookie is the sole credential for the ``cookie`` response
+    # type (a first-party browser flow). For the ``code`` response type the
+    # client exchanges the code at ``/auth2/token``; no cookie is minted, so a
+    # confidential (token-based) client is never handed a browser session.
+    if ctx.response_type == _RESPONSE_TYPE_COOKIE:
+        _set_session_cookie(response, ctx.user_id)
     return response
 
 
@@ -292,6 +327,7 @@ async def _to_read(service: Auth2Service, client: OAuthClient) -> OAuthClientRea
         name=client.name,
         enabled=client.enabled,
         redirect_uris=await service.list_redirect_uris(client),
+        allowed_origins=await service.list_allowed_origins(client),
         created_at=client.created_at,
         updated_at=client.updated_at,
     )
@@ -351,6 +387,7 @@ async def create_client(
             client_secret=payload.client_secret,
             name=payload.name,
             redirect_uris=payload.redirect_uris,
+            allowed_origins=payload.allowed_origins,
             enabled=payload.enabled,
         )
     finally:
@@ -408,6 +445,8 @@ async def update_client(
             client.client_secret = service._enc.encrypt_value(payload.client_secret)
         if payload.redirect_uris is not None:
             await service.replace_redirect_uris(client, payload.redirect_uris)
+        if payload.allowed_origins is not None:
+            await service.replace_allowed_origins(client, payload.allowed_origins)
         if payload.enabled is not None:
             client.enabled = payload.enabled
         await session.flush()

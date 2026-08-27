@@ -17,6 +17,10 @@ Tables:
   wildcard segments.
 * ``oauth_client_redirect_uris`` — the allow-list of redirect URIs for a
   client. Wildcards (``*``) are matched segment-wise.
+* ``oauth_client_allowed_origins`` — the allow-list of browser origins
+  (scheme://host[:port]) permitted to initiate a ``response_type=cookie``
+  flow. When non-empty, the authorize endpoint rejects cookie-flow requests
+  whose ``Origin``/``Referer`` does not match (XSRF defense).
 
 The ``users.idp_user_id`` column (added in the same migration) stores the
 stable IdP subject used to look up the local user on callback.
@@ -123,6 +127,36 @@ class OAuthClientRedirectUri(Base):
         index=True,
     )
     uri: Mapped[str] = mapped_column(String(2048))
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+
+
+class OAuthClientAllowedOrigin(Base):
+    """A permitted browser origin for an OAuth client (XSRF defense).
+
+    The ``origin`` is a serialized origin (scheme://host[:port], per RFC 6454)
+    matched case-sensitively against the ``Origin``/``Referer`` of the browser
+    request that initiates a ``response_type=cookie`` flow. When a client has at
+    least one allowed origin configured, the authorize endpoint only starts the
+    cookie flow for a request whose browser origin matches; an empty list means
+    no origin restriction (the redirect-URI allow-list alone governs the flow).
+    """
+
+    __tablename__ = "oauth_client_allowed_origins"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("oauth_clients.id", ondelete="CASCADE"),
+        index=True,
+    )
+    origin: Mapped[str] = mapped_column(String(2048))
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,

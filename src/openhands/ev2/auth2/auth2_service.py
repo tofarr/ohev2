@@ -45,6 +45,7 @@ from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
     IdpRefreshToken,
     OAuthClient,
+    OAuthClientAllowedOrigin,
     OAuthClientRedirectUri,
 )
 from openhands.ev2.config import AppConfig, get_config
@@ -94,6 +95,10 @@ class InvalidClientError(Auth2Error):
 
 class InvalidRedirectUriError(Auth2Error):
     """The redirect_uri is not permitted for the client."""
+
+
+class InvalidOriginError(Auth2Error):
+    """The browser origin is not permitted for the client's cookie flow."""
 
 
 class InvalidGrantError(Auth2Error):
@@ -149,6 +154,7 @@ class Auth2Service:
         code_challenge_method: str | None,
         callback_url: str,
         response_type: str = _RESPONSE_TYPE_CODE,
+        origin: str | None = None,
     ) -> str:
         """Validate the client + redirect URI and return the IdP authorize URL.
 
@@ -157,13 +163,21 @@ class Auth2Service:
         mint an exchangeable code (``code``) or only set a session cookie
         (``cookie``). The IdP request itself is always a code flow.
 
-        Raises :class:`InvalidClientError` / :class:`InvalidRedirectUriError`.
+        For the ``cookie`` response type, *origin* (the browser origin of the
+        page initiating the flow) is checked against the client's configured
+        allowed origins when that list is non-empty — an XSRF defense so a
+        cookie flow can only be started from a trusted site.
+
+        Raises :class:`InvalidClientError` / :class:`InvalidRedirectUriError`
+        / :class:`InvalidOriginError`.
         """
         if response_type not in _RESPONSE_TYPES:
             raise Auth2Error(f"response_type must be one of {_RESPONSE_TYPES}")
         client = await self._load_client(client_id)
         if not await self._redirect_uri_allowed(client, redirect_uri):
             raise InvalidRedirectUriError(redirect_uri)
+        if response_type == _RESPONSE_TYPE_COOKIE:
+            await self._enforce_origin(client, origin)
 
         # PKCE verifier the project uses against the IdP. The client's own
         # challenge (if any) is recorded in the pending-auth state so /token
@@ -351,6 +365,7 @@ class Auth2Service:
         client_secret: str,
         name: str | None,
         redirect_uris: list[str],
+        allowed_origins: list[str],
         enabled: bool,
     ) -> OAuthClient:
         """Create an OAuth client with an encrypted secret and redirect URIs."""
@@ -364,6 +379,8 @@ class Auth2Service:
         await self._session.flush()
         for uri in redirect_uris:
             self._session.add(OAuthClientRedirectUri(client_id=client.id, uri=uri))
+        for origin in allowed_origins:
+            self._session.add(OAuthClientAllowedOrigin(client_id=client.id, origin=origin))
         await self._session.flush()
         await self._session.refresh(client)
         return client
@@ -388,6 +405,28 @@ class Auth2Service:
         )
         for uri in uris:
             self._session.add(OAuthClientRedirectUri(client_id=client.id, uri=uri))
+        await self._session.flush()
+
+    async def list_allowed_origins(self, client: OAuthClient) -> list[str]:
+        """Return the allowed browser origins registered for *client*."""
+        result = await self._session.execute(
+            select(OAuthClientAllowedOrigin.origin)
+            .where(OAuthClientAllowedOrigin.client_id == client.id)
+            .order_by(OAuthClientAllowedOrigin.origin)
+        )
+        return list(result.scalars().all())
+
+    async def replace_allowed_origins(
+        self,
+        client: OAuthClient,
+        origins: list[str],
+    ) -> None:
+        """Replace a client's allowed browser origins (XSRF allow-list)."""
+        await self._session.execute(
+            delete(OAuthClientAllowedOrigin).where(OAuthClientAllowedOrigin.client_id == client.id)
+        )
+        for origin in origins:
+            self._session.add(OAuthClientAllowedOrigin(client_id=client.id, origin=origin))
         await self._session.flush()
 
     async def get_client(self, client_id: uuid.UUID) -> OAuthClient | None:
@@ -720,6 +759,25 @@ class Auth2Service:
         )
         patterns = list(result.scalars().all())
         return any(_wildcard_match(p, redirect_uri) for p in patterns)
+
+    async def _enforce_origin(self, client: OAuthClient, origin: str | None) -> None:
+        """Reject a cookie flow whose browser origin is not allowed.
+
+        An empty allow-list means "no origin restriction" (the redirect-URI
+        allow-list alone governs the flow). A non-empty list requires the
+        browser-supplied origin (``Origin`` header, falling back to the
+        ``Referer`` host's origin) to match one configured origin exactly.
+        """
+        result = await self._session.execute(
+            select(OAuthClientAllowedOrigin.origin).where(
+                OAuthClientAllowedOrigin.client_id == client.id
+            )
+        )
+        allowed = list(result.scalars().all())
+        if not allowed:
+            return
+        if origin is None or not any(secrets.compare_digest(o, origin) for o in allowed):
+            raise InvalidOriginError(origin or "<missing>")
 
     async def _load_refresh_row(self, row_id: uuid.UUID) -> IdpRefreshToken | None:
         return await self._session.get(IdpRefreshToken, row_id)

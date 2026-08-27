@@ -114,12 +114,14 @@ role claim). Role→permission mapping is deferred; roles are not pulled from
 scopes.
 
 Flow: `GET /auth2/authorize` redirects to the IdP (with PKCE), `GET
-/auth2/callback` exchanges the code and mints a session cookie plus a
-short-lived local access token, `POST /auth2/token` and `POST /auth2/refresh`
-exchange codes / refresh tokens for token pairs. OAuth clients are managed via
-`/auth2/clients` (CRUD with wildcard redirect-URI matching). The IdP
-`id_token` (or the decoded refresh-token JWT) supplies the `sub`/email used
-for JIT user provisioning (`users.idp_user_id`).
+/auth2/callback` exchanges the code and, for `response_type=cookie`, mints a
+session cookie (the `code` response type mints an exchangeable code instead),
+`POST /auth2/token` and `POST /auth2/refresh` exchange codes / refresh tokens
+for token pairs. OAuth clients are managed via `/auth2/clients` (CRUD with
+wildcard redirect-URI matching and per-client allowed-origin lists for XSRF
+defense of the cookie flow). The IdP `id_token` (or the decoded refresh-token
+JWT) supplies the `sub`/email used for JIT user provisioning
+(`users.idp_user_id`).
 
 ## Cleanup processes
 
