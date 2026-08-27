@@ -8,10 +8,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.permission_models import Action, Permission, ResourceType
-from ohev.scripts.seed_admin import seed_admin
-from ohev.user.user_models import User
-from ohev.util.password import verify_password
+from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.scripts.seed_admin import seed_admin
+from openhands.ev2.user.user_models import User
+from openhands.ev2.util.password import verify_password
 
 
 class TestSeedAdmin:

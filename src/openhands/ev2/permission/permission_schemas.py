@@ -8,8 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ohev.permission.permission_models import Action, Permission, ResourceType
-from ohev.util.search_filter import BaseSearchFilter
+from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
 class PermissionCreate(BaseModel):

@@ -5,7 +5,7 @@ enabled) and skips permission grants that already exist. Safe to call on a fresh
 database, on one that already has the admin, or after adding new ResourceType
 values (it will backfill the grants the admin is missing).
 
-Run via ``uv run python -m ohev.scripts.seed_admin``; credentials default from the
+Run via ``uv run python -m openhands.ev2.scripts.seed_admin``; credentials default from the
 ``OHEV_SEED_ADMIN_*`` environment variables, or dev defaults if those are unset.
 
 This script intentionally writes ORM rows directly, bypassing the service layer.
@@ -28,11 +28,11 @@ from collections.abc import Iterable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.config import get_config
-from ohev.db import create_engine, create_session_factory
-from ohev.permission.permission_models import Action, Permission, ResourceType
-from ohev.user.user_models import User
-from ohev.util.password import hash_password
+from openhands.ev2.config import get_config
+from openhands.ev2.db import create_engine, create_session_factory
+from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.user.user_models import User
+from openhands.ev2.util.password import hash_password
 
 # Matches the RFC 5322-ish shape enforced by EmailStr loosely; the canonical
 # validation lives in the pydantic schema, but this script does not route through

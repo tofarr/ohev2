@@ -7,17 +7,17 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.permission_models import Action, Permission, ResourceType
-from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
-from ohev.permission.permission_service import (
+from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
+from openhands.ev2.permission.permission_service import (
     PermissionNotFoundError,
     PermissionService,
     reset_base_permissions_cache,
 )
-from ohev.user.user_models import User
-from ohev.user.user_schemas import UserCreate
-from ohev.user.user_service import UserService
-from ohev.util.search_filter import AllSearchFilter
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import UserCreate
+from openhands.ev2.user.user_service import UserService
+from openhands.ev2.util.search_filter import AllSearchFilter
 
 # Unrestricted permission filter for service-level tests exercising CRUD
 # mechanics; permission scoping is covered by the route test suite.
@@ -196,7 +196,7 @@ class TestCheckPermission:
         self, service: PermissionService, session, monkeypatch
     ) -> None:
         """With an empty baseline, a DB permission row grants the request."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -225,7 +225,7 @@ class TestCheckPermission:
         self, service: PermissionService, session, monkeypatch
     ) -> None:
         """A permission for USER does not grant access to PERMISSION."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -243,7 +243,7 @@ class TestCheckPermission:
         self, service: PermissionService, session, monkeypatch
     ) -> None:
         """A permission carrying a None (deny-all) search filter denies access."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -271,7 +271,7 @@ class TestCheckPermission:
         self, service: PermissionService, session, monkeypatch
     ) -> None:
         """With empty baseline and no DB row, access is denied."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -285,7 +285,7 @@ class TestCheckPermission:
 
 class TestCascadeDelete:
     async def test_deleting_user_cascades_to_permissions(self, session) -> None:
-        from ohev.user.user_service import UserService
+        from openhands.ev2.user.user_service import UserService
 
         uid = await _make_user(session)
         ps = PermissionService(session, _ALL)

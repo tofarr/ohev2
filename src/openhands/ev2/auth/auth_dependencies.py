@@ -25,9 +25,9 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, Response, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
-from ohev.auth.auth_service import AuthService, InvalidTokenError
-from ohev.config import get_config
-from ohev.db import SessionDep
+from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
+from openhands.ev2.config import get_config
+from openhands.ev2.db import SessionDep
 
 # Security schemes double as OpenAPI documentation. Declared via `Security(...)`
 # rather than `Header()` so FastAPI registers them in `components.securitySchemes`

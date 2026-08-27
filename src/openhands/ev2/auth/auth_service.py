@@ -23,10 +23,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.auth.auth_models import ApiKey, AuthToken, RefreshToken, TokenType
-from ohev.config import AppConfig, get_config
-from ohev.encryption.encryption_service import EncryptionService, get_encryption_service
-from ohev.user.user_models import User
+from openhands.ev2.auth.auth_models import ApiKey, AuthToken, RefreshToken, TokenType
+from openhands.ev2.config import AppConfig, get_config
+from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
+from openhands.ev2.user.user_models import User
 
 _SUB_CLAIM = "sub"
 _TYP_CLAIM = "ttyp"

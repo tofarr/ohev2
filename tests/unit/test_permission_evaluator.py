@@ -12,13 +12,16 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.permission.permission_models import Action, Permission, ResourceType
-from ohev.permission.permission_schemas import PermissionCreate
-from ohev.permission.permission_service import PermissionService, reset_base_permissions_cache
-from ohev.user.user_models import User
-from ohev.user.user_schemas import UserCreate
-from ohev.user.user_service import UserService
-from ohev.util.search_filter import AllSearchFilter
+from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.permission.permission_schemas import PermissionCreate
+from openhands.ev2.permission.permission_service import (
+    PermissionService,
+    reset_base_permissions_cache,
+)
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import UserCreate
+from openhands.ev2.user.user_service import UserService
+from openhands.ev2.util.search_filter import AllSearchFilter
 
 # Unrestricted permission filter for service-level CRUD tests.
 _ALL = AllSearchFilter[Permission]()
@@ -102,7 +105,7 @@ class TestCheckPermissionDB:
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With an empty baseline, a DB permission row grants the request."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -124,7 +127,7 @@ class TestCheckPermissionDB:
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A permission for USER does not grant access to PERMISSION."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -143,7 +146,7 @@ class TestCheckPermissionDB:
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A permission with a None (deny-all) search filter still counts as a grant."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -171,7 +174,7 @@ class TestCheckPermissionDB:
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With empty baseline and no DB row, access is denied."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()

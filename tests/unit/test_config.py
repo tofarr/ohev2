@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr
 
-from ohev.config import AppConfig, EncryptionKeyConfig
+from openhands.ev2.config import AppConfig, EncryptionKeyConfig
 
 
 class TestEncryptionKeyConfig:
@@ -98,7 +98,7 @@ class TestGetConfig:
 
     def test_loads_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Clear the lru_cache before test
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
 
@@ -113,7 +113,7 @@ class TestGetConfig:
         get_config.cache_clear()
 
     def test_loads_base_permissions_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
 
@@ -127,7 +127,7 @@ class TestGetConfig:
         get_config.cache_clear()
 
     def test_loads_decryption_keys_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
 

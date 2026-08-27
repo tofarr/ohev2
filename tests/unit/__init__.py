@@ -1,1 +1,1 @@
-"""Unit tests for ohev."""
+"""Unit tests for openhands.ev2."""

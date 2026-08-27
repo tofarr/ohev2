@@ -1,7 +1,7 @@
 # ADR-0001: Uniform REST resource patterns
 
 ## Context
-ohev exposes many resources (users, conversations, sandboxes, MCP tools). Ad-hoc
+openhands.ev2 exposes many resources (users, conversations, sandboxes, MCP tools). Ad-hoc
 naming historically produces inconsistency (e.g. `/list` vs `/search`).
 
 ## Decision

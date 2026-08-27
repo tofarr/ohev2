@@ -1,5 +1,5 @@
 {
-  // VS Code debug configurations for the ohev FastAPI project.
+  // VS Code debug configurations for the openhands.ev2 FastAPI project.
   //
   // Pick a config from the Run and Debug panel (Ctrl/Cmd+Shift+D) or the
   // floating debug controls. All configs use the project venv at .venv/bin/python.
@@ -16,12 +16,12 @@
     },
     // --- Run & debug the uvicorn/FastAPI server with reload + breakpoints ---
     {
-      "name": "Debug: uvicorn (ohev.app:app)",
+      "name": "Debug: uvicorn (openhands.ev2.app:app)",
       "type": "debugpy",
       "request": "launch",
       "module": "uvicorn",
       "args": [
-        "ohev.app:app",
+        "openhands.ev2.app:app",
         "--reload",
         "--host",
         "0.0.0.0",
@@ -42,7 +42,7 @@
       "request": "launch",
       "module": "uvicorn",
       "args": [
-        "ohev.app:app",
+        "openhands.ev2.app:app",
         "--host",
         "0.0.0.0",
         "--port",

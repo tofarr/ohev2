@@ -16,23 +16,23 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.db import SessionDep
-from ohev.permission.permission_dependencies import require_permission
-from ohev.permission.permission_models import Action, ResourceType
-from ohev.permission.permission_schemas import (
+from openhands.ev2.db import SessionDep
+from openhands.ev2.permission.permission_dependencies import require_permission
+from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.permission.permission_schemas import (
     PermissionCreate,
     PermissionRead,
     PermissionSearchFilter,
     PermissionSearchResult,
 )
-from ohev.permission.permission_service import (
+from openhands.ev2.permission.permission_service import (
     PermissionConflictError,
     PermissionNotFoundError,
     PermissionScopeError,
     PermissionService,
 )
-from ohev.util.schemas import CountResult
-from ohev.util.search_filter import SearchFilter
+from openhands.ev2.util.schemas import CountResult
+from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/permissions", tags=["permissions"])
 

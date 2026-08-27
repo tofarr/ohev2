@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ohev.db import Base
+from openhands.ev2.db import Base
 
 # All auth timestamps are timezone-aware (TIMESTAMPTZ) so comparisons against
 # datetime.now(UTC) never mix naive and aware values. This differs from the

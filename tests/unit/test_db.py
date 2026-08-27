@@ -1,12 +1,12 @@
-"""Tests for the DB session infrastructure in ohev.db."""
+"""Tests for the DB session infrastructure in openhands.ev2.db."""
 
 from __future__ import annotations
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from ohev.config import get_config
-from ohev.db import (
+from openhands.ev2.config import get_config
+from openhands.ev2.db import (
     Base,
     create_engine,
     create_session_factory,

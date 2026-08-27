@@ -13,8 +13,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from ohev.auth.auth_models import TokenType
-from ohev.auth.auth_service import AuthService, InvalidTokenError
+from openhands.ev2.auth.auth_models import TokenType
+from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
 
 _TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
 
@@ -28,10 +28,10 @@ pytestmark = pytest.mark.asyncio
 
 class TestTokenTypes:
     async def test_cookie_token_round_trips_as_cookie(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="svc@example.com", username="svc", password="hunter2")
@@ -47,10 +47,10 @@ class TestTokenTypes:
         assert at.expires_at > datetime.now(UTC)
 
     async def test_access_token_round_trips_as_access_token(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="acc@example.com", username="acc", password="hunter2")
@@ -64,10 +64,10 @@ class TestTokenTypes:
         assert at.user_id == user.id
 
     async def test_refresh_token_not_accepted_for_general_auth(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="ref@example.com", username="ref", password="hunter2")
@@ -83,10 +83,10 @@ class TestTokenTypes:
             await auth.authenticate(refresh)
 
     async def test_disabled_user_rejects_cookie_token(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="dis@example.com", username="dis", password="hunter2", enabled=False)
@@ -113,7 +113,7 @@ class TestMalformedTokens:
             await auth.authenticate("not-a-jwe")
 
     async def test_missing_token_type_rejected(self, session) -> None:
-        from ohev.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         enc = get_encryption_service()
         bad = enc.create_jwe_token({"sub": str(uuid.uuid4()), "jti": str(uuid.uuid4())})
@@ -121,7 +121,7 @@ class TestMalformedTokens:
             await AuthService(session).authenticate(bad)
 
     async def test_unknown_token_type_rejected(self, session) -> None:
-        from ohev.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         enc = get_encryption_service()
         bad = enc.create_jwe_token(
@@ -131,7 +131,7 @@ class TestMalformedTokens:
             await AuthService(session).authenticate(bad)
 
     async def test_missing_subject_rejected(self, session) -> None:
-        from ohev.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         enc = get_encryption_service()
         bad = enc.create_jwe_token({"ttyp": "cookie", "jti": str(uuid.uuid4())})
@@ -139,7 +139,7 @@ class TestMalformedTokens:
             await AuthService(session).authenticate(bad)
 
     async def test_invalid_subject_rejected(self, session) -> None:
-        from ohev.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         enc = get_encryption_service()
         bad = enc.create_jwe_token(
@@ -149,11 +149,11 @@ class TestMalformedTokens:
             await AuthService(session).authenticate(bad)
 
     async def test_missing_jti_rejected(self, session) -> None:
-        from ohev.encryption.encryption_service import get_encryption_service
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="njti@example.com", username="njti", password="hunter2")
@@ -165,10 +165,10 @@ class TestMalformedTokens:
             await AuthService(session).authenticate(bad)
 
     async def test_expired_cookie_token_rejected(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="exp@example.com", username="exp", password="hunter2")
@@ -177,7 +177,7 @@ class TestMalformedTokens:
         auth = AuthService(session)
         token = auth.create_cookie_token(user.id)
         # Decode, rewind exp into the past, re-encrypt manually.
-        from ohev.encryption.encryption_service import get_encryption_service
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         enc = get_encryption_service()
         payload = enc.decrypt_jwe_token(token)
@@ -187,10 +187,10 @@ class TestMalformedTokens:
             await auth.authenticate(expired)
 
     async def test_refresh_token_with_allow_refresh_authenticates(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="ar@example.com", username="ar", password="hunter2")
@@ -204,10 +204,10 @@ class TestMalformedTokens:
         assert at.enabled is True
 
     async def test_api_key_with_no_expiry_authenticates(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="ne@example.com", username="ne", password="hunter2")
@@ -221,10 +221,10 @@ class TestMalformedTokens:
         assert at.enabled is True
 
     async def test_create_api_key_with_past_expiry_mints_no_exp_token(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="pe@example.com", username="pe", password="hunter2")
@@ -241,10 +241,10 @@ class TestMalformedTokens:
 
 class TestRefreshTokenRowValidity:
     async def test_revoked_refresh_token_rejected_in_refresh(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="rv@example.com", username="rv", password="hunter2")
@@ -256,7 +256,7 @@ class TestRefreshTokenRowValidity:
         # Manually disable the backing row to simulate revocation.
         from sqlalchemy import select
 
-        from ohev.auth.auth_models import RefreshToken
+        from openhands.ev2.auth.auth_models import RefreshToken
 
         row = (
             await session.execute(select(RefreshToken).where(RefreshToken.jti.isnot(None)))
@@ -274,10 +274,10 @@ class TestRefreshTokenRowValidity:
 
 class TestApiKeyFlow:
     async def test_create_then_authenticate_api_key(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="key@example.com", username="key", password="hunter2")
@@ -293,10 +293,10 @@ class TestApiKeyFlow:
         assert at.enabled is True
 
     async def test_disabled_api_key_rejected(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="dk@example.com", username="dk", password="hunter2")
@@ -319,10 +319,10 @@ class TestApiKeyFlow:
 
 class TestRefreshRotation:
     async def test_refresh_rotates_and_invalidates_old(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="rot@example.com", username="rot", password="hunter2")
@@ -344,10 +344,10 @@ class TestRefreshRotation:
         await auth.refresh(new_refresh)
 
     async def test_refresh_rejects_non_refresh_token(self, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         user = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="nrt@example.com", username="nrt", password="hunter2")
@@ -367,10 +367,10 @@ class TestRefreshRotation:
 
 class TestTokenEndpoint:
     async def test_password_grant_returns_access_and_refresh(self, client, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="pg@example.com", username="pg", password="hunter2")
@@ -407,10 +407,10 @@ class TestTokenEndpoint:
         assert resp.status_code == 400
 
     async def test_refresh_grant_rotates(self, client, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="rg@example.com", username="rg", password="hunter2")
@@ -517,10 +517,10 @@ class TestApiKeyRoutes:
 
 class TestBearerAuth:
     async def test_bearer_access_token_authenticates(self, client, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="bear@example.com", username="bear", password="hunter2")
@@ -544,10 +544,10 @@ class TestBearerAuth:
 
 class TestCookieLoginFlow:
     async def test_login_sets_cookie_and_returns_user(self, client, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="cl@example.com", username="cl", password="hunter2")
@@ -572,7 +572,7 @@ class TestCookieLoginFlow:
         # A request authenticated via the session cookie must yield a fresh
         # Set-Cookie (sliding session). The default test client uses X-API-Key,
         # so send the cookie explicitly here.
-        from ohev.util.auth_token import create_auth_token
+        from openhands.ev2.util.auth_token import create_auth_token
 
         token = create_auth_token(_TEST_USER_ID)
         transport = ASGITransport(app=app)
@@ -675,10 +675,10 @@ class TestOAuthTokenEndpoint:
         assert resp.status_code == 400
 
     async def test_refresh_rotation(self, client, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="rr@example.com", username="rr", password="hunter2")

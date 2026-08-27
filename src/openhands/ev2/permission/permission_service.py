@@ -21,15 +21,15 @@ from sqlalchemy import func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.config import get_config
-from ohev.permission.permission_grammar import parse_many
-from ohev.permission.permission_models import (
+from openhands.ev2.config import get_config
+from openhands.ev2.permission.permission_grammar import parse_many
+from openhands.ev2.permission.permission_models import (
     Action,
     Permission,
     ResourceType,
 )
-from ohev.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
-from ohev.util.search_filter import (
+from openhands.ev2.permission.permission_schemas import PermissionCreate, PermissionSearchFilter
+from openhands.ev2.util.search_filter import (
     ALL_SEARCH_FILTER,
     AllSearchFilter,
     OrSearchFilter,

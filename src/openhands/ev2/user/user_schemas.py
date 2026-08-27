@@ -7,8 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from ohev.user.user_models import User
-from ohev.util.search_filter import BaseSearchFilter
+from openhands.ev2.user.user_models import User
+from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
 class UserCreate(BaseModel):
