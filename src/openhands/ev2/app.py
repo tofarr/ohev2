@@ -18,7 +18,7 @@ from openhands.ev2 import __version__
 from openhands.ev2.auth.auth_router import router as auth_router
 from openhands.ev2.auth2.auth2_router import router as auth2_router
 from openhands.ev2.config import get_config
-from openhands.ev2.cors.cors_middleware import GlobalCorsMiddleware
+from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
 from openhands.ev2.permission.permission_router import router as permission_router
@@ -79,7 +79,7 @@ def create_app() -> FastAPI:
 
     # Global, DB-backed CORS allow-list. Reads the cached allowed-origin set on
     # each cross-origin request; the list is managed via /cors-origins.
-    app.add_middleware(GlobalCorsMiddleware)
+    app.add_middleware(CorsMiddleware)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

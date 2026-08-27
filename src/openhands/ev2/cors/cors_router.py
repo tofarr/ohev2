@@ -1,4 +1,4 @@
-"""HTTP routes for the global CORS allow-list feature.
+"""HTTP routes for the CORS allow-list feature.
 
 Uniform REST surface (AGENTS.md §3). The collection is ``/cors-origins`` with
 cursor pagination; create is ``POST``, remove is ``DELETE /{id}``. Every

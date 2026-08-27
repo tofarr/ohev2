@@ -1,4 +1,4 @@
-// CORS allow-list specification: the global permitted-origin set.
+// CORS allow-list specification: the permitted-origin set.
 //
 // Models the state of the single, deployment-wide `allowed_origins` set that
 // the CORS middleware reads (cached) to decide whether a request Origin gets

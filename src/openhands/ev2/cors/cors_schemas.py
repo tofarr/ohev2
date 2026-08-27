@@ -1,4 +1,4 @@
-"""Pydantic schemas for the global CORS allow-list feature.
+"""Pydantic schemas for the CORS allow-list feature.
 
 Uniform REST surface (AGENTS.md §3): the collection is ``/cors-origins`` with
 cursor pagination; create is ``POST`` and remove is ``DELETE /{id}``. There is

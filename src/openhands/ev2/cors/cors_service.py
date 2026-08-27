@@ -1,4 +1,4 @@
-"""Service for the global CORS allow-list feature.
+"""Service for the CORS allow-list feature.
 
 CRUD for the ``allowed_origins`` table, plus an in-memory cache the CORS
 middleware reads on every cross-origin request. Mutations (create/delete)

@@ -1,4 +1,4 @@
-"""ASGI middleware that enforces the global, DB-backed CORS allow-list.
+"""ASGI middleware that enforces the DB-backed CORS allow-list.
 
 Unlike Starlette's `CORSMiddleware`, the allow-list is not fixed at startup —
 it lives in the ``allowed_origins`` table and is mutable at runtime via
@@ -36,8 +36,8 @@ _DEFAULT_ALLOWED_HEADERS: tuple[str, ...] = (
 )
 
 
-class GlobalCorsMiddleware:
-    """Enforce the DB-backed global CORS allow-list on every request."""
+class CorsMiddleware:
+    """Enforce the DB-backed CORS allow-list on every request."""
 
     def __init__(
         self,

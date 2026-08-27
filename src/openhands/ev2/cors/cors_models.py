@@ -1,4 +1,4 @@
-"""ORM model for the global CORS allow-list feature.
+"""ORM model for the CORS allow-list feature.
 
 A single table ``allowed_origins`` holds the serialized browser origins
 (``scheme://host[:port]``, per RFC 6454) permitted to make cross-origin
@@ -21,7 +21,7 @@ from openhands.ev2.db import Base
 
 
 class AllowedOrigin(Base):
-    """A globally-permitted browser origin for CORS.
+    """A permitted browser origin for CORS.
 
     The ``origin`` is a serialized origin (scheme://host[:port], RFC 6454),
     matched case-sensitively against the request ``Origin`` header. Uniqueness
