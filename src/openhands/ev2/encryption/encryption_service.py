@@ -12,7 +12,7 @@ import jwt
 from joserfc import jwe
 from joserfc.jwk import OctKey
 
-from ohev.config import AppConfig, EncryptionKeyConfig, get_config
+from openhands.ev2.config import AppConfig, EncryptionKeyConfig, get_config
 
 # Only allow dir + A256GCM to prevent cryptographic agility attacks
 _JWE_REGISTRY = jwe.JWERegistry(algorithms=["dir", "A256GCM"])

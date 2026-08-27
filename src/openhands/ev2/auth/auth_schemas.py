@@ -7,8 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ohev.auth.auth_models import ApiKey, TokenType
-from ohev.util.search_filter import BaseSearchFilter
+from openhands.ev2.auth.auth_models import ApiKey, TokenType
+from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
 class LoginRequest(BaseModel):

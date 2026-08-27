@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, MappedAsDataclass
 
-from ohev.config import get_config
+from openhands.ev2.config import get_config
 
 
 class Base(MappedAsDataclass, DeclarativeBase):

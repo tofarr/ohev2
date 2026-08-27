@@ -1,4 +1,4 @@
-# OpenHands Enterprise v2 (ohev)
+# OpenHands Enterprise v2 (openhands.ev2)
 
 A greenfield reimagining of OpenHands Enterprise — written from scratch, unencumbered
 by previous expectations, and built to be formally specified, heavily tested, and
@@ -39,7 +39,7 @@ consistently structured.
 ## Project layout
 
 ```
-src/ohev/            Application source (importable as `ohev`)
+src/openhands/ev2/            Application source (importable as `openhands.ev2`)
 specs/               Quint formal specifications
 docs/                Architecture and decision records
 tests/unit/          Unit tests (≥ 90% coverage enforced)
@@ -89,5 +89,5 @@ and comment style.
 uv sync --all-extras
 uv run playwright install --with-deps chromium
 uv run alembic upgrade head
-uv run uvicorn ohev.app:app --reload
+uv run uvicorn openhands.ev2.app:app --reload
 ```

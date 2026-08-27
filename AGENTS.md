@@ -1,4 +1,4 @@
-# AGENTS.md — rules for agents and contributors working in `ohev`
+# AGENTS.md — rules for agents and contributors working in `openhands.ev2`
 
 This file is the persistent memory for this repository. Agents (human or AI) must
 follow these rules when producing or reviewing code. Rules are grouped by topic.
@@ -91,14 +91,14 @@ reject the change.
 
 ### File & directory layout
 
-* One flat directory per feature, directly under `src/ohev/` (e.g. `user/`,
+* One flat directory per feature, directly under `src/openhands/ev2/` (e.g. `user/`,
   `permission/`). No `models/`/`routes/`/`services/` subfolders.
 * Files inside a feature directory are flat and prefixed with the feature name for
   global uniqueness: `user_models.py`, `user_schemas.py`, `user_router.py`,
   `user_service.py`.
 * No `__init__.py` unless it performs real package-level work. Default to namespace
   packages — convention over configuration.
-* Genuinely shared, cross-cutting code lives in `src/ohev/util/`, outside the
+* Genuinely shared, cross-cutting code lives in `src/openhands/ev2/util/`, outside the
   per-feature pattern.
 
 ## 5. Testing

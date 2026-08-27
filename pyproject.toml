@@ -1,5 +1,5 @@
 [project]
-name = "ohev"
+name = "openhands-ev2"
 version = "0.1.0"
 description = "OpenHands Enterprise v2 — a greenfield reimagining of OpenHands Enterprise."
 readme = "README.md"
@@ -55,19 +55,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ohev"]
+packages = ["src/openhands"]
 
 [tool.pytest.ini_options]
 minversion = "8.2"
 testpaths = ["tests/unit"]
-addopts = "-ra --strict-markers --cov=ohev --cov-fail-under=90 --cov-report=term-missing --cov-report=xml"
+addopts = "-ra --strict-markers --cov=openhands.ev2 --cov-fail-under=90 --cov-report=term-missing --cov-report=xml"
 asyncio_mode = "auto"
 filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = false
 core = "sysmon"
-source = ["ohev"]
+source = ["openhands.ev2"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
@@ -88,7 +88,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ohev"]
+known-first-party = ["openhands.ev2"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -96,7 +96,7 @@ quote-style = "double"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["ohev"]
+packages = ["openhands.ev2"]
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"

@@ -1,6 +1,6 @@
 """Backwards-compat shim for the legacy ``create_auth_token`` / ``extract_user_id``.
 
-The auth package (`ohev.auth.auth_service.AuthService`) is now the canonical
+The auth package (`openhands.ev2.auth.auth_service.AuthService`) is now the canonical
 entry point for issuing and validating tokens. This module remains so older
 callers that only need to mint or read an opaque token without going through
 the DB-backed validity checks can do so.
@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import uuid
 
-from ohev.auth.auth_service import _SUB_CLAIM, _TYP_CLAIM, InvalidTokenError
-from ohev.config import get_config
-from ohev.encryption.encryption_service import get_encryption_service
+from openhands.ev2.auth.auth_service import _SUB_CLAIM, _TYP_CLAIM, InvalidTokenError
+from openhands.ev2.config import get_config
+from openhands.ev2.encryption.encryption_service import get_encryption_service
 
 
 def create_auth_token(

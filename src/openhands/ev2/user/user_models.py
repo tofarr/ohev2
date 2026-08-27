@@ -8,11 +8,11 @@ from datetime import datetime
 from sqlalchemy import String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ohev.db import Base
+from openhands.ev2.db import Base
 
 
 class User(Base):
-    """A user of the ohev system."""
+    """A user of the openhands.ev2 system."""
 
     __tablename__ = "users"
 

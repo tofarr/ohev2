@@ -29,8 +29,8 @@ from sqlalchemy import Enum, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from ohev.db import Base
-from ohev.user.user_models import User
+from openhands.ev2.db import Base
+from openhands.ev2.user.user_models import User
 
 
 class Action(enum.StrEnum):

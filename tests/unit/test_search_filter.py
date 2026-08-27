@@ -14,10 +14,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.user_models import User
-from ohev.user.user_schemas import UserCreate, UserSearchFilter
-from ohev.user.user_service import UserService
-from ohev.util.search_filter import (
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import UserCreate, UserSearchFilter
+from openhands.ev2.user.user_service import UserService
+from openhands.ev2.util.search_filter import (
     AllSearchFilter,
     AndSearchFilter,
     BaseSearchFilter,

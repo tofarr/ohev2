@@ -10,7 +10,7 @@ applied by services to search/update/delete SQL and validated against incoming
 create payloads.
 
 Principal resolution (the ``X-API-Key`` / ``Authorization: Bearer`` / cookie
-lookup and JWE decryption) lives in :mod:`ohev.auth.auth_dependencies` so the
+lookup and JWE decryption) lives in :mod:`openhands.ev2.auth.auth_dependencies` so the
 auth package owns all credential handling; this module consumes
 ``CurrentUserId`` from there.
 """
@@ -22,11 +22,11 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from ohev.auth.auth_dependencies import CurrentUserId
-from ohev.db import SessionDep
-from ohev.permission.permission_models import Action, ResourceType
-from ohev.permission.permission_service import PermissionService
-from ohev.util.search_filter import SearchFilter
+from openhands.ev2.auth.auth_dependencies import CurrentUserId
+from openhands.ev2.db import SessionDep
+from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.permission.permission_service import PermissionService
+from openhands.ev2.util.search_filter import SearchFilter
 
 
 def require_permission(

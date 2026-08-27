@@ -8,15 +8,15 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from ohev import __version__
-from ohev.auth.auth_router import router as auth_router
-from ohev.permission.permission_router import router as permission_router
-from ohev.user.user_router import router as user_router
+from openhands.ev2 import __version__
+from openhands.ev2.auth.auth_router import router as auth_router
+from openhands.ev2.permission.permission_router import router as permission_router
+from openhands.ev2.user.user_router import router as user_router
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="ohev",
+        title="OpenHands Enterprise",
         version=__version__,
         description="OpenHands Enterprise v2",
     )

@@ -7,7 +7,7 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-from ohev.permission.permission_service import reset_base_permissions_cache
+from openhands.ev2.permission.permission_service import reset_base_permissions_cache
 
 
 class TestCreateUserRoute:
@@ -232,7 +232,7 @@ class TestPermissionEnforcement:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With empty base permissions and no DB grant, all user endpoints return 403."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -249,7 +249,7 @@ class TestPermissionEnforcement:
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A per-user DB grant allows access even with empty base permissions."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -257,14 +257,14 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, Permission, ResourceType
-        from ohev.permission.permission_schemas import PermissionCreate
-        from ohev.permission.permission_service import PermissionService
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.auth_token import create_auth_token
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+        from openhands.ev2.permission.permission_schemas import PermissionCreate
+        from openhands.ev2.permission.permission_service import PermissionService
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.auth_token import create_auth_token
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         # Create the principal user directly in the DB (bypassing the API,
         # which is itself permission-guarded).
@@ -292,7 +292,7 @@ class TestPermissionEnforcement:
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A SEARCH grant does not allow CREATE."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -300,14 +300,14 @@ class TestPermissionEnforcement:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, Permission, ResourceType
-        from ohev.permission.permission_schemas import PermissionCreate
-        from ohev.permission.permission_service import PermissionService
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.auth_token import create_auth_token
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+        from openhands.ev2.permission.permission_schemas import PermissionCreate
+        from openhands.ev2.permission.permission_service import PermissionService
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.auth_token import create_auth_token
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         principal = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="principal@example.com", username="principal")
@@ -341,10 +341,10 @@ class TestLoginRoute:
     async def test_login_success_sets_cookie_and_returns_user(
         self, client: AsyncClient, session
     ) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="alice@example.com", username="alice", password="hunter2")
@@ -360,10 +360,10 @@ class TestLoginRoute:
         assert "ohesession" in resp.cookies
 
     async def test_login_bad_password_returns_401(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="alice@example.com", username="alice", password="hunter2")
@@ -379,10 +379,10 @@ class TestLoginRoute:
         assert resp.status_code == 401
 
     async def test_login_disabled_user_returns_401(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(
@@ -402,7 +402,7 @@ class TestLoginRoute:
     ) -> None:
         """The cookie minted by login authorizes a follow-up request via the
         cookie fallback in get_current_user_id."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -410,13 +410,13 @@ class TestLoginRoute:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, Permission, ResourceType
-        from ohev.permission.permission_schemas import PermissionCreate
-        from ohev.permission.permission_service import PermissionService
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+        from openhands.ev2.permission.permission_schemas import PermissionCreate
+        from openhands.ev2.permission.permission_service import PermissionService
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         principal = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="alice@example.com", username="alice", password="hunter2")
@@ -450,7 +450,7 @@ class TestLoginRoute:
         self, app, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The bearer-token fallback in get_current_user_id accepts the login token."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -458,13 +458,13 @@ class TestLoginRoute:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, Permission, ResourceType
-        from ohev.permission.permission_schemas import PermissionCreate
-        from ohev.permission.permission_service import PermissionService
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+        from openhands.ev2.permission.permission_schemas import PermissionCreate
+        from openhands.ev2.permission.permission_service import PermissionService
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         principal = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="alice@example.com", username="alice", password="hunter2")
@@ -505,7 +505,7 @@ class TestLogoutRoute:
     ) -> None:
         """After logout the session cookie is expired (max-age=0) so the
         client drops it and subsequent requests are unauthenticated."""
-        from ohev.config import get_config
+        from openhands.ev2.config import get_config
 
         get_config.cache_clear()
         reset_base_permissions_cache()
@@ -513,13 +513,13 @@ class TestLogoutRoute:
         monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
         monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
 
-        from ohev.permission.permission_models import Action, Permission, ResourceType
-        from ohev.permission.permission_schemas import PermissionCreate
-        from ohev.permission.permission_service import PermissionService
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+        from openhands.ev2.permission.permission_schemas import PermissionCreate
+        from openhands.ev2.permission.permission_service import PermissionService
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         principal = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="alice@example.com", username="alice", password="hunter2")
@@ -566,10 +566,10 @@ class TestUserRouterErrorPaths:
         assert resp.json()["count"] >= 1
 
     async def test_create_duplicate_email_409(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="dup@example.com", username="dup1", password="hunter2")
@@ -586,10 +586,10 @@ class TestUserRouterErrorPaths:
         assert resp.status_code == 409
 
     async def test_create_duplicate_username_409(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="uniq@example.com", username="samename", password="hunter2")
@@ -614,10 +614,10 @@ class TestUserRouterErrorPaths:
         assert resp.status_code == 404
 
     async def test_update_user_email_conflict(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="a@example.com", username="ua", password="hunter2")
@@ -630,10 +630,10 @@ class TestUserRouterErrorPaths:
         assert resp.status_code == 409
 
     async def test_update_user_username_conflict(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="c@example.com", username="uc", password="hunter2")
@@ -646,10 +646,10 @@ class TestUserRouterErrorPaths:
         assert resp.status_code == 409
 
     async def test_update_user_success(self, client: AsyncClient, session) -> None:
-        from ohev.user.user_models import User
-        from ohev.user.user_schemas import UserCreate
-        from ohev.user.user_service import UserService
-        from ohev.util.search_filter import AllSearchFilter
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
 
         target = await UserService(session, AllSearchFilter[User]()).create(
             UserCreate(email="upd@example.com", username="upd", password="hunter2")

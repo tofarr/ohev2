@@ -18,10 +18,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.user_models import User
-from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
-from ohev.util.password import hash_password, verify_password
-from ohev.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
+from openhands.ev2.util.password import hash_password, verify_password
+from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 
 class UserNotFoundError(Exception):

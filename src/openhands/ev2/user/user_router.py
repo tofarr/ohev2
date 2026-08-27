@@ -6,7 +6,7 @@ service, and serialize — no business logic here. Every endpoint is guarded by
 the centralized permission checker (AGENTS.md §9); the returned
 :class:`SearchFilter` is passed into the service constructor so search/update/
 delete SQL and create payloads are scoped to the principal. Login/logout and
-OAuth2 token endpoints live in the auth package (`ohev.auth.auth_router`).
+OAuth2 token endpoints live in the auth package (`openhands.ev2.auth.auth_router`).
 """
 
 from __future__ import annotations
@@ -16,26 +16,26 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from ohev.db import SessionDep
-from ohev.permission.permission_dependencies import require_permission
-from ohev.permission.permission_models import Action, ResourceType
-from ohev.user.user_models import User
-from ohev.user.user_schemas import (
+from openhands.ev2.db import SessionDep
+from openhands.ev2.permission.permission_dependencies import require_permission
+from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import (
     UserCreate,
     UserRead,
     UserSearchFilter,
     UserSearchResult,
     UserUpdate,
 )
-from ohev.user.user_service import (
+from openhands.ev2.user.user_service import (
     UserEmailConflictError,
     UserNotFoundError,
     UserPermissionScopeError,
     UserService,
     UserUsernameConflictError,
 )
-from ohev.util.schemas import CountResult
-from ohev.util.search_filter import SearchFilter
+from openhands.ev2.util.schemas import CountResult
+from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/users", tags=["users"])
 

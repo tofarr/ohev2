@@ -16,12 +16,12 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from ohev.app import create_app
-from ohev.auth.auth_models import ApiKey  # noqa: F401
-from ohev.config import get_config
-from ohev.db import Base, reset_engine_factory
-from ohev.permission.permission_models import Permission  # noqa: F401
-from ohev.user.user_models import User  # noqa: F401
+from openhands.ev2.app import create_app
+from openhands.ev2.auth.auth_models import ApiKey  # noqa: F401
+from openhands.ev2.config import get_config
+from openhands.ev2.db import Base, reset_engine_factory
+from openhands.ev2.permission.permission_models import Permission  # noqa: F401
+from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
 # to the default localhost DSN used by docker-compose.
@@ -43,7 +43,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point AppConfig at the test database and reset cached engine/factory."""
     get_config.cache_clear()
     reset_engine_factory()
-    from ohev.permission.permission_service import reset_base_permissions_cache
+    from openhands.ev2.permission.permission_service import reset_base_permissions_cache
 
     reset_base_permissions_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
@@ -96,7 +96,7 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     _set_test_config(monkeypatch)
     from sqlalchemy import text
 
-    from ohev.db import get_session as _app_get_session
+    from openhands.ev2.db import get_session as _app_get_session
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     # Seed the test principal (User.id is init=False, so insert via SQL).
@@ -130,7 +130,7 @@ async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncCl
     X-API-Key header (the highest-priority auth source) so permission
     dependencies see a real principal.
     """
-    from ohev.util.auth_token import create_auth_token
+    from openhands.ev2.util.auth_token import create_auth_token
 
     get_config.cache_clear()
     token = create_auth_token(_TEST_USER_ID)

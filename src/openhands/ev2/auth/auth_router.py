@@ -23,8 +23,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 
-from ohev.auth.auth_dependencies import CurrentUserId
-from ohev.auth.auth_schemas import (
+from openhands.ev2.auth.auth_dependencies import CurrentUserId
+from openhands.ev2.auth.auth_schemas import (
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyRead,
@@ -37,13 +37,13 @@ from ohev.auth.auth_schemas import (
     OAuthTokenResponse,
     RefreshRequest,
 )
-from ohev.auth.auth_service import AuthService, InvalidTokenError
-from ohev.config import get_config
-from ohev.db import SessionDep
-from ohev.permission.permission_dependencies import require_permission
-from ohev.permission.permission_models import Action, ResourceType
-from ohev.user.user_service import UserService
-from ohev.util.search_filter import SearchFilter
+from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
+from openhands.ev2.config import get_config
+from openhands.ev2.db import SessionDep
+from openhands.ev2.permission.permission_dependencies import require_permission
+from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.user.user_service import UserService
+from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -207,7 +207,7 @@ async def search_api_keys(
 ) -> ApiKeySearchResult:
     """List API keys, scoped to the principal's permission filter and
     additionally to the current user (a key's owner may always see their own)."""
-    from ohev.auth.auth_models import ApiKey
+    from openhands.ev2.auth.auth_models import ApiKey
 
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     stmt = perm_filter.filter_sql(select(ApiKey).order_by(ApiKey.id))
@@ -269,7 +269,7 @@ async def get_api_key(
     ],
 ) -> ApiKeyRead:
     """Retrieve an API key by id, scoped to the principal."""
-    from ohev.auth.auth_models import ApiKey
+    from openhands.ev2.auth.auth_models import ApiKey
 
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)
@@ -297,7 +297,7 @@ async def update_api_key(
     ],
 ) -> ApiKeyRead:
     """Partially update an API key (enable/disable, rename, re-expire)."""
-    from ohev.auth.auth_models import ApiKey
+    from openhands.ev2.auth.auth_models import ApiKey
 
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)
@@ -333,7 +333,7 @@ async def delete_api_key(
     ],
 ) -> None:
     """Delete (revoke) an API key by id, scoped to the principal."""
-    from ohev.auth.auth_models import ApiKey
+    from openhands.ev2.auth.auth_models import ApiKey
 
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)

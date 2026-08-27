@@ -8,15 +8,15 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ohev.user.user_models import User
-from ohev.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
-from ohev.user.user_service import (
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
+from openhands.ev2.user.user_service import (
     UserEmailConflictError,
     UserNotFoundError,
     UserService,
     UserUsernameConflictError,
 )
-from ohev.util.search_filter import AllSearchFilter
+from openhands.ev2.util.search_filter import AllSearchFilter
 
 # Unrestricted permission filter for service-level tests that exercise the
 # CRUD mechanics rather than permission scoping (covered in route tests).
@@ -371,7 +371,7 @@ class TestPasswordHashing:
         assert service.verify_password("", user) is False
 
     async def test_password_never_in_read_schema(self) -> None:
-        from ohev.user.user_schemas import UserRead
+        from openhands.ev2.user.user_schemas import UserRead
 
         assert "password" not in UserRead.model_fields
 

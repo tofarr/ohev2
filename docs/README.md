@@ -1,4 +1,4 @@
-# ohev architecture notes
+# openhands.ev2 architecture notes
 
 Decision records and design notes live here. Each ADR is numbered.
 
