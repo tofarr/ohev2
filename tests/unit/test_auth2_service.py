@@ -1,0 +1,842 @@
+"""Tests for the auth2 service: IdP exchange, provisioning, token minting, cleanup.
+
+The IdP HTTP endpoints are mocked with respx so the tests are hermetic. The
+encryption service and config are the real singletons (pointed at a test DB
+via conftest).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+import respx
+
+from openhands.ev2.auth.auth_models import TokenType
+from openhands.ev2.auth2.auth2_models import (
+    IdpRefreshToken,
+    OAuthClient,
+    OAuthClientRedirectUri,
+)
+from openhands.ev2.auth2.auth2_service import (
+    Auth2Service,
+    IdpError,
+    InvalidClientError,
+    InvalidGrantError,
+    InvalidRedirectUriError,
+    _claim,
+    _decode_id_token,
+    _derive_code_challenge,
+    _generate_code_verifier,
+    _idp_expiry,
+    _wildcard_match,
+)
+from openhands.ev2.encryption.encryption_service import get_encryption_service
+from openhands.ev2.user.user_models import User
+
+# asyncio_mode=auto (pyproject) marks async tests; sync helper tests need no mark.
+
+_IDP_BASE = "https://idp.example.com"
+_CALLBACK = "https://app.example.com/auth2/callback"
+
+
+def _make_id_token(sub: str, email: str) -> str:
+    """Build an unsigned id_token with the given claims (header.payload.)."""
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"sub": sub, "email": email}).encode())
+        .rstrip(b"=")
+        .decode()
+    )
+    return f"{header}.{payload}."
+
+
+def _idp_token_response(sub: str, email: str, refresh: str = "idp-refresh-1") -> dict:
+    return {
+        "access_token": "idp-access-1",
+        "refresh_token": refresh,
+        "expires_in": 3600,
+        "id_token": _make_id_token(sub, email),
+        "token_type": "Bearer",
+    }
+
+
+@pytest.fixture
+def http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=_IDP_BASE)
+
+
+@pytest.fixture
+async def service(session, http_client: httpx.AsyncClient) -> Auth2Service:
+    s = Auth2Service(session, http_client=http_client)
+    yield s
+    # The session owns the lifecycle; do not close the injected client here.
+
+
+async def _create_client(
+    service: Auth2Service,
+    *,
+    client_id: str = "client-1",
+    client_secret: str = "secret-1",
+    redirect_uris: list[str] | None = None,
+) -> OAuthClient:
+    return await service.create_client(
+        client_id=client_id,
+        client_secret=client_secret,
+        name="Test Client",
+        redirect_uris=redirect_uris or ["https://app.example.com/cb"],
+        enabled=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pure helper functions
+# ---------------------------------------------------------------------------
+
+
+class TestHelpers:
+    def test_wildcard_match_exact(self) -> None:
+        assert _wildcard_match("https://app.example.com/cb", "https://app.example.com/cb")
+
+    def test_wildcard_match_segment(self) -> None:
+        assert _wildcard_match("https://*.example.com/cb", "https://app.example.com/cb")
+        assert _wildcard_match("https://*.example.com/cb", "https://other.example.com/cb")
+
+    def test_wildcard_mismatch(self) -> None:
+        assert not _wildcard_match("https://app.example.com/cb", "https://app.example.com/other")
+        assert not _wildcard_match("https://*.example.com/cb", "https://app.other.com/cb")
+
+    def test_wildcard_matches_prefix(self) -> None:
+        assert _wildcard_match("https://app.example.com/*", "https://app.example.com/cb")
+        assert _wildcard_match("https://app.example.com/*", "https://app.example.com/any/path")
+
+    def test_claim_uses_configured_name(self) -> None:
+        claims = {"custom_sub": "u1", "sub": "u2"}
+        assert _claim(claims, "custom_sub", "sub") == "u1"
+
+    def test_claim_falls_back_to_default(self) -> None:
+        claims = {"sub": "u2"}
+        assert _claim(claims, None, "sub") == "u2"
+
+    def test_claim_missing_returns_none(self) -> None:
+        assert _claim({}, None, "sub") is None
+
+    def test_claim_empty_string_returns_none(self) -> None:
+        assert _claim({"sub": ""}, None, "sub") is None
+
+    def test_decode_id_token_extracts_claims(self) -> None:
+        token = _make_id_token("sub-1", "a@b.com")
+        claims = _decode_id_token(token)
+        assert claims["sub"] == "sub-1"
+        assert claims["email"] == "a@b.com"
+
+    def test_decode_id_token_garbage_returns_empty(self) -> None:
+        assert _decode_id_token("not-a-jwt") == {}
+
+    def test_generate_and_derive_code_challenge_s256(self) -> None:
+        verifier = _generate_code_verifier()
+        challenge = _derive_code_challenge(verifier, "S256")
+        assert challenge != verifier
+        assert _derive_code_challenge(verifier, "S256") == challenge
+
+    def test_derive_code_challenge_plain(self) -> None:
+        assert _derive_code_challenge("v", "plain") == "v"
+
+    def test_idp_expiry_from_expires_in(self) -> None:
+        expiry = _idp_expiry({"expires_in": 3600}, drift_seconds=60)
+        assert abs((expiry - datetime.now(UTC)).total_seconds() - 3540) < 5
+
+    def test_idp_expiry_drift_floor_zero(self) -> None:
+        expiry = _idp_expiry({"expires_in": 30}, drift_seconds=60)
+        # Drift subtracted but floored at 0 → expiry is ~now.
+        assert abs((expiry - datetime.now(UTC)).total_seconds()) < 5
+
+    def test_idp_expiry_default_when_missing(self) -> None:
+        expiry = _idp_expiry({}, drift_seconds=60)
+        assert (expiry - datetime.now(UTC)).total_seconds() > 86000
+
+
+# ---------------------------------------------------------------------------
+# Client management
+# ---------------------------------------------------------------------------
+
+
+class TestClientManagement:
+    async def test_create_client_encrypts_secret(self, service: Auth2Service) -> None:
+        client = await _create_client(service)
+        assert client.client_secret != "secret-1"
+        # Decrypt round-trips.
+        enc = get_encryption_service()
+        assert enc.decrypt_value(client.client_secret) == "secret-1"
+
+    async def test_list_redirect_uris(self, service: Auth2Service) -> None:
+        client = await _create_client(service, redirect_uris=["https://a/cb", "https://b/cb"])
+        uris = await service.list_redirect_uris(client)
+        assert uris == ["https://a/cb", "https://b/cb"]
+
+    async def test_replace_redirect_uris(self, service: Auth2Service) -> None:
+        client = await _create_client(service, redirect_uris=["https://a/cb"])
+        await service.replace_redirect_uris(client, ["https://c/cb", "https://d/cb"])
+        assert await service.list_redirect_uris(client) == ["https://c/cb", "https://d/cb"]
+
+    async def test_search_clients_pagination(self, service: Auth2Service) -> None:
+        await _create_client(service, client_id="c1")
+        await _create_client(service, client_id="c2")
+        clients, next_cursor = await service.search_clients(limit=1)
+        assert len(clients) == 1
+        assert next_cursor is not None
+        clients2, next_cursor2 = await service.search_clients(cursor=next_cursor, limit=1)
+        assert len(clients2) == 1
+        assert next_cursor2 is None
+
+    async def test_delete_client_cascades_uris(self, service: Auth2Service) -> None:
+        client = await _create_client(service, redirect_uris=["https://a/cb"])
+        await service.delete_client(client)
+        from sqlalchemy import select
+
+        result = await service._session.execute(
+            select(OAuthClientRedirectUri).where(OAuthClientRedirectUri.client_id == client.id)
+        )
+        assert result.scalars().all() == []
+
+    async def test_authenticate_client_success(self, service: Auth2Service) -> None:
+        await _create_client(service, client_id="c1", client_secret="s1")
+        client = await service._authenticate_client("c1", "s1")
+        assert client.client_id == "c1"
+
+    async def test_authenticate_client_wrong_secret(self, service: Auth2Service) -> None:
+        await _create_client(service, client_id="c1", client_secret="s1")
+        with pytest.raises(InvalidClientError):
+            await service._authenticate_client("c1", "wrong")
+
+    async def test_authenticate_client_unknown(self, service: Auth2Service) -> None:
+        with pytest.raises(InvalidClientError):
+            await service._authenticate_client("nope", "s1")
+
+    async def test_authenticate_client_disabled(self, service: Auth2Service) -> None:
+        await _create_client(service, client_id="c1", client_secret="s1")
+        # Disable the client directly.
+        client = await service.get_client_by_client_id("c1")
+        assert client is not None
+        client.enabled = False
+        await service._session.flush()
+        with pytest.raises(InvalidClientError):
+            await service._authenticate_client("c1", "s1")
+
+    async def test_redirect_uri_allowed_wildcard(self, service: Auth2Service) -> None:
+        client = await _create_client(service, redirect_uris=["https://*.example.com/cb"])
+        assert await service._redirect_uri_allowed(client, "https://app.example.com/cb")
+        assert not await service._redirect_uri_allowed(client, "https://app.other.com/cb")
+
+
+# ---------------------------------------------------------------------------
+# Authorize redirect
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorizeRedirect:
+    async def test_build_redirect_validates_client(self, service: Auth2Service) -> None:
+        with pytest.raises(InvalidClientError):
+            await service.build_authorize_redirect(
+                client_id="unknown",
+                redirect_uri="https://app.example.com/cb",
+                state="st",
+                scope=None,
+                code_challenge=None,
+                code_challenge_method=None,
+                callback_url=_CALLBACK,
+            )
+
+    async def test_build_redirect_rejects_unlisted_uri(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        with pytest.raises(InvalidRedirectUriError):
+            await service.build_authorize_redirect(
+                client_id="client-1",
+                redirect_uri="https://evil.example.com/cb",
+                state="st",
+                scope=None,
+                code_challenge=None,
+                code_challenge_method=None,
+                callback_url=_CALLBACK,
+            )
+
+    async def test_build_redirect_returns_idp_url(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state="client-state",
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        assert url.startswith(f"{_IDP_BASE}/authorize?")
+        assert "response_type=code" in url
+        assert "code_challenge_method=S256" in url
+
+
+# ---------------------------------------------------------------------------
+# Callback → code exchange → provisioning
+# ---------------------------------------------------------------------------
+
+
+class TestCallback:
+    @respx.mock
+    async def test_callback_provisions_user_and_persists_refresh(
+        self, service: Auth2Service
+    ) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        # Build a real authorize redirect to get a valid pending-auth state.
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state="client-state",
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        assert ctx.client_id == "client-1"
+        assert ctx.redirect_uri == "https://app.example.com/cb"
+        assert ctx.client_state == "client-state"
+
+        # User JIT-provisioned with the IdP subject linked.
+        from sqlalchemy import select
+
+        user = (
+            await service._session.execute(select(User).where(User.idp_user_id == "idp-sub-1"))
+        ).scalar_one()
+        assert user.email == "alice@example.com"
+        assert user.enabled
+
+        # Encrypted refresh token persisted.
+        row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+            )
+        ).scalar_one()
+        enc = get_encryption_service()
+        assert enc.decrypt_value(row.refresh_token) == "idp-refresh-1"
+        assert row.expires_at > datetime.now(UTC)
+
+    @respx.mock
+    async def test_callback_links_existing_user_by_email(self, service: Auth2Service) -> None:
+        # Pre-existing local user without an IdP link.
+        existing = User(email="bob@example.com", username="bob", enabled=True, idp_user_id=None)
+        service._session.add(existing)
+        await service._session.flush()
+
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-2", "bob@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        assert ctx.user_id == existing.id
+        await service._session.refresh(existing)
+        assert existing.idp_user_id == "idp-sub-2"
+
+    @respx.mock
+    async def test_callback_looks_up_existing_user_by_idp_id(self, service: Auth2Service) -> None:
+        existing = User(
+            email="carol@example.com",
+            username="carol",
+            enabled=True,
+            idp_user_id="idp-sub-3",
+        )
+        service._session.add(existing)
+        await service._session.flush()
+
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-3", "carol@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        assert ctx.user_id == existing.id
+
+    async def test_callback_bad_state_rejected(self, service: Auth2Service) -> None:
+        with pytest.raises(InvalidGrantError):
+            await service.handle_callback(code="idp-code", state="garbage", callback_url=_CALLBACK)
+
+    @respx.mock
+    async def test_callback_idp_error_raises(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(return_value=httpx.Response(500))
+        with pytest.raises(IdpError):
+            await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+
+    @respx.mock
+    async def test_callback_missing_refresh_token_raises(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        # No refresh_token in the response.
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "a", "id_token": _make_id_token("s", "e@x.com")},
+            )
+        )
+        with pytest.raises(IdpError):
+            await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+
+
+# ---------------------------------------------------------------------------
+# Full flow: callback → token exchange → refresh
+# ---------------------------------------------------------------------------
+
+
+class TestTokenExchange:
+    @respx.mock
+    async def test_full_flow_auth_code_grant(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+        assert pair.access_token
+        assert pair.refresh_token
+        assert pair.expires_in > 0
+
+        # The access token decrypts as an access_token type.
+        enc = get_encryption_service()
+        payload = enc.decrypt_jwe_token(pair.access_token)
+        assert payload["ttyp"] == TokenType.ACCESS_TOKEN.value
+
+    @respx.mock
+    async def test_auth_code_wrong_client_secret_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        with pytest.raises(InvalidClientError):
+            await service.exchange_authorization_code(
+                code=ctx.auth_code,
+                redirect_uri="https://app.example.com/cb",
+                client_id="client-1",
+                client_secret="wrong",
+                code_verifier=None,
+            )
+
+    @respx.mock
+    async def test_auth_code_redirect_uri_mismatch_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        with pytest.raises(InvalidGrantError, match="redirect_uri"):
+            await service.exchange_authorization_code(
+                code=ctx.auth_code,
+                redirect_uri="https://evil.example.com/cb",
+                client_id="client-1",
+                client_secret="secret-1",
+                code_verifier=None,
+            )
+
+    @respx.mock
+    async def test_refresh_grant_rotates_via_idp(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        # IdP rotates the refresh token on refresh.
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "idp-access-2",
+                    "refresh_token": "idp-refresh-2",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            )
+        )
+        pair2 = await service.exchange_refresh_token(
+            refresh_token=pair.refresh_token,
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+        assert pair2.access_token != pair.access_token
+        assert pair2.refresh_token != pair.refresh_token
+
+        # The persisted row now holds the rotated IdP refresh token.
+        from sqlalchemy import select
+
+        row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+            )
+        ).scalar_one()
+        enc = get_encryption_service()
+        assert enc.decrypt_value(row.refresh_token) == "idp-refresh-2"
+
+    async def test_refresh_bad_token_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, client_id="c1", client_secret="s1")
+        with pytest.raises(InvalidGrantError):
+            await service.exchange_refresh_token(
+                refresh_token="garbage",
+                client_id="c1",
+                client_secret="s1",
+            )
+
+    @respx.mock
+    async def test_refresh_expired_row_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+        # Expire the backing row.
+        from sqlalchemy import select
+
+        row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+            )
+        ).scalar_one()
+        row.expires_at = datetime.now(UTC) - timedelta(hours=1)
+        await service._session.commit()
+        with pytest.raises(InvalidGrantError, match="expired"):
+            await service.exchange_refresh_token(
+                refresh_token=pair.refresh_token,
+                client_id="client-1",
+                client_secret="secret-1",
+            )
+
+
+# ---------------------------------------------------------------------------
+# PKCE
+# ---------------------------------------------------------------------------
+
+
+class TestPkce:
+    @respx.mock
+    async def test_pkce_challenge_verified(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        verifier = _generate_code_verifier()
+        challenge = _derive_code_challenge(verifier, "S256")
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        # Correct verifier succeeds.
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=verifier,
+        )
+        await service._session.commit()
+        assert pair.access_token
+
+    @respx.mock
+    async def test_pkce_wrong_verifier_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        verifier = _generate_code_verifier()
+        challenge = _derive_code_challenge(verifier, "S256")
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        with pytest.raises(InvalidGrantError, match="PKCE"):
+            await service.exchange_authorization_code(
+                code=ctx.auth_code,
+                redirect_uri="https://app.example.com/cb",
+                client_id="client-1",
+                client_secret="secret-1",
+                code_verifier="wrong-verifier",
+            )
+
+    @respx.mock
+    async def test_pkce_missing_verifier_rejected(self, service: Auth2Service) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        verifier = _generate_code_verifier()
+        challenge = _derive_code_challenge(verifier, "S256")
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("idp-sub-1", "alice@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        with pytest.raises(InvalidGrantError, match="code_verifier"):
+            await service.exchange_authorization_code(
+                code=ctx.auth_code,
+                redirect_uri="https://app.example.com/cb",
+                client_id="client-1",
+                client_secret="secret-1",
+                code_verifier=None,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestCleanup:
+    async def test_delete_expired_removes_old_rows(self, service: Auth2Service) -> None:
+        enc = get_encryption_service()
+        # A user to attach rows to.
+        user = User(email="x@example.com", username="x", enabled=True)
+        service._session.add(user)
+        await service._session.flush()
+        old = IdpRefreshToken(
+            user_id=user.id,
+            refresh_token=enc.encrypt_value("r1"),
+            expires_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        fresh = IdpRefreshToken(
+            user_id=user.id,
+            refresh_token=enc.encrypt_value("r2"),
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+        service._session.add_all([old, fresh])
+        await service._session.commit()
+
+        deleted = await service.delete_expired_tokens()
+        assert deleted == 1
+        from sqlalchemy import select
+
+        remaining = (
+            (
+                await service._session.execute(
+                    select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(remaining) == 1
+        assert enc.decrypt_value(remaining[0].refresh_token) == "r2"
+
+    async def test_delete_expired_respects_age_window(self, service: Auth2Service) -> None:
+        enc = get_encryption_service()
+        user = User(email="y@example.com", username="y", enabled=True)
+        service._session.add(user)
+        await service._session.flush()
+        # Expired 1 hour ago — within the default 86400s window, so kept.
+        recent = IdpRefreshToken(
+            user_id=user.id,
+            refresh_token=enc.encrypt_value("r"),
+            expires_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        service._session.add(recent)
+        await service._session.commit()
+        deleted = await service.delete_expired_tokens()
+        assert deleted == 0

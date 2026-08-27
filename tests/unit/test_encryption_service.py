@@ -16,6 +16,17 @@ PRIMARY_SECRET = "primary-secret-key-at-least-32-bytes-long"
 OLD_SECRET = "old-secret-key-at-least-32-bytes-long!!"
 
 
+def make_config(**overrides: object) -> AppConfig:
+    """Build an AppConfig with required IdP fields filled in for tests."""
+    defaults: dict[str, object] = {
+        "idp_url": "https://idp.example.com",
+        "idp_client_id": "test-client",
+        "idp_client_secret": SecretStr("test-secret"),
+    }
+    defaults.update(overrides)
+    return AppConfig(**defaults)  # type: ignore[arg-type]
+
+
 @pytest.fixture
 def config() -> AppConfig:
     """Create a test configuration with encryption keys."""
@@ -24,6 +35,9 @@ def config() -> AppConfig:
         decryption_keys=[
             EncryptionKeyConfig(id="old-key", value=SecretStr(OLD_SECRET)),
         ],
+        idp_url="https://idp.example.com",
+        idp_client_id="test-client",
+        idp_client_secret=SecretStr("test-secret"),
     )
 
 
@@ -76,7 +90,7 @@ class TestJwsTokens:
     def test_verify_jws_with_old_key(self, config: AppConfig) -> None:
         # Create a token with the old key
         old_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(id="old-key", value=SecretStr(OLD_SECRET)),
             )
         )
@@ -104,7 +118,7 @@ class TestJwsTokens:
     def test_verify_jws_unknown_key(self, service: EncryptionService) -> None:
         # Create a token with an unknown key
         other_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(
                     id="unknown-key",
                     value=SecretStr("unknown-secret-at-least-32-bytes-long"),
@@ -119,7 +133,7 @@ class TestJwsTokens:
     def test_verify_jws_wrong_secret(self, service: EncryptionService) -> None:
         # Create a token with same key ID but different secret
         other_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(
                     id="primary",
                     value=SecretStr("wrong-secret-at-least-32-bytes-long!!"),
@@ -157,7 +171,7 @@ class TestJweTokens:
     def test_decrypt_jwe_with_old_key(self, config: AppConfig) -> None:
         # Create a token with the old key
         old_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(id="old-key", value=SecretStr(OLD_SECRET)),
             )
         )
@@ -175,7 +189,7 @@ class TestJweTokens:
     def test_decrypt_jwe_unknown_key(self, service: EncryptionService) -> None:
         # Create a token with an unknown key
         other_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(
                     id="unknown-key",
                     value=SecretStr("unknown-secret-at-least-32-bytes-long"),
@@ -220,7 +234,7 @@ class TestEncryptDecryptValue:
     def test_decrypt_with_rotated_key(self, config: AppConfig) -> None:
         # Encrypt with old key
         old_service = EncryptionService(
-            AppConfig(
+            make_config(
                 encryption_key=EncryptionKeyConfig(id="old-key", value=SecretStr(OLD_SECRET)),
             )
         )
@@ -243,6 +257,9 @@ class TestGetEncryptionService:
         get_encryption_service.cache_clear()
 
         monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret")
+        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
+        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
 
         service1 = get_encryption_service()
         service2 = get_encryption_service()

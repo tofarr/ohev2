@@ -91,3 +91,46 @@ uv run playwright install --with-deps chromium
 uv run alembic upgrade head
 uv run uvicorn openhands.ev2.app:app --reload
 ```
+
+## Federated authentication (auth2)
+
+The `auth2` module is a federated OAuth/OIDC layer that runs alongside the
+legacy `auth` module until it is proven and merged. The project acts as an
+OAuth **provider** to first-party clients and as an OAuth **client** to an
+external identity provider (IdP).
+
+Required configuration (environment variables, `OHEV_` prefix):
+
+| Field | Env var | Purpose |
+| --- | --- | --- |
+| `idp_url` | `OHEV_IDP_URL` | Base URL of the identity provider |
+| `idp_client_id` | `OHEV_IDP_CLIENT_ID` | Client id registered at the IdP |
+| `idp_client_secret` | `OHEV_IDP_CLIENT_SECRET` | Client secret registered at the IdP |
+| `idp_expire_drift_tolerance` | `OHEV_IDP_EXPIRE_DRIFT_TOLERANCE` | Seconds subtracted from IdP `expires_in`/`expires_at` to avoid drift bugs |
+
+Optional OIDC claim overrides: `idp_user_id_field`, `idp_email_field`,
+`idp_role_field` (default to the standard `sub`, `email`, and a reserved
+role claim). Role→permission mapping is deferred; roles are not pulled from
+scopes.
+
+Flow: `GET /auth2/authorize` redirects to the IdP (with PKCE), `GET
+/auth2/callback` exchanges the code and mints a session cookie plus a
+short-lived local access token, `POST /auth2/token` and `POST /auth2/refresh`
+exchange codes / refresh tokens for token pairs. OAuth clients are managed via
+`/auth2/clients` (CRUD with wildcard redirect-URI matching). The IdP
+`id_token` (or the decoded refresh-token JWT) supplies the `sub`/email used
+for JIT user provisioning (`users.idp_user_id`).
+
+## Cleanup processes
+
+Expired IdP refresh tokens are pruned by a background sweep.
+
+* `cleanup_interval` (`OHEV_CLEANUP_INTERVAL`, default `300`): seconds between
+  sweeps. **Non-zero** runs an `asyncio` loop inside the FastAPI lifespan —
+  no external scheduler needed.
+* `cleanup_interval = 0` **disables** the in-process loop; drive cleanup with
+  an external cron job hitting the same `delete_expired_tokens` service
+  function (or a future admin endpoint).
+* `idp_delete_expired_seconds` (`OHEV_IDP_DELETE_EXPIRED_SECONDS`, default
+  `86400`): rows whose `expires_at` is older than this window are deleted.
+  `0` deletes any already-expired row regardless of age.

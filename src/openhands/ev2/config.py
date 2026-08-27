@@ -87,6 +87,94 @@ class AppConfig(BaseModel):
     # so the flag must never be turned off via the environment.
     auth_cookie_secure: bool = True
 
+    # ------------------------------------------------------------------ #
+    # Federated OAuth (auth2) — IdP configuration.
+    # The project delegates authentication to an external identity provider
+    # (OIDC/OAuth2). These fields wire the federated flow; auth2 runs
+    # alongside the legacy auth module until it is proven and merged.
+    # ------------------------------------------------------------------ #
+    idp_url: str = Field(description="Base URL of the identity provider (OIDC/OAuth2).")
+    idp_client_id: str = Field(description="Client id registered at the identity provider.")
+    idp_client_secret: SecretStr = Field(
+        description="Client secret registered at the identity provider."
+    )
+    idp_expire_drift_tolerance: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Seconds subtracted from expires_at / expires_in values returned by "
+            "the IdP to avoid treating a token as valid past its real expiry due "
+            "to clock drift."
+        ),
+    )
+    # Optional OIDC claim names. When unset, standard OIDC claims are used.
+    idp_user_id_field: str | None = Field(
+        default=None,
+        description=(
+            "Claim name in the id_token carrying the stable IdP subject used to "
+            "look up the local user. Defaults to the standard 'sub' claim."
+        ),
+    )
+    idp_email_field: str | None = Field(
+        default=None, description="Claim name carrying the user email. Defaults to 'email'."
+    )
+    idp_role_field: str | None = Field(
+        default=None,
+        description=(
+            "Claim name carrying role information. Reserved for future use; "
+            "role→permission mapping is deferred."
+        ),
+    )
+    idp_scopes: list[str] = Field(
+        default_factory=lambda: ["openid", "email", "profile"],
+        description="OAuth scopes requested from the identity provider.",
+    )
+    idp_authorize_path: str = Field(
+        default="/authorize",
+        description="Path appended to idp_url for the authorization endpoint.",
+    )
+    idp_token_path: str = Field(
+        default="/token",
+        description="Path appended to idp_url for the token exchange endpoint.",
+    )
+    idp_refresh_path: str = Field(
+        default="/token",
+        description=(
+            "Path appended to idp_url for the refresh-token exchange endpoint. "
+            "Defaults to the token endpoint (RFC 6749)."
+        ),
+    )
+    # Lifetime of the *local* access tokens minted by auth2 (JWE). The IdP
+    # access token is never exposed to clients; this is the proxy token.
+    auth2_access_token_ttl_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="Lifetime (seconds) of auth2 access tokens (JWE).",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Background cleanup of expired IdP refresh tokens.
+    # ------------------------------------------------------------------ #
+    idp_delete_expired_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        description=(
+            "Expired IdP refresh tokens older than this many seconds are "
+            "eligible for deletion. 0 disables age-based deletion (only "
+            "already-expired rows are removed)."
+        ),
+    )
+    cleanup_interval: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Seconds between background sweeps that delete expired IdP refresh "
+            "tokens. When 0 the background loop is disabled and cleanup must be "
+            "driven by an external scheduler (cron); see README 'Cleanup "
+            "processes'."
+        ),
+    )
+
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:
         """Ensure the encryption key is present in decryption_keys."""

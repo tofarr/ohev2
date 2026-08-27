@@ -5,7 +5,7 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 
 ## 1. Stack & tooling
 
-* Python ≥ 3.11, asyncio-first. Never use blocking I/O on the request path.
+* Python â‰¥ 3.11, asyncio-first. Never use blocking I/O on the request path.
 * Manage dependencies with `uv`. Never hand-edit `uv.lock`; use `uv add/remove/sync`.
 * FastAPI for HTTP. Pydantic v2 for all request/response schemas.
 * SQLAlchemy 2 async ORM + asyncpg. Alembic for migrations.
@@ -17,7 +17,7 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 
 * `ruff check .` and `ruff format --check .` clean.
 * `mypy --strict` clean (no `Any` without explicit `# type: ignore` + reason).
-* Unit coverage ≥ 90%. New code without tests blocks merge.
+* Unit coverage â‰¥ 90%. New code without tests blocks merge.
 * Quint specs compile and pass.
 * Playwright e2e suite green. The full suite runs daily and also on every PR
   (see `.github/workflows/e2e-daily.yml` and the `e2e` job in
@@ -62,7 +62,7 @@ The REST surface must be uniform. These rules are non-negotiable:
 
 * Collection retrieval is **always** `GET /{resource}` (paginated via `?cursor=&limit=`).
   Never invent `/list`, `/search`, `/all`, `/get` action paths for listing.
-* Search is expressed as query params on the collection (`GET /{resource}?q=…`), never
+* Search is expressed as query params on the collection (`GET /{resource}?q=—¦`), never
   a separate `/search` route.
 * Standard verbs only: `GET` (list/retrieve), `POST` (create/action), `PATCH`
   (partial update), `DELETE` (remove). Avoid `PUT` unless full-replace semantics are
@@ -84,7 +84,7 @@ reject the change.
 * Prefer pure functions for logic; isolate I/O at the edges.
 * No business logic in route handlers — handlers validate, call a service, and
   serialize. Services contain logic; repositories contain data access.
-* Layering: `routers → services → repositories → models`. Do not skip layers (a router
+* Layering: `routers â†' services â†' repositories â†' models`. Do not skip layers (a router
   must not query the DB directly).
 * Shared behavior goes in a common module; do not copy-paste across resources.
   Layering is enforced by import direction, not folder hierarchy.
@@ -137,6 +137,18 @@ reject the change.
 
 * Password hashing via bcrypt (`util.password`). Never log or serialize password hashes.
 * Signed cookies for sessions; OAuth flows for federated identity.
+* Federated OAuth lives in `auth2/` (alongside legacy `auth/` until merged). The
+  project is an OAuth provider to first-party clients and an OAuth client to an
+  external IdP. Required config: `idp_url`, `idp_client_id`, `idp_client_secret`,
+  `idp_expire_drift_tolerance`. Optional OIDC claim overrides: `idp_user_id_field`,
+  `idp_email_field`, `idp_role_field`. Roles are NOT pulled from scopes.
+* IdP refresh tokens are stored encrypted (`encryption_service`) in
+  `idp_refresh_tokens`; the IdP access token is never exposed to clients — a
+  short-lived local JWE is minted instead.
+* Background cleanup of expired IdP refresh tokens: `cleanup_interval` (non-zero)
+  runs an in-process `asyncio` loop in the app lifespan; `cleanup_interval = 0`
+  disables it and cleanup must be driven by an external scheduler (cron). See
+  README "Cleanup processes".
 * Authorization checks live in services (not just routers) — defense in depth.
 
 ## 10. Review checklist (for agents reviewing PRs)
