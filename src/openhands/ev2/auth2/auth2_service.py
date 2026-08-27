@@ -68,6 +68,15 @@ _STATE_CLAIM = "st"
 _CODE_CHALLENGE_CLAIM = "cc"
 _CODE_METHOD_CLAIM = "ccm"
 _ROW_ID_CLAIM = "rid"
+_RESPONSE_TYPE_CLAIM = "rtyp"
+
+# Supported response_type values for the provider-facing authorize request.
+# The IdP flow is always a code flow (the project is the OAuth client to the
+# IdP); this value only governs what the callback returns to the first-party
+# client — an exchangeable code, or a session cookie with no code.
+_RESPONSE_TYPE_CODE = "code"
+_RESPONSE_TYPE_COOKIE = "cookie"
+_RESPONSE_TYPES = (_RESPONSE_TYPE_CODE, _RESPONSE_TYPE_COOKIE)
 
 # Default lifetime of the authorization code minted at callback (10 minutes).
 _AUTH_CODE_TTL = timedelta(minutes=10)
@@ -139,11 +148,19 @@ class Auth2Service:
         code_challenge: str | None,
         code_challenge_method: str | None,
         callback_url: str,
+        response_type: str = _RESPONSE_TYPE_CODE,
     ) -> str:
         """Validate the client + redirect URI and return the IdP authorize URL.
 
+        *response_type* is the provider-facing value (``code`` or ``cookie``)
+        recorded in the pending-auth state so the callback knows whether to
+        mint an exchangeable code (``code``) or only set a session cookie
+        (``cookie``). The IdP request itself is always a code flow.
+
         Raises :class:`InvalidClientError` / :class:`InvalidRedirectUriError`.
         """
+        if response_type not in _RESPONSE_TYPES:
+            raise Auth2Error(f"response_type must be one of {_RESPONSE_TYPES}")
         client = await self._load_client(client_id)
         if not await self._redirect_uri_allowed(client, redirect_uri):
             raise InvalidRedirectUriError(redirect_uri)
@@ -161,6 +178,7 @@ class Auth2Service:
             client_code_challenge=code_challenge,
             client_code_method=code_challenge_method,
             idp_verifier=verifier,
+            response_type=response_type,
         )
 
         params: dict[str, str] = {
@@ -187,7 +205,11 @@ class Auth2Service:
     ) -> CallbackContext:
         """Exchange the IdP code and return the context for the client redirect.
 
-        Raises :class:`InvalidGrantError` (bad state) or :class:`IdpError`.
+        For the ``code`` response type an exchangeable authorization code is
+        minted; for the ``cookie`` response type ``auth_code`` is ``None`` and
+        the caller is expected to authenticate the browser via the session
+        cookie alone. Raises :class:`InvalidGrantError` (bad state) or
+        :class:`IdpError`.
         """
         pending = self._decode_pending_auth(state)
         idp_tokens = await self._exchange_code_with_idp(
@@ -198,20 +220,24 @@ class Auth2Service:
         user = await self._provision_user(idp_tokens)
         row = await self._persist_idp_refresh(user.id, idp_tokens)
 
-        auth_code = self._mint_auth_code(
-            user_id=user.id,
-            row_id=row.id,
-            client_id=pending["client_id"],
-            redirect_uri=pending["redirect_uri"],
-            client_code_challenge=pending["client_code_challenge"],
-            client_code_method=pending["client_code_method"],
-        )
+        response_type = pending["response_type"]
+        auth_code: str | None = None
+        if response_type == _RESPONSE_TYPE_CODE:
+            auth_code = self._mint_auth_code(
+                user_id=user.id,
+                row_id=row.id,
+                client_id=pending["client_id"],
+                redirect_uri=pending["redirect_uri"],
+                client_code_challenge=pending["client_code_challenge"],
+                client_code_method=pending["client_code_method"],
+            )
         return CallbackContext(
             user_id=user.id,
             row_id=row.id,
             client_id=pending["client_id"],
             redirect_uri=pending["redirect_uri"],
             client_state=pending["client_state"],
+            response_type=response_type,
             auth_code=auth_code,
             expires_in=self._access_ttl_seconds(),
         )
@@ -621,11 +647,13 @@ class Auth2Service:
         client_code_challenge: str | None,
         client_code_method: str | None,
         idp_verifier: str,
+        response_type: str,
     ) -> str:
         """Mint the signed state carrying client context across the IdP redirect."""
         payload: dict[str, Any] = {
             _CLIENT_ID_CLAIM: client_id,
             _REDIRECT_URI_CLAIM: redirect_uri,
+            _RESPONSE_TYPE_CLAIM: response_type,
             "ivf": idp_verifier,
         }
         if client_state is not None:
@@ -641,12 +669,17 @@ class Auth2Service:
         payload = self._decrypt(state)
         if payload.get("ivf") is None or payload.get(_CLIENT_ID_CLAIM) is None:
             raise InvalidGrantError("invalid state")
+        # Older pending-auth tokens predate the response_type claim; treat them
+        # as the standard code flow so a rolling deploy does not reject in-flight
+        # authorizations.
+        response_type = payload.get(_RESPONSE_TYPE_CLAIM) or _RESPONSE_TYPE_CODE
         return {
             "client_id": str(payload[_CLIENT_ID_CLAIM]),
             "redirect_uri": str(payload[_REDIRECT_URI_CLAIM]),
             "client_state": payload.get(_STATE_CLAIM),
             "client_code_challenge": payload.get(_CODE_CHALLENGE_CLAIM),
             "client_code_method": payload.get(_CODE_METHOD_CLAIM),
+            "response_type": response_type,
             "idp_verifier": str(payload["ivf"]),
         }
 
@@ -746,7 +779,11 @@ _AUTH_CODE_TYP = "authorization_code"
 
 
 class CallbackContext:
-    """The result of ``/auth2/callback``: client redirect + token context."""
+    """The result of ``/auth2/callback``: client redirect + token context.
+
+    ``auth_code`` is ``None`` for the ``cookie`` response type, where the
+    session cookie (set by the router) is the sole credential.
+    """
 
     __slots__ = (
         "auth_code",
@@ -754,6 +791,7 @@ class CallbackContext:
         "client_state",
         "expires_in",
         "redirect_uri",
+        "response_type",
         "row_id",
         "user_id",
     )
@@ -766,7 +804,8 @@ class CallbackContext:
         client_id: str,
         redirect_uri: str,
         client_state: str | None,
-        auth_code: str,
+        response_type: str,
+        auth_code: str | None,
         expires_in: int,
     ) -> None:
         self.user_id = user_id
@@ -774,6 +813,7 @@ class CallbackContext:
         self.client_id = client_id
         self.redirect_uri = redirect_uri
         self.client_state = client_state
+        self.response_type = response_type
         self.auth_code = auth_code
         self.expires_in = expires_in
 

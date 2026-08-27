@@ -72,6 +72,7 @@ jobs:
           quint run specs/permission.qnt --main=permission --invariant=permissionsReferenceValidUsers --max-steps=100
           quint run specs/auth2.qnt --main=auth2 --invariant=codeConsumedOnceInvariant --max-steps=100
           quint run specs/auth2.qnt --main=auth2 --invariant=cleanupOnlyExpiredInvariant --max-steps=100
+          quint run specs/auth2.qnt --main=auth2 --invariant=cookieFlowNeverCodedInvariant --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest

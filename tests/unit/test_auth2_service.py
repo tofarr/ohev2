@@ -22,6 +22,7 @@ from openhands.ev2.auth2.auth2_models import (
     OAuthClientRedirectUri,
 )
 from openhands.ev2.auth2.auth2_service import (
+    Auth2Error,
     Auth2Service,
     IdpError,
     InvalidClientError,
@@ -278,6 +279,46 @@ class TestAuthorizeRedirect:
         assert "response_type=code" in url
         assert "code_challenge_method=S256" in url
 
+    async def test_build_redirect_rejects_unsupported_response_type(
+        self, service: Auth2Service
+    ) -> None:
+        # Defense in depth: the router's Literal guards this, but the service
+        # also rejects an unsupported response_type before touching the client.
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        with pytest.raises(Auth2Error):
+            await service.build_authorize_redirect(
+                client_id="client-1",
+                redirect_uri="https://app.example.com/cb",
+                state="st",
+                scope=None,
+                code_challenge=None,
+                code_challenge_method=None,
+                callback_url=_CALLBACK,
+                response_type="bogus",
+            )
+
+    async def test_build_redirect_cookie_response_type_records_state(
+        self, service: Auth2Service
+    ) -> None:
+        # response_type=cookie is accepted and round-trips through the
+        # pending-auth state so the callback knows to skip the code.
+        from urllib.parse import parse_qs, urlparse
+
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        state = parse_qs(urlparse(url).query)["state"][0]
+        pending = service._decode_pending_auth(state)
+        assert pending["response_type"] == "cookie"
+
 
 # ---------------------------------------------------------------------------
 # Callback → code exchange → provisioning
@@ -446,6 +487,98 @@ class TestCallback:
         )
         with pytest.raises(IdpError):
             await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+
+    @respx.mock
+    async def test_cookie_flow_provisions_without_minting_code(self, service: Auth2Service) -> None:
+        # response_type=cookie: the callback provisions the user and persists
+        # the IdP refresh token, but does NOT mint an authorization code.
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state="client-state",
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("cookie-sub", "cookie@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        assert ctx.response_type == "cookie"
+        assert ctx.auth_code is None
+        assert ctx.client_state == "client-state"
+        # User still JIT-provisioned and refresh token still persisted.
+        from sqlalchemy import select
+
+        user = (
+            await service._session.execute(select(User).where(User.idp_user_id == "cookie-sub"))
+        ).scalar_one()
+        assert user.email == "cookie@example.com"
+        row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+            )
+        ).scalar_one()
+        assert get_encryption_service().decrypt_value(row.refresh_token) == "idp-refresh-1"
+
+    @respx.mock
+    async def test_cookie_flow_refresh_still_works(self, service: Auth2Service) -> None:
+        # The cookie flow still persists a refresh-token row, so the refresh
+        # grant remains usable even though no code was minted.
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("cookie-refresh-sub", "cr@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        assert ctx.auth_code is None
+
+        # Mint a refresh token directly off the persisted row (the cookie flow
+        # never produces one via /token), then exercise the refresh grant.
+        refresh_token = service._mint_refresh_token(ctx.user_id, ctx.row_id)
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "idp-access-2",
+                    "refresh_token": "idp-refresh-2",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            )
+        )
+        pair = await service.exchange_refresh_token(
+            refresh_token=refresh_token,
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        assert pair.access_token
+        assert pair.refresh_token
 
 
 # ---------------------------------------------------------------------------

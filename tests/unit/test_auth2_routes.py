@@ -164,7 +164,9 @@ class TestAuthorizeRoute:
         )
         assert resp.status_code == 401
 
-    async def test_authorize_rejects_bad_response_type(self, client: AsyncClient) -> None:
+    async def test_authorize_rejects_unsupported_response_type(self, client: AsyncClient) -> None:
+        # response_type is an OpenAPI enum (Literal["code", "cookie"]); a value
+        # outside it is rejected as a validation error (422), not a 400.
         await client.post(
             "/auth2/clients",
             json={"client_id": "auth-3", "client_secret": "s", "redirect_uris": ["https://ok/cb"]},
@@ -178,7 +180,7 @@ class TestAuthorizeRoute:
             },
             follow_redirects=False,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
 
 class TestFullOAuthFlowRoute:
@@ -326,6 +328,59 @@ class TestFullOAuthFlowRoute:
                 },
             )
             assert tok.status_code == 401
+
+    @respx.mock
+    async def test_cookie_flow_sets_cookie_without_code(self, app) -> None:
+        # response_type=cookie: the callback sets a session cookie and returns
+        # NO authorization code (the cookie authenticates the browser).
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth2/clients",
+                json={
+                    "client_id": "cookie-flow",
+                    "client_secret": "cookie-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+
+            auth = await c.get(
+                "/auth2/authorize",
+                params={
+                    "response_type": "cookie",
+                    "client_id": "cookie-flow",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "state": "client-state",
+                },
+                follow_redirects=False,
+            )
+            assert auth.status_code == 302
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("cookie-sub-1", "cookie@example.com")
+                )
+            )
+            cb = await c.get(
+                "/auth2/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            assert cb.status_code == 302, cb.text
+            # Redirected to the client redirect URI, but with NO code param.
+            cb_location = cb.headers["location"]
+            assert cb_location.startswith("https://app.example.com/cb")
+            cb_qs = parse_qs(urlparse(cb_location).query)
+            assert "code" not in cb_qs
+            # The client state is still echoed back.
+            assert cb_qs["state"] == ["client-state"]
+            # The session cookie is set (the sole credential for this flow).
+            assert cb.cookies.get("ohesession")
 
     async def test_token_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(

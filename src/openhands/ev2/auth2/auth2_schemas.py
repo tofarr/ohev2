@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,9 +18,19 @@ class AuthorizeRequest(BaseModel):
     The project acts as an OAuth provider to the client and as a client to the
     IdP, so the same parameters are forwarded to the IdP after the redirect URI
     is validated against the client's allow-list.
+
+    ``response_type`` selects the provider-facing flow:
+
+    * ``code``   — standard OAuth: the callback returns an authorization code
+      the client exchanges at ``/auth2/token``.
+    * ``cookie`` — the callback sets a session cookie and returns no code; the
+      browser is authenticated by the cookie alone.
     """
 
-    response_type: str = Field(description="Must be 'code'.")
+    response_type: Literal["code", "cookie"] = Field(
+        description="'code' (standard OAuth, code returned) or 'cookie' "
+        "(session cookie set, no code).",
+    )
     client_id: str
     redirect_uri: str
     state: str | None = Field(default=None, description="Opaque client state echoed back.")
