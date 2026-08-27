@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ohev.app import create_app
+from ohev.auth.auth_models import ApiKey  # noqa: F401
 from ohev.config import get_config
 from ohev.db import Base, reset_engine_factory
 from ohev.permission.permission_models import Permission  # noqa: F401
@@ -31,9 +32,11 @@ _TEST_DB_URL = (
     else os.environ.get("OHEV_DATABASE_URL", "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev")
 )
 
-# Default test principal — authenticated via a JWE auth token minted in the
-# client fixture (the same mechanism the login endpoint uses).
+# Default test principal — authenticated via a JWE cookie token minted in the
+# client fixture (the same mechanism the login endpoint uses). The user is
+# created in the DB during the engine fixture so authenticate() can resolve it.
 _TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+_TEST_USERNAME = "test-principal"
 
 
 def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,6 +53,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # that verify denial override this env var locally.
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "all:user")
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_2", "all:api_key")
 
 
 @pytest_asyncio.fixture
@@ -85,12 +89,27 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     """A FastAPI app whose DB dependency uses the test engine.
 
     Overrides the `get_session` dependency to yield sessions from the test
-    engine so route tests are hermetic.
+    engine so route tests are hermetic. Also seeds the default test principal
+    user so the auth dependency's DB-backed `authenticate` can resolve tokens
+    minted for it.
     """
     _set_test_config(monkeypatch)
+    from sqlalchemy import text
+
     from ohev.db import get_session as _app_get_session
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    # Seed the test principal (User.id is init=False, so insert via SQL).
+    async with factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO users (id, email, username, enabled) "
+                "VALUES (:id, :email, :username, true) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": _TEST_USER_ID, "email": "test@example.com", "username": _TEST_USERNAME},
+        )
+        await s.commit()
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
         async with factory() as s:
@@ -107,9 +126,9 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
 async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncClient, None]:
     """An async HTTP client authenticated as the test principal.
 
-    Mints a JWE auth token for the test user id and sends it via the X-API-Key
-    header (the highest-priority auth source) so permission dependencies see a
-    real principal.
+    Mints a JWE cookie token for the seeded test user and sends it via the
+    X-API-Key header (the highest-priority auth source) so permission
+    dependencies see a real principal.
     """
     from ohev.util.auth_token import create_auth_token
 

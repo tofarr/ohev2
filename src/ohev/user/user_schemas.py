@@ -67,14 +67,22 @@ class UserRead(BaseModel):
 
 
 class UserLogin(BaseModel):
-    """Credentials submitted to the login endpoint."""
+    """Credentials submitted to the login endpoint.
+
+    Retained for backwards-compat imports; the auth package re-declares its own
+    :class:`LoginRequest`. Kept here so external callers importing from the user
+    module continue to resolve.
+    """
 
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1)
 
 
 class LoginResponse(BaseModel):
-    """Successful login response; the auth token is also set as a cookie."""
+    """Legacy login response; the auth package owns the current shape.
+
+    Retained for backwards-compat imports only.
+    """
 
     user: UserRead
     token_type: str = "bearer"
