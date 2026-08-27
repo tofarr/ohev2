@@ -65,6 +65,9 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
     monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
     monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+    # Public base URL of the service; the callback URL handed to the IdP is
+    # derived from this (config-driven, not request.base_url).
+    monkeypatch.setenv("OHEV_BASE_URL", "http://test")
     # Keep the background cleanup loop out of the test process.
     monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "0")
 

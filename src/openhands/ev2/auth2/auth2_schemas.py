@@ -59,20 +59,6 @@ class TokenResponse(BaseModel):
     id_token: str | None = Field(default=None, description="Optional id_token passthrough.")
 
 
-class CallbackResponse(BaseModel):
-    """Response body returned by ``GET /auth2/callback``.
-
-    The browser is redirected to the client's redirect_uri with a ``code`` and
-    the original ``state``; this body is also returned (and a session cookie
-    set) for non-browser / SPA flows that prefer a JSON response.
-    """
-
-    access_token: str
-    refresh_token: str
-    token_type: str = "Bearer"
-    expires_in: int
-
-
 class OAuthClientCreate(BaseModel):
     """Payload to register an OAuth client."""
 
