@@ -93,7 +93,9 @@ async def engine(monkeypatch: pytest.MonkeyPatch):
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await eng.dispose()
-    reset_engine_factory()
+    from openhands.ev2.db import dispose_engine_factory
+
+    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
@@ -117,6 +119,7 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     _set_test_config(monkeypatch)
     from sqlalchemy import text
 
+    from openhands.ev2.db import dispose_engine_factory
     from openhands.ev2.db import get_session as _app_get_session
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -140,7 +143,10 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     application.dependency_overrides[_app_get_session] = _override_get_session
     yield application
     application.dependency_overrides.clear()
-    reset_engine_factory()
+    # The CORS middleware reads origins via get_session_factory(), which builds
+    # a separate app-scoped engine (not the overridden test dependency). Dispose
+    # it so no asyncpg connections leak across tests.
+    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
