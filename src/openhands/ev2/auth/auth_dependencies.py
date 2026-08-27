@@ -100,7 +100,7 @@ async def get_current_user_id(
             value=fresh,
             max_age=cfg.auth_cookie_timeout_seconds,
             httponly=True,
-            samesite="lax",
+            samesite=cfg.auth_cookie_samesite,
             secure=cfg.auth_cookie_secure,
             path="/",
         )

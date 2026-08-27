@@ -61,8 +61,28 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 def reset_engine_factory() -> None:
-    """Reset the cached engine/factory (used by tests after config changes)."""
+    """Reset the cached engine/factory (used by tests after config changes).
+
+    This drops references to the cached engine/factory so the next call rebuilds
+    them from the (possibly changed) config. It does not dispose the old engine;
+    callers that may have opened real DB connections (asyncpg) should prefer
+    `await dispose_engine_factory()` to avoid leaking connections.
+    """
     global _engine, _factory
+    _engine = None
+    _factory = None
+
+
+async def dispose_engine_factory() -> None:
+    """Dispose the cached engine and clear the factory (async-safe teardown).
+
+    Use in async test fixtures instead of `reset_engine_factory()` when the
+    engine may have opened real connections (e.g. asyncpg) that must be closed
+    to avoid `ResourceWarning`/`PytestUnraisableExceptionWarning` leaks.
+    """
+    global _engine, _factory
+    if _engine is not None:
+        await _engine.dispose()
     _engine = None
     _factory = None
 

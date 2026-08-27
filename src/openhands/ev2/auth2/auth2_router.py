@@ -38,6 +38,7 @@ from openhands.ev2.auth2.auth2_schemas import (
     TokenResponse,
 )
 from openhands.ev2.auth2.auth2_service import (
+    _RESPONSE_TYPE_COOKIE,
     Auth2Error,
     Auth2Service,
     IdpError,
@@ -69,6 +70,8 @@ def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
 
     Reuses the legacy cookie token (mints without a DB session) so the existing
     ``get_current_user_id`` dependency authenticates auth2 sessions unchanged.
+    SameSite is config-driven and defaults to ``strict`` (strongest XSRF
+    mitigation); the cookie flow is a same-site flow so strict does not break it.
     """
     from openhands.ev2.util.auth_token import create_auth_token
 
@@ -79,7 +82,7 @@ def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
         value=cookie_token,
         max_age=cfg.auth_cookie_timeout_seconds,
         httponly=True,
-        samesite="lax",
+        samesite=cfg.auth_cookie_samesite,
         secure=cfg.auth_cookie_secure,
         path="/",
     )
@@ -181,7 +184,12 @@ async def callback(
         url=location,
         status_code=status.HTTP_302_FOUND,
     )
-    _set_session_cookie(response, ctx.user_id)
+    # The session cookie is the sole credential for the ``cookie`` response
+    # type (a first-party browser flow). For the ``code`` response type the
+    # client exchanges the code at ``/auth2/token``; no cookie is minted, so a
+    # confidential (token-based) client is never handed a browser session.
+    if ctx.response_type == _RESPONSE_TYPE_COOKIE:
+        _set_session_cookie(response, ctx.user_id)
     return response
 
 

@@ -56,7 +56,7 @@ def _set_auth_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=cfg.auth_cookie_timeout_seconds,
         httponly=True,
-        samesite="lax",
+        samesite=cfg.auth_cookie_samesite,
         secure=cfg.auth_cookie_secure,
         path="/",
     )
@@ -69,7 +69,7 @@ def _clear_auth_cookie(response: Response) -> None:
         key=cfg.auth_cookie_name,
         path="/",
         httponly=True,
-        samesite="lax",
+        samesite=cfg.auth_cookie_samesite,
         secure=cfg.auth_cookie_secure,
     )
 

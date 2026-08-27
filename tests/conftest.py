@@ -24,6 +24,7 @@ from openhands.ev2.auth2.auth2_models import (  # noqa: F401
     OAuthClientRedirectUri,
 )
 from openhands.ev2.config import get_config
+from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.permission.permission_models import Permission  # noqa: F401
 from openhands.ev2.user.user_models import User  # noqa: F401
@@ -51,6 +52,9 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     from openhands.ev2.permission.permission_service import reset_base_permissions_cache
 
     reset_base_permissions_cache()
+    from openhands.ev2.cors.cors_service import reset_cors_cache
+
+    reset_cors_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
     monkeypatch.setenv("OHEV_DATABASE_URL", _TEST_DB_URL)
     # Baseline grants that allow all CRUD-L on user and permission resources so
@@ -60,6 +64,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_2", "all:api_key")
     monkeypatch.setenv("OHEV_BASE_PERMISSIONS_3", "all:oauth_client")
+    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_4", "all:cors_origin")
     # Federated OAuth (auth2) — required config fields. Tests that exercise the
     # real IdP HTTP flow override the URL / mock httpx.
     monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
@@ -88,7 +93,9 @@ async def engine(monkeypatch: pytest.MonkeyPatch):
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await eng.dispose()
-    reset_engine_factory()
+    from openhands.ev2.db import dispose_engine_factory
+
+    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
@@ -112,6 +119,7 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     _set_test_config(monkeypatch)
     from sqlalchemy import text
 
+    from openhands.ev2.db import dispose_engine_factory
     from openhands.ev2.db import get_session as _app_get_session
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -135,7 +143,10 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     application.dependency_overrides[_app_get_session] = _override_get_session
     yield application
     application.dependency_overrides.clear()
-    reset_engine_factory()
+    # The CORS middleware reads origins via get_session_factory(), which builds
+    # a separate app-scoped engine (not the overridden test dependency). Dispose
+    # it so no asyncpg connections leak across tests.
+    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture

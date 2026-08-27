@@ -236,7 +236,10 @@ class TestFullOAuthFlowRoute:
             cb_qs = parse_qs(urlparse(cb_location).query)
             assert cb_qs["state"] == ["client-state"]
             our_code = cb_qs["code"][0]
-            assert cb.cookies.get("ohesession")  # session cookie set
+            # response_type=code: NO session cookie is minted. The client is a
+            # confidential (token-based) one that exchanges the code at /token;
+            # it must never receive a browser session.
+            assert not cb.cookies.get("ohesession")
 
             # 3. token exchange
             tok = await c.post(
