@@ -3,11 +3,14 @@
 Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 
 * ``GET  /auth2/authorize`` — validate the client + redirect URI and redirect
-  the browser to the IdP authorization endpoint.
+  the browser to the IdP authorization endpoint. ``response_type`` is either
+  ``code`` (standard OAuth: a code is returned after the callback) or ``cookie``
+  (the callback sets a session cookie and returns no code).
 * ``GET  /auth2/callback``  — exchange the IdP code, JIT-provision the user,
   persist the encrypted IdP refresh token, set a session cookie, and redirect
-  to the client's redirect URI with our authorization code + the original
-  state.
+  to the client's redirect URI. For ``response_type=code`` the redirect carries
+  our authorization code + the original state; for ``response_type=cookie`` no
+  code is returned (the cookie authenticates the browser).
 * ``POST /auth2/token``     — exchange our authorization code for an access +
   refresh token pair (RFC 6749 §4.1.3). Also handles the refresh grant.
 * ``POST /auth2/refresh``   — rotate the access + refresh pair via the IdP.
@@ -18,7 +21,7 @@ OAuth client management is a REST resource at ``/auth2/clients``.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -97,7 +100,7 @@ def _error_status(exc: Auth2Error) -> int:
 @router.get("/authorize")
 async def authorize(
     session: SessionDep,
-    response_type: Annotated[str, Query()],
+    response_type: Annotated[Literal["code", "cookie"], Query()],
     client_id: Annotated[str, Query()],
     redirect_uri: Annotated[str, Query()],
     state: Annotated[str | None, Query()] = None,
@@ -105,12 +108,20 @@ async def authorize(
     code_challenge: Annotated[str | None, Query()] = None,
     code_challenge_method: Annotated[str | None, Query()] = None,
 ) -> RedirectResponse:
-    """Validate the client + redirect URI and redirect to the IdP."""
-    if response_type != "code":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="response_type must be 'code'.",
-        )
+    """Validate the client + redirect URI and redirect to the IdP.
+
+    ``response_type`` selects the provider-facing flow carried through to the
+    callback:
+
+    * ``code``   — standard OAuth (RFC 6749 §4.1.1). After the IdP redirects
+      back, the callback mints an authorization code the client exchanges at
+      ``/auth2/token``.
+    * ``cookie`` — a browser-oriented variant. After the IdP redirects back,
+      the callback sets a session cookie and returns **no** code; the browser
+      is authenticated by the cookie alone.
+
+    Any other value is rejected by the OpenAPI-declared enum (HTTP 422).
+    """
     service = Auth2Service(session)
     try:
         url = await service.build_authorize_redirect(
@@ -121,6 +132,7 @@ async def authorize(
             code_challenge=code_challenge,
             code_challenge_method=code_challenge_method,
             callback_url=_callback_url(),
+            response_type=response_type,
         )
     except Auth2Error as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
@@ -138,10 +150,13 @@ async def callback(
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
 ) -> RedirectResponse:
-    """Exchange the IdP code and redirect to the client with our auth code.
+    """Exchange the IdP code and redirect to the client.
 
-    Sets a session cookie on the redirect response and sends the browser to
-    ``redirect_uri?code=…&state=…``.
+    Sets a session cookie on the redirect response. For ``response_type=code``
+    the redirect goes to ``redirect_uri?code=…&state=…`` so the client can
+    exchange the code at ``/auth2/token``. For ``response_type=cookie`` no code
+    is returned (the redirect carries only the optional ``state``); the session
+    cookie authenticates the browser.
     """
     service = Auth2Service(session)
     try:
@@ -156,10 +171,12 @@ async def callback(
         await service.aclose()
     await session.commit()
 
-    params: dict[str, str] = {"code": ctx.auth_code}
+    params: dict[str, str] = {}
+    if ctx.auth_code is not None:
+        params["code"] = ctx.auth_code
     if ctx.client_state is not None:
         params["state"] = ctx.client_state
-    location = f"{ctx.redirect_uri}?{urlencode(params)}"
+    location = f"{ctx.redirect_uri}?{urlencode(params)}" if params else ctx.redirect_uri
     response = RedirectResponse(
         url=location,
         status_code=status.HTTP_302_FOUND,
@@ -173,7 +190,12 @@ async def token(
     payload: TokenRequest,
     session: SessionDep,
 ) -> TokenResponse:
-    """Exchange an authorization code (or refresh token) for our tokens."""
+    """Exchange an authorization code (or refresh token) for our tokens.
+
+    OAuth standard token endpoint (RFC 6749 §4.1.3 / §6): the
+    ``authorization_code`` grant trades our short-lived code for an access +
+    refresh token pair, and the ``refresh_token`` grant rotates that pair.
+    """
     service = Auth2Service(session)
     try:
         if payload.grant_type == "authorization_code":
@@ -223,7 +245,11 @@ async def refresh(
     payload: TokenRequest,
     session: SessionDep,
 ) -> TokenResponse:
-    """Rotate the access + refresh pair via the IdP (refresh grant)."""
+    """Rotate the access + refresh pair via the IdP (refresh grant).
+
+    OAuth standard refresh-token grant (RFC 6749 §6): the existing refresh
+    token is exchanged at the IdP for a fresh access + refresh pair.
+    """
     if payload.grant_type != "refresh_token":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

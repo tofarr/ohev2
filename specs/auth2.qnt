@@ -6,19 +6,33 @@
 //
 //   PENDING  — the browser was redirected to the IdP; no callback yet.
 //   CODED    — the callback succeeded; an authorization code was minted.
-//   GRANTED  — the code was exchanged for an access + refresh token pair.
+//   GRANTED  — the code was exchanged for an access + refresh token pair,
+//              or (cookie flow) the callback granted access directly via the
+//              session cookie with no code ever minted.
 //   EXPIRED  — the IdP refresh-token row expired; refresh is rejected.
 //   CLEANED  — the expired row was deleted by the background sweep.
 //
+// Two response types are supported at /authorize (carried through the
+// pending-auth state to the callback):
+//
+//   CODE   — standard OAuth: the callback mints an authorization code that the
+//            client exchanges at /token (PENDING→CODED→GRANTED).
+//   COOKIE — a browser-oriented tweak: the callback sets a session cookie and
+//            grants access directly; no code is minted or exchangeable
+//            (PENDING→GRANTED).
+//
 // Invariants:
-//   - An authorization code can only be minted from PENDING (callback).
+//   - An authorization code can only be minted from PENDING (callback), and
+//     only for the CODE response type.
 //   - A code can be exchanged exactly once (PENDING→CODED→GRANTED, no replay).
+//   - A COOKIE flow never mints a code (it is never in CODED).
 //   - A refresh requires a live (unexpired) IdP refresh-token row.
 //   - The cleanup sweep only removes rows already EXPIRED past the age window.
 //   - A disabled OAuth client cannot start a new flow.
 
 module auth2 {
   type FlowState = Pending | Coded | Granted | Expired | Cleaned
+  type ResponseType = Code | Cookie
   type FlowId = str
 
   type Flow = {
@@ -27,6 +41,7 @@ module auth2 {
     clientEnabled: bool,
     codeConsumed: bool,
     rowExpiresAt: int, // IdP refresh-token row expiry (drift-adjusted)
+    responseType: ResponseType,
   }
 
   var flows: Set[Flow]
@@ -35,8 +50,9 @@ module auth2 {
     flows' = Set(),
   }
 
-  // authorize: start a flow. Requires an enabled client.
-  action authorize(id: FlowId, clientEnabled: bool, now: int): bool = all {
+  // authorize: start a flow. Requires an enabled client. The response type
+  // (code vs cookie) is recorded so the callback knows whether to mint a code.
+  action authorize(id: FlowId, clientEnabled: bool, now: int, rt: ResponseType): bool = all {
     clientEnabled,
     not(flows.exists(f => f.id == id)),
     flows' = flows.union(Set({
@@ -45,26 +61,40 @@ module auth2 {
       clientEnabled: clientEnabled,
       codeConsumed: false,
       rowExpiresAt: now + 3600,
+      responseType: rt,
     })),
   }
 
-  // callback: the IdP redirected back with a code. PENDING → CODED.
+  // callback: the IdP redirected back with a code.
+  // CODE flow → CODED (a code is minted for /token).
+  // COOKIE flow → GRANTED directly (cookie set, no code minted).
   pure def toCoded(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Coded, clientEnabled: g.clientEnabled,
-        codeConsumed: false, rowExpiresAt: g.rowExpiresAt }
+        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+    else g
+
+  pure def toGrantedDirect(g: Flow, id: FlowId): Flow =
+    if (g.id == id)
+      { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
+        codeConsumed: false, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+    else g
+
+  pure def applyCallback(g: Flow, id: FlowId): Flow =
+    if (g.id == id and g.responseType == Cookie) toGrantedDirect(g, id)
+    else if (g.id == id) toCoded(g, id)
     else g
 
   action callback(id: FlowId): bool = all {
     flows.exists(f => f.id == id and f.state == Pending),
-    flows' = flows.map(g => toCoded(g, id)),
+    flows' = flows.map(g => applyCallback(g, id)),
   }
 
   // token: exchange the code for tokens. CODED → GRANTED; code consumed once.
   pure def toGranted(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
-        codeConsumed: true, rowExpiresAt: g.rowExpiresAt }
+        codeConsumed: true, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
     else g
 
   action exchangeCode(id: FlowId): bool = all {
@@ -76,7 +106,7 @@ module auth2 {
   pure def extendRow(g: Flow, id: FlowId, now: int): Flow =
     if (g.id == id)
       { id: g.id, state: Granted, clientEnabled: g.clientEnabled,
-        codeConsumed: g.codeConsumed, rowExpiresAt: now + 3600 }
+        codeConsumed: g.codeConsumed, rowExpiresAt: now + 3600, responseType: g.responseType }
     else g
 
   action refresh(id: FlowId, now: int): bool = all {
@@ -88,7 +118,7 @@ module auth2 {
   pure def toExpired(g: Flow, id: FlowId): Flow =
     if (g.id == id)
       { id: g.id, state: Expired, clientEnabled: g.clientEnabled,
-        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt }
+        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
     else g
 
   action expire(id: FlowId, now: int): bool = all {
@@ -121,13 +151,18 @@ module auth2 {
   def cleanupOnlyExpiredInvariant: bool =
     flows.forall(f => f.state != Cleaned)
 
+  // A COOKIE flow never mints a code: it is never in CODED (it jumps straight
+  // to GRANTED), so exchangeCode — which requires CODED — cannot apply to it.
+  def cookieFlowNeverCodedInvariant: bool =
+    flows.forall(f => f.responseType == Cookie implies f.state != Coded)
+
   // ------------------------------------------------------------------ #
   // Tests
   // ------------------------------------------------------------------ #
 
   run happyPath = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(refresh("f1", 200))
@@ -139,7 +174,7 @@ module auth2 {
 
   run codeCannotBeReplayed = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(exchangeCode("f1"))
@@ -148,14 +183,14 @@ module auth2 {
 
   run callbackRequiresPending = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(exchangeCode("f1"))
       .fail()
   }
 
   run refreshRejectedAfterExpiry = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -165,7 +200,7 @@ module auth2 {
 
   run cleanupRemovesExpired = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -178,7 +213,7 @@ module auth2 {
 
   run cleanupSkipsFreshExpiry = {
     init
-      .then(authorize("f1", true, 100))
+      .then(authorize("f1", true, 100, Code))
       .then(callback("f1"))
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
@@ -191,7 +226,27 @@ module auth2 {
 
   run disabledClientCannotAuthorize = {
     init
-      .then(authorize("f1", false, 100))
+      .then(authorize("f1", false, 100, Code))
+      .fail()
+  }
+
+  // COOKIE flow: callback grants access directly (no code minted); the flow is
+  // never CODED and exchangeCode cannot apply to it.
+  run cookieFlowSkipsCode = {
+    init
+      .then(authorize("f1", true, 100, Cookie))
+      .then(callback("f1"))
+      .then(all {
+        assert(flows.exists(f => f.id == "f1" and f.state == Granted and not(f.codeConsumed))),
+        flows' = flows,
+      })
+  }
+
+  run cookieFlowCannotExchangeCode = {
+    init
+      .then(authorize("f1", true, 100, Cookie))
+      .then(callback("f1"))
+      .then(exchangeCode("f1"))
       .fail()
   }
 }
