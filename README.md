@@ -122,6 +122,22 @@ wildcard redirect-URI matching). The IdP `id_token` (or the decoded
 refresh-token JWT) supplies the `sub`/email used for JIT user provisioning
 (`users.idp_user_id`).
 
+## CORS (cross-origin)
+
+Cross-origin access is governed by a **global**, DB-backed allow-list managed
+via `/cors-origins` (CRUD, permission-gated by the `cors_origin` resource
+type). The allow-list is **not** tied to an OAuth client — it is a
+deployment-level concern. A middleware reads the list (cached, invalidated on
+mutation) and, for a permitted request `Origin`, sets
+`Access-Control-Allow-Origin` to that exact origin (never `*`) plus
+`Access-Control-Allow-Credentials: true`, and answers preflight `OPTIONS`
+requests. Disallowed origins receive no CORS headers, so the browser blocks
+the cross-origin read.
+
+This is CORS access control (which cross-origin JavaScript may read
+responses), not an XSRF defense for cookies — that is handled by the
+SameSite=strict session cookie.
+
 ## Cleanup processes
 
 Expired IdP refresh tokens are pruned by a background sweep.

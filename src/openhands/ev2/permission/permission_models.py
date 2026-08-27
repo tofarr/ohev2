@@ -57,6 +57,7 @@ class ResourceType(enum.StrEnum):
     PERMISSION = "permission"
     API_KEY = "api_key"
     OAUTH_CLIENT = "oauth_client"
+    CORS_ORIGIN = "cors_origin"
 
 
 class Permission(Base):
