@@ -205,6 +205,23 @@ class TestAuthConfig:
         assert config.idp.client_id == "test-client"
         assert config.idp.client_secret.get_secret_value() == "test-secret"
 
+    def test_idp_defaults_select_dev_provider(self) -> None:
+        """With no idp config supplied, the built-in dev IdP defaults apply."""
+        from openhands.ev2.config import IdpConfig
+
+        idp = IdpConfig()
+        assert idp.url == "/auth/dev"
+        assert idp.client_id == "ohe"
+        assert idp.client_secret.get_secret_value() == "change-me"
+
+    def test_appconfig_constructs_with_only_encryption_key(self) -> None:
+        """The default IdP + DB config let AppConfig load with just an encryption key."""
+        config = AppConfig(
+            encryption_key=EncryptionKeyConfig(value=SecretStr("x" * 32)),
+        )
+        assert config.idp.url == "/auth/dev"
+        assert config.idp.client_id == "ohe"
+
     def test_idp_optional_oidc_fields_default_none(self) -> None:
         config = _cfg()
         assert config.idp.user_id_field is None
@@ -245,13 +262,17 @@ class TestAuthConfig:
         config = _cfg()
         assert config.idp.refresh_lock_timeout_seconds > 0
 
-    def test_missing_idp_url_raises(self) -> None:
-        from pydantic import ValidationError
+    def test_idp_url_has_dev_default_not_required(self) -> None:
+        """idp.url now defaults to the dev provider; omitting it does not raise."""
+        from openhands.ev2.config import IdpConfig
 
-        with pytest.raises(ValidationError):
-            AppConfig(  # type: ignore[call-arg]
-                idp={"client_id": "c", "client_secret": SecretStr("s")},
-            )
+        config = AppConfig(
+            encryption_key=EncryptionKeyConfig(value=SecretStr("x" * 32)),
+            idp=IdpConfig(client_id="c", client_secret=SecretStr("s")),
+        )
+        # Explicit client_id/secret override defaults but url keeps its default.
+        assert config.idp.url == "/auth/dev"
+        assert config.idp.client_id == "c"
 
     def test_loads_auth_fields_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from openhands.ev2.config import get_config

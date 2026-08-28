@@ -60,10 +60,21 @@ class IdpConfig(BaseModel):
     alongside the legacy auth module until it is proven and merged.
     """
 
-    url: str = Field(description="Base URL of the identity provider (OIDC/OAuth2).")
-    client_id: str = Field(description="Client id registered at the identity provider.")
+    url: str = Field(
+        default="/auth/dev",
+        description=(
+            "Base URL of the identity provider (OIDC/OAuth2). Defaults to the "
+            "built-in dev identity provider mounted at '/auth/dev' "
+            "(see auth.dev_router); set this to a real IdP URL for production."
+        ),
+    )
+    client_id: str = Field(
+        default="ohe",
+        description="Client id registered at the identity provider.",
+    )
     client_secret: SecretStr = Field(
-        description="Client secret registered at the identity provider."
+        default=SecretStr("change-me"),
+        description="Client secret registered at the identity provider.",
     )
     expire_drift_tolerance: int = Field(
         default=60,
@@ -168,7 +179,10 @@ class AppConfig(BaseModel):
 
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
-    idp: IdpConfig = Field(description="Identity provider (federated OAuth / OIDC) configuration.")
+    idp: IdpConfig = Field(
+        default_factory=IdpConfig,
+        description="Identity provider (federated OAuth / OIDC) configuration.",
+    )
     db_config: DbConfig = Field(
         default_factory=DbConfig,
         description="Structured database connection configuration (host/port/db/credentials).",
