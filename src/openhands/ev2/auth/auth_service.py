@@ -669,6 +669,19 @@ class AuthService:
         await self._session.refresh(access_row)
         return refresh_row, access_row
 
+    async def persist_idp_tokens(
+        self,
+        user_id: uuid.UUID,
+        idp_tokens: dict[str, Any],
+    ) -> tuple[IdpRefreshToken, IdpAccessToken]:
+        """Public entry point for :meth:`_persist_idp_tokens`.
+
+        Exposed so the dev login endpoint can persist a freshly issued IdP
+        token pair (from the dev IdP) through the same path the OAuth callback
+        uses, without re-implementing encryption-at-rest or expiry syncing.
+        """
+        return await self._persist_idp_tokens(user_id, idp_tokens)
+
     async def _load_token_rows(
         self,
         refresh_id: uuid.UUID,
