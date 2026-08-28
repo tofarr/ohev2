@@ -363,6 +363,7 @@ def upgrade() -> None:
             ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_role_users_user_id_users"
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("role_id", "user_id", name="uq_role_users_role_id_user_id"),
         comment="Role-to-user assignments",
     )
     op.create_index("ix_role_users_role_id", "role_users", ["role_id"], unique=False)

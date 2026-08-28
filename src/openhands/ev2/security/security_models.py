@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
-from sqlalchemy import ForeignKey, String, func
+from sqlalchemy import ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -244,7 +244,10 @@ class RoleUser(Base):
     """
 
     __tablename__ = "role_users"
-    __table_args__ = {"comment": "Role-to-user assignments"}  # noqa: RUF012
+    __table_args__ = (
+        UniqueConstraint("role_id", "user_id", name="uq_role_users_role_id_user_id"),
+        {"comment": "Role-to-user assignments"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         init=False,
