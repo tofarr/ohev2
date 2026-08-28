@@ -15,9 +15,11 @@ def _cfg(**overrides: object) -> AppConfig:
     on the field under test.
     """
     defaults: dict[str, object] = {
-        "idp_url": "https://idp.example.com",
-        "idp_client_id": "test-client",
-        "idp_client_secret": SecretStr("test-secret"),
+        "idp": {
+            "url": "https://idp.example.com",
+            "client_id": "test-client",
+            "client_secret": SecretStr("test-secret"),
+        },
         "encryption_key": EncryptionKeyConfig(
             id="primary", value=SecretStr("test-secret-at-least-32-bytes-long!!")
         ),
@@ -177,29 +179,29 @@ class TestAuth2Config:
 
     def test_idp_required_fields(self) -> None:
         config = _cfg()
-        assert config.idp_url == "https://idp.example.com"
-        assert config.idp_client_id == "test-client"
-        assert config.idp_client_secret.get_secret_value() == "test-secret"
+        assert config.idp.url == "https://idp.example.com"
+        assert config.idp.client_id == "test-client"
+        assert config.idp.client_secret.get_secret_value() == "test-secret"
 
     def test_idp_optional_oidc_fields_default_none(self) -> None:
         config = _cfg()
-        assert config.idp_user_id_field is None
-        assert config.idp_email_field is None
-        assert config.idp_role_field is None
+        assert config.idp.user_id_field is None
+        assert config.idp.email_field is None
+        assert config.idp.role_field is None
 
     def test_idp_drift_tolerance_default(self) -> None:
         config = _cfg()
-        assert config.idp_expire_drift_tolerance >= 0
+        assert config.idp.expire_drift_tolerance >= 0
 
     def test_idp_scopes_default(self) -> None:
         config = _cfg()
-        assert config.idp_scopes
-        assert all(isinstance(s, str) for s in config.idp_scopes)
+        assert config.idp.scopes
+        assert all(isinstance(s, str) for s in config.idp.scopes)
 
     def test_idp_paths_default(self) -> None:
         config = _cfg()
-        assert config.idp_authorize_path
-        assert config.idp_token_path
+        assert config.idp.authorize_path
+        assert config.idp.token_path
 
     def test_cleanup_interval_default(self) -> None:
         config = _cfg()
@@ -207,27 +209,26 @@ class TestAuth2Config:
 
     def test_idp_delete_expired_seconds_default(self) -> None:
         config = _cfg()
-        assert config.idp_delete_expired_seconds > 0
+        assert config.idp.delete_expired_seconds > 0
 
     def test_idp_access_token_expires_in_default(self) -> None:
         config = _cfg()
-        assert config.idp_access_token_expires_in > 0
+        assert config.idp.access_token_expires_in > 0
 
     def test_idp_refresh_token_expires_in_default(self) -> None:
         config = _cfg()
-        assert config.idp_refresh_token_expires_in > 0
+        assert config.idp.refresh_token_expires_in > 0
 
     def test_idp_refresh_lock_timeout_default(self) -> None:
         config = _cfg()
-        assert config.idp_refresh_lock_timeout_seconds > 0
+        assert config.idp.refresh_lock_timeout_seconds > 0
 
     def test_missing_idp_url_raises(self) -> None:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
             AppConfig(  # type: ignore[call-arg]
-                idp_client_id="c",
-                idp_client_secret=SecretStr("s"),
+                idp={"client_id": "c", "client_secret": SecretStr("s")},
             )
 
     def test_loads_auth2_fields_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,9 +245,9 @@ class TestAuth2Config:
         monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "600")
         monkeypatch.setenv("OHEV_IDP_DELETE_EXPIRED_SECONDS", "7200")
         config = get_config()
-        assert config.idp_user_id_field == "oid"
-        assert config.idp_email_field == "mail"
-        assert config.idp_expire_drift_tolerance == 120
+        assert config.idp.user_id_field == "oid"
+        assert config.idp.email_field == "mail"
+        assert config.idp.expire_drift_tolerance == 120
         assert config.cleanup_interval == 600
-        assert config.idp_delete_expired_seconds == 7200
+        assert config.idp.delete_expired_seconds == 7200
         get_config.cache_clear()

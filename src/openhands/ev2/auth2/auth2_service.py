@@ -57,7 +57,7 @@ from openhands.ev2.auth2.auth2_models import (
     OAuthClient,
     OAuthClientRedirectUri,
 )
-from openhands.ev2.config import AppConfig, get_config
+from openhands.ev2.config import AppConfig, IdpConfig, get_config
 from openhands.ev2.encryption.encryption_service import (
     EncryptionService,
     get_encryption_service,
@@ -148,6 +148,7 @@ class Auth2Service:
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._enc = encryption_service or get_encryption_service()
         self._cfg = config or get_config()
+        self._idp = self._cfg.idp
 
     async def aclose(self) -> None:
         """Close the IdP HTTP client if this service owns it."""
@@ -203,14 +204,14 @@ class Auth2Service:
 
         params: dict[str, str] = {
             "response_type": "code",
-            "client_id": self._cfg.idp_client_id,
+            "client_id": self._idp.client_id,
             "redirect_uri": callback_url,
             "state": idp_state,
-            "scope": " ".join(self._cfg.idp_scopes),
+            "scope": " ".join(self._idp.scopes),
             "code_challenge": idp_challenge,
             "code_challenge_method": "S256",
         }
-        return _join_url(self._cfg.idp_url, self._cfg.idp_authorize_path, params)
+        return _join_url(self._idp.url, self._idp.authorize_path, params)
 
     # ------------------------------------------------------------------ #
     # /callback — exchange the IdP code, provision the user, mint our code.
@@ -356,10 +357,10 @@ class Auth2Service:
         """Delete expired IdP refresh tokens older than the configured age.
 
         Rows whose ``expires_at`` is in the past and older than
-        ``idp_delete_expired_seconds`` (measured from now) are removed. Returns
+        ``idp.delete_expired_seconds`` (measured from now) are removed. Returns
         the number of rows deleted.
         """
-        cutoff = _now() - timedelta(seconds=self._cfg.idp_delete_expired_seconds)
+        cutoff = _now() - timedelta(seconds=self._idp.delete_expired_seconds)
         from sqlalchemy import CursorResult
 
         result = cast(
@@ -524,8 +525,8 @@ class Auth2Service:
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": callback_url,
-            "client_id": self._cfg.idp_client_id,
-            "client_secret": self._cfg.idp_client_secret.get_secret_value(),
+            "client_id": self._idp.client_id,
+            "client_secret": self._idp.client_secret.get_secret_value(),
             "code_verifier": verifier,
         }
         return await self._idp_token_post(data)
@@ -535,13 +536,13 @@ class Auth2Service:
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": self._cfg.idp_client_id,
-            "client_secret": self._cfg.idp_client_secret.get_secret_value(),
+            "client_id": self._idp.client_id,
+            "client_secret": self._idp.client_secret.get_secret_value(),
         }
         return await self._idp_token_post(data)
 
     async def _idp_token_post(self, data: dict[str, str]) -> dict[str, Any]:
-        url = _join_url(self._cfg.idp_url, self._cfg.idp_token_path)
+        url = _join_url(self._idp.url, self._idp.token_path)
         try:
             resp = await self._http.post(url, data=data)
         except httpx.HTTPError as exc:
@@ -567,8 +568,8 @@ class Auth2Service:
         """
         id_token = idp_tokens.get("id_token")
         claims = _decode_id_token(id_token) if id_token else {}
-        idp_user_id = _claim(claims, self._cfg.idp_user_id_field, "sub")
-        email = _claim(claims, self._cfg.idp_email_field, "email")
+        idp_user_id = _claim(claims, self._idp.user_id_field, "sub")
+        email = _claim(claims, self._idp.email_field, "email")
 
         if idp_user_id is not None:
             user = await self._find_user_by_idp_id(idp_user_id)
@@ -635,18 +636,18 @@ class Auth2Service:
         access = idp_tokens.get("access_token")
         if not access:
             raise IdpError("IdP token response missing access_token")
-        drift = self._cfg.idp_expire_drift_tolerance
+        drift = self._idp.expire_drift_tolerance
         refresh_row = IdpRefreshToken(
             user_id=user_id,
             refresh_token=self._enc.encrypt_value(refresh),
-            expires_at=_idp_refresh_expiry(idp_tokens, drift, self._cfg),
+            expires_at=_idp_refresh_expiry(idp_tokens, drift, self._idp),
         )
         self._session.add(refresh_row)
         await self._session.flush()
         access_row = IdpAccessToken(
             refresh_token_id=refresh_row.id,
             access_token=self._enc.encrypt_value(access),
-            expires_at=_idp_access_expiry(idp_tokens, drift, self._cfg),
+            expires_at=_idp_access_expiry(idp_tokens, drift, self._idp),
         )
         self._session.add(access_row)
         await self._session.flush()
@@ -676,7 +677,7 @@ class Auth2Service:
         concurrent process may have refreshed it already. Returns
         ``(refresh_row, access_row)``; either may be ``None`` if missing.
         """
-        timeout_ms = int(self._cfg.idp_refresh_lock_timeout_seconds * 1000)
+        timeout_ms = int(self._idp.refresh_lock_timeout_seconds * 1000)
         await self._session.execute(text(f"SET LOCAL lock_timeout = {timeout_ms}"))
         try:
             result = await self._session.execute(
@@ -727,11 +728,11 @@ class Auth2Service:
         new_idp_access = idp_tokens.get("access_token")
         if not new_idp_access:
             raise IdpError("IdP refresh response missing access_token")
-        drift = self._cfg.idp_expire_drift_tolerance
+        drift = self._idp.expire_drift_tolerance
         refresh_row.refresh_token = self._enc.encrypt_value(new_idp_refresh)
-        refresh_row.expires_at = _idp_refresh_expiry(idp_tokens, drift, self._cfg)
+        refresh_row.expires_at = _idp_refresh_expiry(idp_tokens, drift, self._idp)
         access_row.access_token = self._enc.encrypt_value(new_idp_access)
-        access_row.expires_at = _idp_access_expiry(idp_tokens, drift, self._cfg)
+        access_row.expires_at = _idp_access_expiry(idp_tokens, drift, self._idp)
         await self._session.flush()
 
     # ------------------------------------------------------------------ #
@@ -1064,12 +1065,12 @@ def _uuid(payload: dict[str, Any], key: str) -> uuid.UUID:
 def _idp_access_expiry(
     idp_tokens: dict[str, Any],
     drift_seconds: int,
-    cfg: AppConfig,
+    idp: IdpConfig,
 ) -> datetime:
     """Compute the IdP *access*-token row expiry from the IdP response.
 
     Prefers ``expires_in`` (seconds from now) over an absolute ``expires_at``;
-    when the IdP advertises neither, ``idp_access_token_expires_in`` is the
+    when the IdP advertises neither, ``idp.access_token_expires_in`` is the
     fallback. The drift tolerance is subtracted to avoid treating a token as
     valid past its real expiry due to clock skew.
     """
@@ -1079,19 +1080,19 @@ def _idp_access_expiry(
     expires_at = idp_tokens.get("expires_at")
     if isinstance(expires_at, int | float) and expires_at > 0:
         return datetime.fromtimestamp(max(0, int(expires_at) - drift_seconds), tz=UTC)
-    return _now() + timedelta(seconds=max(1, cfg.idp_access_token_expires_in - drift_seconds))
+    return _now() + timedelta(seconds=max(1, idp.access_token_expires_in - drift_seconds))
 
 
 def _idp_refresh_expiry(
     idp_tokens: dict[str, Any],
     drift_seconds: int,
-    cfg: AppConfig,
+    idp: IdpConfig,
 ) -> datetime:
     """Compute the IdP *refresh*-token row expiry from the IdP response.
 
     Prefers ``refresh_expires_in`` (seconds from now) over an absolute
     ``refresh_expires_at``; when the IdP advertises neither,
-    ``idp_refresh_token_expires_in`` is the fallback. The drift tolerance is
+    ``idp.refresh_token_expires_in`` is the fallback. The drift tolerance is
     subtracted to avoid treating a token as valid past its real expiry.
     """
     refresh_expires_in = idp_tokens.get("refresh_expires_in")
@@ -1100,7 +1101,7 @@ def _idp_refresh_expiry(
     refresh_expires_at = idp_tokens.get("refresh_expires_at")
     if isinstance(refresh_expires_at, int | float) and refresh_expires_at > 0:
         return datetime.fromtimestamp(max(0, int(refresh_expires_at) - drift_seconds), tz=UTC)
-    return _now() + timedelta(seconds=max(1, cfg.idp_refresh_token_expires_in - drift_seconds))
+    return _now() + timedelta(seconds=max(1, idp.refresh_token_expires_in - drift_seconds))
 
 
 def _seconds_until(expires_at: datetime) -> int:

@@ -26,6 +26,112 @@ class EncryptionKeyConfig(BaseModel):
         return str(value)
 
 
+class IdpConfig(BaseModel):
+    """Federated OAuth (auth2) — identity provider configuration.
+
+    The project delegates authentication to an external identity provider
+    (OIDC/OAuth2). It acts as an OAuth provider to first-party clients and an
+    OAuth client to the IdP. These fields wire the federated flow; auth2 runs
+    alongside the legacy auth module until it is proven and merged.
+    """
+
+    url: str = Field(description="Base URL of the identity provider (OIDC/OAuth2).")
+    client_id: str = Field(description="Client id registered at the identity provider.")
+    client_secret: SecretStr = Field(
+        description="Client secret registered at the identity provider."
+    )
+    expire_drift_tolerance: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Seconds subtracted from expires_at / expires_in values returned by "
+            "the IdP to avoid treating a token as valid past its real expiry due "
+            "to clock drift."
+        ),
+    )
+    # Optional OIDC claim names. When unset, standard OIDC claims are used.
+    user_id_field: str | None = Field(
+        default=None,
+        description=(
+            "Claim name in the id_token carrying the stable IdP subject used to "
+            "look up the local user. Defaults to the standard 'sub' claim."
+        ),
+    )
+    email_field: str | None = Field(
+        default=None, description="Claim name carrying the user email. Defaults to 'email'."
+    )
+    role_field: str | None = Field(
+        default=None,
+        description=(
+            "Claim name carrying role information. Reserved for future use; "
+            "role→permission mapping is deferred."
+        ),
+    )
+    scopes: list[str] = Field(
+        default_factory=lambda: ["openid", "email", "profile"],
+        description="OAuth scopes requested from the identity provider.",
+    )
+    authorize_path: str = Field(
+        default="/authorize",
+        description="Path appended to idp.url for the authorization endpoint.",
+    )
+    token_path: str = Field(
+        default="/token",
+        description="Path appended to idp.url for the token exchange endpoint.",
+    )
+    refresh_path: str = Field(
+        default="/token",
+        description=(
+            "Path appended to idp.url for the refresh-token exchange endpoint. "
+            "Defaults to the token endpoint (RFC 6749)."
+        ),
+    )
+    # Fallback access-token lifetime (seconds) used only when the IdP token
+    # response omits both ``expires_in`` and ``expires_at``. The IdP is the
+    # source of truth for access control; this is a last-resort default.
+    access_token_expires_in: int = Field(
+        default=900,
+        ge=1,
+        description=(
+            "Fallback access-token lifetime (seconds) when the IdP does not "
+            "advertise one. The IdP-advertised expiry is always preferred."
+        ),
+    )
+    # Fallback refresh-token lifetime (seconds) used only when the IdP token
+    # response omits a refresh-token expiry (``refresh_expires_in`` /
+    # ``refresh_expires_at``). The IdP is the source of truth when present.
+    refresh_token_expires_in: int = Field(
+        default=2_592_000,
+        ge=1,
+        description=(
+            "Fallback refresh-token lifetime (seconds) when the IdP does not "
+            "advertise one. The IdP-advertised expiry is always preferred."
+        ),
+    )
+    # Lock timeout (seconds) for the DB row lock held during an IdP refresh.
+    # If a concurrent refresh holds the lock longer than this, the waiter
+    # abandons the refresh rather than blocking indefinitely.
+    refresh_lock_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Max seconds to wait for the refresh-row lock during a concurrent "
+            "IdP token refresh. On timeout the refresh is abandoned with an "
+            "error so the client can retry / re-authenticate."
+        ),
+    )
+    # Background cleanup of expired IdP refresh tokens.
+    delete_expired_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        description=(
+            "Expired IdP refresh tokens older than this many seconds are "
+            "eligible for deletion. 0 disables age-based deletion (only "
+            "already-expired rows are removed)."
+        ),
+    )
+
+
 class AppConfig(BaseModel):
     """Root application configuration.
 
@@ -40,6 +146,7 @@ class AppConfig(BaseModel):
 
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
+    idp: IdpConfig = Field(description="Identity provider (federated OAuth / OIDC) configuration.")
     database_url: str = Field(
         default="postgresql+asyncpg://ohev:ohev@localhost:5432/ohev",
         description="Async SQLAlchemy database URL.",
@@ -96,97 +203,6 @@ class AppConfig(BaseModel):
     # (then ``auth_cookie_secure`` keeps it HTTPS-only). "none" requires Secure.
     auth_cookie_samesite: Literal["lax", "strict", "none"] = "strict"
 
-    # ------------------------------------------------------------------ #
-    # Federated OAuth (auth2) — IdP configuration.
-    # The project delegates authentication to an external identity provider
-    # (OIDC/OAuth2). These fields wire the federated flow; auth2 runs
-    # alongside the legacy auth module until it is proven and merged.
-    # ------------------------------------------------------------------ #
-    idp_url: str = Field(description="Base URL of the identity provider (OIDC/OAuth2).")
-    idp_client_id: str = Field(description="Client id registered at the identity provider.")
-    idp_client_secret: SecretStr = Field(
-        description="Client secret registered at the identity provider."
-    )
-    idp_expire_drift_tolerance: int = Field(
-        default=60,
-        ge=0,
-        description=(
-            "Seconds subtracted from expires_at / expires_in values returned by "
-            "the IdP to avoid treating a token as valid past its real expiry due "
-            "to clock drift."
-        ),
-    )
-    # Optional OIDC claim names. When unset, standard OIDC claims are used.
-    idp_user_id_field: str | None = Field(
-        default=None,
-        description=(
-            "Claim name in the id_token carrying the stable IdP subject used to "
-            "look up the local user. Defaults to the standard 'sub' claim."
-        ),
-    )
-    idp_email_field: str | None = Field(
-        default=None, description="Claim name carrying the user email. Defaults to 'email'."
-    )
-    idp_role_field: str | None = Field(
-        default=None,
-        description=(
-            "Claim name carrying role information. Reserved for future use; "
-            "role→permission mapping is deferred."
-        ),
-    )
-    idp_scopes: list[str] = Field(
-        default_factory=lambda: ["openid", "email", "profile"],
-        description="OAuth scopes requested from the identity provider.",
-    )
-    idp_authorize_path: str = Field(
-        default="/authorize",
-        description="Path appended to idp_url for the authorization endpoint.",
-    )
-    idp_token_path: str = Field(
-        default="/token",
-        description="Path appended to idp_url for the token exchange endpoint.",
-    )
-    idp_refresh_path: str = Field(
-        default="/token",
-        description=(
-            "Path appended to idp_url for the refresh-token exchange endpoint. "
-            "Defaults to the token endpoint (RFC 6749)."
-        ),
-    )
-    # Fallback access-token lifetime (seconds) used only when the IdP token
-    # response omits both ``expires_in`` and ``expires_at``. The IdP is the
-    # source of truth for access control; this is a last-resort default.
-    idp_access_token_expires_in: int = Field(
-        default=900,
-        ge=1,
-        description=(
-            "Fallback access-token lifetime (seconds) when the IdP does not "
-            "advertise one. The IdP-advertised expiry is always preferred."
-        ),
-    )
-    # Fallback refresh-token lifetime (seconds) used only when the IdP token
-    # response omits a refresh-token expiry (``refresh_expires_in`` /
-    # ``refresh_expires_at``). The IdP is the source of truth when present.
-    idp_refresh_token_expires_in: int = Field(
-        default=2_592_000,
-        ge=1,
-        description=(
-            "Fallback refresh-token lifetime (seconds) when the IdP does not "
-            "advertise one. The IdP-advertised expiry is always preferred."
-        ),
-    )
-    # Lock timeout (seconds) for the DB row lock held during an IdP refresh.
-    # If a concurrent refresh holds the lock longer than this, the waiter
-    # abandons the refresh rather than blocking indefinitely.
-    idp_refresh_lock_timeout_seconds: float = Field(
-        default=5.0,
-        gt=0,
-        description=(
-            "Max seconds to wait for the refresh-row lock during a concurrent "
-            "IdP token refresh. On timeout the refresh is abandoned with an "
-            "error so the client can retry / re-authenticate."
-        ),
-    )
     # Public base URL of this service. Used to derive the OAuth callback URL
     # (and any other absolute URLs handed to the IdP / clients). Sourced from
     # config rather than the incoming request so it is correct behind K8s
@@ -199,15 +215,6 @@ class AppConfig(BaseModel):
     # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
     # ------------------------------------------------------------------ #
-    idp_delete_expired_seconds: int = Field(
-        default=86_400,
-        ge=0,
-        description=(
-            "Expired IdP refresh tokens older than this many seconds are "
-            "eligible for deletion. 0 disables age-based deletion (only "
-            "already-expired rows are removed)."
-        ),
-    )
     cleanup_interval: int = Field(
         default=300,
         ge=0,
@@ -240,6 +247,7 @@ def get_config() -> AppConfig:
       - OHEV_DECRYPTION_KEYS_1_ID
       - OHEV_DECRYPTION_KEYS_1_VALUE
       - OHEV_BASE_PERMISSIONS_0, OHEV_BASE_PERMISSIONS_1, ...
+      - OHEV_IDP_URL, OHEV_IDP_CLIENT_ID, OHEV_IDP_CLIENT_SECRET, ...
       ...
     """
     return cast(AppConfig, from_env(AppConfig, "OHEV"))

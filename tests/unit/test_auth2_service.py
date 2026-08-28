@@ -55,9 +55,11 @@ def _test_cfg() -> AppConfig:
     from pydantic import SecretStr
 
     return AppConfig(  # type: ignore[call-arg]
-        idp_url=_IDP_BASE,
-        idp_client_id="test-client",
-        idp_client_secret=SecretStr("test-secret"),
+        idp={
+            "url": _IDP_BASE,
+            "client_id": "test-client",
+            "client_secret": SecretStr("test-secret"),
+        },
         encryption_key=EncryptionKeyConfig(
             id="primary", value=SecretStr("test-secret-at-least-32-bytes-long!!")
         ),
@@ -168,29 +170,29 @@ class TestHelpers:
 
     def test_idp_access_expiry_from_expires_in(self) -> None:
         cfg = _test_cfg()
-        expiry = _idp_access_expiry({"expires_in": 3600}, drift_seconds=60, cfg=cfg)
+        expiry = _idp_access_expiry({"expires_in": 3600}, drift_seconds=60, idp=cfg.idp)
         assert abs((expiry - datetime.now(UTC)).total_seconds() - 3540) < 5
 
     def test_idp_access_expiry_drift_floor_zero(self) -> None:
         cfg = _test_cfg()
-        expiry = _idp_access_expiry({"expires_in": 30}, drift_seconds=60, cfg=cfg)
+        expiry = _idp_access_expiry({"expires_in": 30}, drift_seconds=60, idp=cfg.idp)
         # Drift subtracted but floored at 0 → expiry is ~now.
         assert abs((expiry - datetime.now(UTC)).total_seconds()) < 5
 
     def test_idp_access_expiry_default_when_missing(self) -> None:
         cfg = _test_cfg()
-        expiry = _idp_access_expiry({}, drift_seconds=60, cfg=cfg)
+        expiry = _idp_access_expiry({}, drift_seconds=60, idp=cfg.idp)
         # Falls back to idp_access_token_expires_in (900) minus drift.
         assert abs((expiry - datetime.now(UTC)).total_seconds() - 840) < 5
 
     def test_idp_refresh_expiry_from_refresh_expires_in(self) -> None:
         cfg = _test_cfg()
-        expiry = _idp_refresh_expiry({"refresh_expires_in": 86400}, drift_seconds=60, cfg=cfg)
+        expiry = _idp_refresh_expiry({"refresh_expires_in": 86400}, drift_seconds=60, idp=cfg.idp)
         assert abs((expiry - datetime.now(UTC)).total_seconds() - 86340) < 5
 
     def test_idp_refresh_expiry_default_when_missing(self) -> None:
         cfg = _test_cfg()
-        expiry = _idp_refresh_expiry({}, drift_seconds=60, cfg=cfg)
+        expiry = _idp_refresh_expiry({}, drift_seconds=60, idp=cfg.idp)
         # Falls back to idp_refresh_token_expires_in (30 days) minus drift.
         assert (expiry - datetime.now(UTC)).total_seconds() > 86000
 
