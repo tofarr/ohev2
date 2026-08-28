@@ -10,7 +10,7 @@ import os
 
 import httpx
 
-BASE_URL = os.environ.get("OHEV_BASE_URL", "http://localhost:8000")
+BASE_URL = os.environ.get("OHE_BASE_URL", "http://localhost:8000")
 
 
 async def test_app_healthy() -> None:

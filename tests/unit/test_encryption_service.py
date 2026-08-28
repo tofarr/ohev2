@@ -260,10 +260,10 @@ class TestGetEncryptionService:
 
         get_encryption_service.cache_clear()
 
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret")
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret")
+        monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHE_IDP_CLIENT_ID", "test-client")
+        monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "test-secret")
 
         service1 = get_encryption_service()
         service2 = get_encryption_service()

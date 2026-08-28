@@ -17,7 +17,11 @@ jobs:
       - name: Run migrations
         run: uv run alembic upgrade head
         env:
-          OHEV_DATABASE_URL: postgresql+asyncpg://ohev:ohev@localhost:5432/ohev
+          OHE_DB_CONFIG_HOST: localhost
+          OHE_DB_CONFIG_PORT: 5432
+          OHE_DB_CONFIG_DB_NAME: ohev
+          OHE_DB_CONFIG_USERNAME: ohev
+          OHE_DB_CONFIG_PASSWORD: ohev
       - name: Wait for app
         run: |
           for i in $(seq 1 30); do

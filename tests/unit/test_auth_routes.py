@@ -189,7 +189,7 @@ class TestFullOAuthFlowRoute:
     @respx.mock
     async def test_full_flow(self, app) -> None:
         # The callback URL handed to the IdP is derived from config
-        # (OHEV_BASE_URL=http://test in the test config).
+        # (OHE_BASE_URL=http://test in the test config).
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 

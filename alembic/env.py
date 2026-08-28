@@ -28,8 +28,28 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Allow DATABASE_URL / OHEV_DATABASE_URL to override the ini's sqlalchemy.url.
-_db_url = os.environ.get("OHEV_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+def _db_url_from_env() -> str | None:
+    """Assemble the SQLAlchemy URL from the OHE_DB_CONFIG_* env vars.
+
+    Done without loading the full AppConfig so alembic can run with only the
+    database variables set (the app config requires IdP / encryption fields
+    that are irrelevant to migrations). A plain DATABASE_URL wins as an escape
+    hatch for one-off runs.
+    """
+    if os.environ.get("DATABASE_URL"):
+        return os.environ["DATABASE_URL"]
+    host = os.environ.get("OHE_DB_CONFIG_HOST")
+    if host is None:
+        return None
+    port = os.environ.get("OHE_DB_CONFIG_PORT", "5432")
+    db_name = os.environ.get("OHE_DB_CONFIG_DB_NAME", "ohev")
+    username = os.environ.get("OHE_DB_CONFIG_USERNAME", "ohev")
+    password = os.environ.get("OHE_DB_CONFIG_PASSWORD", "ohev")
+    return f"postgresql+asyncpg://{username}:{password}@{host}:{port}/{db_name}"
+
+
+_db_url = _db_url_from_env()
 if _db_url:
     config.set_main_option("sqlalchemy.url", _db_url)
 

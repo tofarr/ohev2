@@ -26,6 +26,31 @@ class EncryptionKeyConfig(BaseModel):
         return str(value)
 
 
+class DbConfig(BaseModel):
+    """Structured database connection configuration.
+
+    The SQLAlchemy async URL is assembled from these fields rather than read
+    as a single connection string, so each component can be injected
+    independently (e.g. a secret store populates ``password`` while the rest
+    comes from plaintext env vars). Use the ``database_url`` property to get
+    the assembled ``postgresql+asyncpg`` URL.
+    """
+
+    host: str = Field(default="localhost", description="Database host.")
+    port: int = Field(default=5432, ge=1, le=65535, description="Database port.")
+    db_name: str = Field(default="ohev", description="Database name.")
+    username: str = Field(default="ohev", description="Database username.")
+    password: SecretStr = Field(default=SecretStr("ohev"), description="Database password.")
+
+    @property
+    def database_url(self) -> str:
+        """Assemble the async SQLAlchemy URL from the structured fields."""
+        return (
+            f"postgresql+asyncpg://{self.username}:"
+            f"{self.password.get_secret_value()}@{self.host}:{self.port}/{self.db_name}"
+        )
+
+
 class IdpConfig(BaseModel):
     """Federated OAuth (auth) — identity provider configuration.
 
@@ -144,9 +169,9 @@ class AppConfig(BaseModel):
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
     idp: IdpConfig = Field(description="Identity provider (federated OAuth / OIDC) configuration.")
-    database_url: str = Field(
-        default="postgresql+asyncpg://ohev:ohev@localhost:5432/ohev",
-        description="Async SQLAlchemy database URL.",
+    db_config: DbConfig = Field(
+        default_factory=DbConfig,
+        description="Structured database connection configuration (host/port/db/credentials).",
     )
     # Access-token lifetime (OAuth2 flow). Short-lived; replaced via refresh.
     auth_access_token_ttl_seconds: int = Field(
@@ -227,19 +252,26 @@ class AppConfig(BaseModel):
             self.decryption_keys = [self.encryption_key, *self.decryption_keys]
         return self
 
+    @property
+    def database_url(self) -> str:
+        """Assembled async SQLAlchemy database URL (from ``db_config``)."""
+        return self.db_config.database_url
+
 
 @lru_cache(maxsize=1)
 def get_config() -> AppConfig:
     """Load and cache the application configuration from environment.
 
-    Environment variables are parsed with the 'OHEV' prefix:
-      - OHEV_ENCRYPTION_KEY_ID
-      - OHEV_ENCRYPTION_KEY_VALUE
-      - OHEV_DECRYPTION_KEYS_0_ID
-      - OHEV_DECRYPTION_KEYS_0_VALUE
-      - OHEV_DECRYPTION_KEYS_1_ID
-      - OHEV_DECRYPTION_KEYS_1_VALUE
-      - OHEV_IDP_URL, OHEV_IDP_CLIENT_ID, OHEV_IDP_CLIENT_SECRET, ...
+    Environment variables are parsed with the 'OHE' prefix:
+      - OHE_ENCRYPTION_KEY_ID
+      - OHE_ENCRYPTION_KEY_VALUE
+      - OHE_DECRYPTION_KEYS_0_ID
+      - OHE_DECRYPTION_KEYS_0_VALUE
+      - OHE_DECRYPTION_KEYS_1_ID
+      - OHE_DECRYPTION_KEYS_1_VALUE
+      - OHE_DB_CONFIG_HOST, OHE_DB_CONFIG_PORT, OHE_DB_CONFIG_DB_NAME,
+        OHE_DB_CONFIG_USERNAME, OHE_DB_CONFIG_PASSWORD
+      - OHE_IDP_URL, OHE_IDP_CLIENT_ID, OHE_IDP_CLIENT_SECRET, ...
       ...
     """
-    return cast(AppConfig, from_env(AppConfig, "OHEV"))
+    return cast(AppConfig, from_env(AppConfig, "OHE"))

@@ -92,6 +92,39 @@ uv run alembic upgrade head
 uv run uvicorn openhands.ev2.app:app --reload
 ```
 
+### Local database (development)
+
+Configuration is loaded from environment variables with the `OHE` prefix
+(see `.env.example`). The database connection is configured via the
+structured `db_config` fields rather than a single connection string:
+
+| Field | Env var | Default | Purpose |
+| --- | --- | --- | --- |
+| `db_config.host` | `OHE_DB_CONFIG_HOST` | `localhost` | Database host |
+| `db_config.port` | `OHE_DB_CONFIG_PORT` | `5432` | Database port |
+| `db_config.db_name` | `OHE_DB_CONFIG_DB_NAME` | `ohev` | Database name |
+| `db_config.username` | `OHE_DB_CONFIG_USERNAME` | `ohev` | Database username |
+| `db_config.password` | `OHE_DB_CONFIG_PASSWORD` | `ohev` | Database password |
+
+To start a local PostgreSQL instance for development, run (with the same
+values you set in your `.env` / environment):
+
+```bash
+docker run --name runtime-api-postgres \
+    -e POSTGRES_PASSWORD=$OHE_DB_CONFIG_PASSWORD \
+    -e POSTGRES_USER=$OHE_DB_CONFIG_USERNAME \
+    -e POSTGRES_DB=$OHE_DB_CONFIG_DB_NAME \
+    -p ${OHE_DB_CONFIG_PORT}:5432 \
+    -d postgres
+```
+
+Then apply migrations and start the app:
+
+```bash
+uv run alembic upgrade head
+uv run uvicorn openhands.ev2.app:app --reload
+```
+
 ## Federated authentication
 
 The `auth` module is the sole authentication layer — a federated OAuth/OIDC
@@ -99,14 +132,14 @@ flow in which the project acts as an OAuth **provider** to first-party clients
 and as an OAuth **client** to an external identity provider (IdP). API-key and
 refresh-token credentials live in the same `auth` package.
 
-Required configuration (environment variables, `OHEV` prefix):
+Required configuration (environment variables, `OHE` prefix):
 
 | Field | Env var | Purpose |
 | --- | --- | --- |
-| `idp.url` | `OHEV_IDP_URL` | Base URL of the identity provider |
-| `idp.client_id` | `OHEV_IDP_CLIENT_ID` | Client id registered at the IdP |
-| `idp.client_secret` | `OHEV_IDP_CLIENT_SECRET` | Client secret registered at the IdP |
-| `idp.expire_drift_tolerance` | `OHEV_IDP_EXPIRE_DRIFT_TOLERANCE` | Seconds subtracted from IdP `expires_in`/`expires_at` to avoid drift bugs |
+| `idp.url` | `OHE_IDP_URL` | Base URL of the identity provider |
+| `idp.client_id` | `OHE_IDP_CLIENT_ID` | Client id registered at the IdP |
+| `idp.client_secret` | `OHE_IDP_CLIENT_SECRET` | Client secret registered at the IdP |
+| `idp.expire_drift_tolerance` | `OHE_IDP_EXPIRE_DRIFT_TOLERANCE` | Seconds subtracted from IdP `expires_in`/`expires_at` to avoid drift bugs |
 
 Optional OIDC claim overrides: `idp.user_id_field`, `idp.email_field`,
 `idp.role_field` (default to the standard `sub`, `email`, and a reserved
@@ -142,12 +175,12 @@ SameSite=strict session cookie.
 
 Expired IdP refresh tokens are pruned by a background sweep.
 
-* `cleanup_interval` (`OHEV_CLEANUP_INTERVAL`, default `300`): seconds between
+* `cleanup_interval` (`OHE_CLEANUP_INTERVAL`, default `300`): seconds between
   sweeps. **Non-zero** runs an `asyncio` loop inside the FastAPI lifespan —
   no external scheduler needed.
 * `cleanup_interval = 0` **disables** the in-process loop; drive cleanup with
   an external cron job hitting the same `delete_expired_tokens` service
   function (or a future admin endpoint).
-* `idp.delete_expired_seconds` (`OHEV_IDP_DELETE_EXPIRED_SECONDS`, default
+* `idp.delete_expired_seconds` (`OHE_IDP_DELETE_EXPIRED_SECONDS`, default
   `86400`): rows whose `expires_at` is older than this window are deleted.
   `0` deletes any already-expired row regardless of age.

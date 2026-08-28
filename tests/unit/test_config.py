@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr
 
-from openhands.ev2.config import AppConfig, EncryptionKeyConfig
+from openhands.ev2.config import AppConfig, DbConfig, EncryptionKeyConfig
 
 
 def _cfg(**overrides: object) -> AppConfig:
@@ -100,6 +100,58 @@ class TestAppConfig:
         assert ids.count("shared") == 1
 
 
+class TestDbConfig:
+    """Tests for the structured DbConfig model and database_url assembly."""
+
+    def test_defaults(self) -> None:
+        db = DbConfig()
+        assert db.host == "localhost"
+        assert db.port == 5432
+        assert db.db_name == "ohev"
+        assert db.username == "ohev"
+        assert db.password.get_secret_value() == "ohev"
+
+    def test_database_url_assembles_from_fields(self) -> None:
+        db = DbConfig(
+            host="db.example.com",
+            port=6543,
+            db_name="mydb",
+            username="user",
+            password=SecretStr("p@ss"),
+        )
+        assert db.database_url == "postgresql+asyncpg://user:p@ss@db.example.com:6543/mydb"
+
+    def test_appconfig_database_url_property_delegates_to_db_config(self) -> None:
+        config = _cfg(
+            db_config=DbConfig(
+                host="h", port=1234, db_name="n", username="u", password=SecretStr("p")
+            ),
+        )
+        assert config.database_url == "postgresql+asyncpg://u:p@h:1234/n"
+
+    def test_loads_db_config_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from openhands.ev2.config import get_config
+
+        get_config.cache_clear()
+        monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHE_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "primary")
+        monkeypatch.setenv("OHE_DB_CONFIG_HOST", "dbhost")
+        monkeypatch.setenv("OHE_DB_CONFIG_PORT", "7000")
+        monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", "prod")
+        monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", "app")
+        monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", "secret")
+        config = get_config()
+        assert config.db_config.host == "dbhost"
+        assert config.db_config.port == 7000
+        assert config.db_config.db_name == "prod"
+        assert config.db_config.username == "app"
+        assert config.db_config.password.get_secret_value() == "secret"
+        assert config.database_url == "postgresql+asyncpg://app:secret@dbhost:7000/prod"
+        get_config.cache_clear()
+
+
 class TestGetConfig:
     """Tests for get_config function."""
 
@@ -108,12 +160,12 @@ class TestGetConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHE_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "env-secret")
 
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "env-secret")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_ID", "env-key")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "env-secret")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_ID", "env-key")
 
         config = get_config()
         assert config.encryption_key.id == "env-key"
@@ -126,13 +178,13 @@ class TestGetConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHE_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "env-secret")
 
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
-        monkeypatch.setenv("OHEV_DECRYPTION_KEYS_0_ID", "old-key")
-        monkeypatch.setenv("OHEV_DECRYPTION_KEYS_0_VALUE", "old-secret")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "primary")
+        monkeypatch.setenv("OHE_DECRYPTION_KEYS_0_ID", "old-key")
+        monkeypatch.setenv("OHE_DECRYPTION_KEYS_0_VALUE", "old-secret")
 
         config = get_config()
         # encryption_key (default id) + old-key
@@ -205,15 +257,15 @@ class TestAuthConfig:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "env-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "env-secret")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "primary")
-        monkeypatch.setenv("OHEV_IDP_USER_ID_FIELD", "oid")
-        monkeypatch.setenv("OHEV_IDP_EMAIL_FIELD", "mail")
-        monkeypatch.setenv("OHEV_IDP_EXPIRE_DRIFT_TOLERANCE", "120")
-        monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "600")
-        monkeypatch.setenv("OHEV_IDP_DELETE_EXPIRED_SECONDS", "7200")
+        monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+        monkeypatch.setenv("OHE_IDP_CLIENT_ID", "env-client")
+        monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "primary")
+        monkeypatch.setenv("OHE_IDP_USER_ID_FIELD", "oid")
+        monkeypatch.setenv("OHE_IDP_EMAIL_FIELD", "mail")
+        monkeypatch.setenv("OHE_IDP_EXPIRE_DRIFT_TOLERANCE", "120")
+        monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "600")
+        monkeypatch.setenv("OHE_IDP_DELETE_EXPIRED_SECONDS", "7200")
         config = get_config()
         assert config.idp.user_id_field == "oid"
         assert config.idp.email_field == "mail"

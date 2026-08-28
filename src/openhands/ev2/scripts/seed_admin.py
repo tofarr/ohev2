@@ -8,7 +8,7 @@ the admin, or after adding new resource types (re-running backfills the missing
 policies-map entries).
 
 Run via ``uv run python -m openhands.ev2.scripts.seed_admin``; credentials default from the
-``OHEV_SEED_ADMIN_*`` environment variables, or dev defaults if those are unset.
+``OHE_SEED_ADMIN_*`` environment variables, or dev defaults if those are unset.
 
 This script intentionally writes ORM rows directly, bypassing the service layer.
 There is no authenticated principal to scope against at seed/bootstrap time, and
@@ -150,18 +150,18 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--username",
-        default=os.environ.get("OHEV_SEED_ADMIN_USERNAME", _DEFAULT_USERNAME),
-        help="Admin username (default: env OHEV_SEED_ADMIN_USERNAME or 'admin').",
+        default=os.environ.get("OHE_SEED_ADMIN_USERNAME", _DEFAULT_USERNAME),
+        help="Admin username (default: env OHE_SEED_ADMIN_USERNAME or 'admin').",
     )
     parser.add_argument(
         "--email",
-        default=os.environ.get("OHEV_SEED_ADMIN_EMAIL", _DEFAULT_EMAIL),
-        help="Admin email (default: env OHEV_SEED_ADMIN_EMAIL or 'admin@example.com').",
+        default=os.environ.get("OHE_SEED_ADMIN_EMAIL", _DEFAULT_EMAIL),
+        help="Admin email (default: env OHE_SEED_ADMIN_EMAIL or 'admin@example.com').",
     )
     parser.add_argument(
         "--password",
-        default=os.environ.get("OHEV_SEED_ADMIN_PASSWORD", _DEFAULT_PASSWORD),
-        help="Admin password (default: env OHEV_SEED_ADMIN_PASSWORD or 'changeme').",
+        default=os.environ.get("OHE_SEED_ADMIN_PASSWORD", _DEFAULT_PASSWORD),
+        help="Admin password (default: env OHE_SEED_ADMIN_PASSWORD or 'changeme').",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -176,7 +176,7 @@ async def main(argv: Iterable[str] | None = None) -> int:
     if using_defaults:
         print(
             "WARNING: using default admin credentials (admin/admin@example.com/changeme). "
-            "Set OHEV_SEED_ADMIN_* env vars or --username/--email/--password to override.",
+            "Set OHE_SEED_ADMIN_* env vars or --username/--email/--password to override.",
             file=sys.stderr,
         )
 
