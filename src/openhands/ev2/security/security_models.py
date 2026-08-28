@@ -1,7 +1,7 @@
 """Models for the security module.
 
 The security module is the successor to the legacy ``permission`` package. Its
-central abstraction is :class:`Permission2`, a discriminated-union (SDK
+central abstraction is :class:`Permission`, a discriminated-union (SDK
 ``DiscriminatedUnionMixin``) Pydantic model: a concrete permission policy that
 knows how to reduce itself to a :class:`SearchFilter` for a given
 ``(user_id, action)`` pair. Storing the policy itself (rather than a serialized
@@ -43,7 +43,7 @@ from openhands.ev2.util.search_filter import (
 
 
 class Action(enum.StrEnum):
-    """Actions a permission2 policy may be evaluated against.
+    """Actions a permission policy may be evaluated against.
 
     CRUD verbs cover the standard REST operations; ``SEARCH`` covers collection
     retrieval, and ``USE`` covers non-CRUD resource-scoped actions (e.g. using
@@ -59,7 +59,7 @@ class Action(enum.StrEnum):
     USE = "use"
 
 
-class Permission2(DiscriminatedUnionMixin, ABC):
+class Permission(DiscriminatedUnionMixin, ABC):
     """Abstract base for a permission policy.
 
     Concrete subclasses participate in the SDK discriminated-union machinery
@@ -84,7 +84,7 @@ class Permission2(DiscriminatedUnionMixin, ABC):
         raise NotImplementedError
 
 
-class Permitted(Permission2):
+class Permitted(Permission):
     """Policy that always grants full, unrestricted access."""
 
     def to_search_filter(
@@ -95,7 +95,7 @@ class Permitted(Permission2):
         return AllSearchFilter[Any]()
 
 
-class Denied(Permission2):
+class Denied(Permission):
     """Policy that always denies access (matches no rows)."""
 
     def to_search_filter(
@@ -106,7 +106,7 @@ class Denied(Permission2):
         return NoneSearchFilter[Any]()
 
 
-class ReadOnly(Permission2):
+class ReadOnly(Permission):
     """Policy that grants read/search and denies all other actions."""
 
     def to_search_filter(
@@ -119,12 +119,12 @@ class ReadOnly(Permission2):
         return NoneSearchFilter[Any]()
 
 
-class Permission2Type(TypeDecorator[Permission2 | None]):
-    """SQLAlchemy column type that persists a :class:`Permission2` as JSONB.
+class PermissionType(TypeDecorator[Permission | None]):
+    """SQLAlchemy column type that persists a :class:`Permission` as JSONB.
 
     Stores the policy as a JSONB column on read/write, transparently
     serializing via ``model_dump`` and deserializing via the discriminated-union
-    ``Permission2.model_validate`` so the round-trip restores the concrete
+    ``Permission.model_validate`` so the round-trip restores the concrete
     subclass. ``None`` is preserved as SQL ``NULL``.
     """
 
@@ -133,7 +133,7 @@ class Permission2Type(TypeDecorator[Permission2 | None]):
 
     def process_bind_param(
         self,
-        value: Permission2 | dict[str, Any] | None,
+        value: Permission | dict[str, Any] | None,
         dialect: Any,
     ) -> dict[str, Any] | None:
         if value is None:
@@ -146,17 +146,17 @@ class Permission2Type(TypeDecorator[Permission2 | None]):
         self,
         value: dict[str, Any] | None,
         dialect: Any,
-    ) -> Permission2 | None:
+    ) -> Permission | None:
         if value is None:
             return None
-        return Permission2.model_validate(value)
+        return Permission.model_validate(value)
 
 
-class Permission2MapType(TypeDecorator[dict[str, Permission2] | None]):
-    """SQLAlchemy column type for a ``{resource_type: Permission2}`` JSONB map.
+class PermissionMapType(TypeDecorator[dict[str, Permission] | None]):
+    """SQLAlchemy column type for a ``{resource_type: Permission}`` JSONB map.
 
     Each value is serialized/deserialized via the discriminated-union
-    ``Permission2.model_validate`` so the round-trip restores the concrete
+    ``Permission.model_validate`` so the round-trip restores the concrete
     subclass. A missing key (or ``None`` map) means "no policy for this
     resource" (deny). Keys are resource-type names (e.g. ``"user"``,
     ``"api_key"``).
@@ -167,7 +167,7 @@ class Permission2MapType(TypeDecorator[dict[str, Permission2] | None]):
 
     def process_bind_param(
         self,
-        value: dict[str, Permission2] | None,
+        value: dict[str, Permission] | None,
         dialect: Any,
     ) -> dict[str, Any] | None:
         if value is None:
@@ -181,28 +181,28 @@ class Permission2MapType(TypeDecorator[dict[str, Permission2] | None]):
         self,
         value: dict[str, Any] | None,
         dialect: Any,
-    ) -> dict[str, Permission2] | None:
+    ) -> dict[str, Permission] | None:
         if value is None:
             return None
-        return {k: Permission2.model_validate(v) for k, v in value.items()}
+        return {k: Permission.model_validate(v) for k, v in value.items()}
 
 
 class Role(Base):
     """A named role bundling per-resource permission policies.
 
     The ``policies`` JSONB column maps a resource-type name (e.g. ``"user"``,
-    ``"api_key"``) to a :class:`Permission2` policy that applies when a user
+    ``"api_key"``) to a :class:`Permission` policy that applies when a user
     assigned this role performs an action on that resource. A missing key means
     "deny" for that resource. This is the canonical, extensible store: new
     resource types are governed by adding a key rather than a column.
 
     The legacy ``role_permission`` and ``user_permission`` columns are retained
     for backward compatibility with existing data but are no longer consulted
-    by the auth2 authorization dependency.
+    by the auth authorization dependency.
     """
 
     __tablename__ = "roles"
-    __table_args__ = {"comment": "Named role bundling permission2 policies"}  # noqa: RUF012
+    __table_args__ = {"comment": "Named role bundling permission policies"}  # noqa: RUF012
 
     id: Mapped[uuid.UUID] = mapped_column(
         init=False,
@@ -210,20 +210,20 @@ class Role(Base):
         server_default=func.gen_random_uuid(),
     )
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    policies: Mapped[dict[str, Permission2] | None] = mapped_column(
-        Permission2MapType,
+    policies: Mapped[dict[str, Permission] | None] = mapped_column(
+        PermissionMapType,
         default=None,
-        comment="Map of resource-type name -> Permission2 policy; missing key = deny.",
+        comment="Map of resource-type name -> Permission policy; missing key = deny.",
     )
-    role_permission: Mapped[Permission2 | None] = mapped_column(
-        Permission2Type,
+    role_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
         default=None,
-        comment="Permission2 policy for role/permission resources; null = deny.",
+        comment="Permission policy for role/permission resources; null = deny.",
     )
-    user_permission: Mapped[Permission2 | None] = mapped_column(
-        Permission2Type,
+    user_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
         default=None,
-        comment="Permission2 policy for user resources; null = deny.",
+        comment="Permission policy for user resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,

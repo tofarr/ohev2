@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.security.security_models import Permission2, Role, RoleUser
+from openhands.ev2.security.security_models import Permission, Role, RoleUser
 from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import UserCreate
 from openhands.ev2.user.user_service import UserService
@@ -30,7 +30,7 @@ async def make_principal(
 async def assign_role(
     session: AsyncSession,
     user_id: uuid.UUID,
-    policies: dict[str, Permission2],
+    policies: dict[str, Permission],
     *,
     role_name: str | None = None,
 ) -> Role:

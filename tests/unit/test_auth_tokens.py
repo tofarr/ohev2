@@ -1,4 +1,4 @@
-"""Tests for :class:`AuthService` in :mod:`openhands.ev2.auth2.auth2_tokens`.
+"""Tests for :class:`TokenService` in :mod:`openhands.ev2.auth.auth_tokens`.
 
 Covers JWE token issuance, authentication (per token type), API-key backing
 rows, and refresh-token rotation (sliding window). Uses a real DB session and
@@ -13,8 +13,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
-from openhands.ev2.auth2.auth2_models import ApiKey, RefreshToken, TokenType
-from openhands.ev2.auth2.auth2_tokens import AuthService, InvalidTokenError
+from openhands.ev2.auth.auth_models import ApiKey, RefreshToken, TokenType
+from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.config import get_config
 from openhands.ev2.util.auth_token import create_auth_token
 
@@ -39,8 +39,8 @@ async def _seed_user(session, user_id: uuid.UUID = _TEST_USER_ID, enabled: bool 
     await session.flush()
 
 
-def _seeded_service(session) -> AuthService:
-    return AuthService(session)
+def _seeded_service(session) -> TokenService:
+    return TokenService(session)
 
 
 # --------------------------------------------------------------------------- #

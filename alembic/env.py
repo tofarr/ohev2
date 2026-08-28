@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import models so Alembic autogenerate sees their metadata.
-from openhands.ev2.auth2.auth2_models import (  # noqa: F401
+from openhands.ev2.auth.auth_models import (  # noqa: F401
     ApiKey,
     IdpRefreshToken,
     OAuthClient,

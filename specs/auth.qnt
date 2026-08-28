@@ -1,6 +1,6 @@
-// Auth2 specification: federated OAuth flow state machine.
+// Auth specification: federated OAuth flow state machine.
 //
-// Models the resource states and transitions for the auth2 (federated OAuth)
+// Models the resource states and transitions for the auth (federated OAuth)
 // feature. The project acts as an OAuth provider to clients and as a client
 // to an IdP. Five states are tracked per authorization attempt:
 //
@@ -30,7 +30,7 @@
 //   - The cleanup sweep only removes rows already EXPIRED past the age window.
 //   - A disabled OAuth client cannot start a new flow.
 
-module auth2 {
+module auth {
   type FlowState = Pending | Coded | Granted | Expired | Cleaned
   type ResponseType = Code | Cookie
   type FlowId = str

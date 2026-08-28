@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.ev2.app import create_app
-from openhands.ev2.auth2.auth2_models import (  # noqa: F401
+from openhands.ev2.auth.auth_models import (  # noqa: F401
     ApiKey,
     IdpRefreshToken,
     OAuthClient,
@@ -54,7 +54,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_cors_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
     monkeypatch.setenv("OHEV_DATABASE_URL", _TEST_DB_URL)
-    # Federated OAuth (auth2) — required config fields. Tests that exercise the
+    # Federated OAuth (auth) — required config fields. Tests that exercise the
     # real IdP HTTP flow override the URL / mock httpx.
     monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
     monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
@@ -67,7 +67,7 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # Resource types governed by role policies. Mirrors the keys registered in
-# auth2_dependencies so the seeded admin role grants access to every resource.
+# auth_dependencies so the seeded admin role grants access to every resource.
 _ADMIN_RESOURCE_TYPES = (
     "user",
     "role",

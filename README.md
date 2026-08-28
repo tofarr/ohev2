@@ -27,7 +27,7 @@ consistently structured.
 | Web framework | FastAPI |
 | Database | PostgreSQL (async via asyncpg / SQLAlchemy 2 async) |
 | Agent runtime | OpenHands SDK + Agent Server |
-| Auth | Federated OAuth/OIDC (auth2) + signed cookies |
+| Auth | Federated OAuth/OIDC + signed cookies |
 | Sandbox | Pluggable: Docker, Kubernetes, E2B |
 | Tool proxy | Pluggable MCP tools / REST proxy |
 | Formal spec | Quint |
@@ -92,13 +92,12 @@ uv run alembic upgrade head
 uv run uvicorn openhands.ev2.app:app --reload
 ```
 
-## Federated authentication (auth2)
+## Federated authentication
 
-The `auth2` module is the sole authentication layer — a federated OAuth/OIDC
+The `auth` module is the sole authentication layer — a federated OAuth/OIDC
 flow in which the project acts as an OAuth **provider** to first-party clients
-and as an OAuth **client** to an external identity provider (IdP). (The legacy
-password/cookie `auth` package and its ABAC `permission` sibling have been
-removed; API-key and refresh-token credentials now live in `auth2`.)
+and as an OAuth **client** to an external identity provider (IdP). API-key and
+refresh-token credentials live in the same `auth` package.
 
 Required configuration (environment variables, `OHEV` prefix):
 
@@ -114,11 +113,11 @@ Optional OIDC claim overrides: `idp.user_id_field`, `idp.email_field`,
 role claim). Role→permission mapping is deferred; roles are not pulled from
 scopes.
 
-Flow: `GET /auth2/authorize` redirects to the IdP (with PKCE), `GET
-/auth2/callback` exchanges the code and, for `response_type=cookie`, mints a
+Flow: `GET /auth/authorize` redirects to the IdP (with PKCE), `GET
+/auth/callback` exchanges the code and, for `response_type=cookie`, mints a
 session cookie (the `code` response type mints an exchangeable code instead),
-`POST /auth2/token` and `POST /auth2/refresh` exchange codes / refresh tokens
-for token pairs. OAuth clients are managed via `/auth2/clients` (CRUD with
+`POST /auth/token` and `POST /auth/refresh` exchange codes / refresh tokens
+for token pairs. OAuth clients are managed via `/auth/clients` (CRUD with
 wildcard redirect-URI matching). The IdP `id_token` (or the decoded
 refresh-token JWT) supplies the `sub`/email used for JIT user provisioning
 (`users.idp_user_id`).
