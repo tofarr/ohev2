@@ -120,6 +120,100 @@ def _expected_callback() -> str:
     return f"{get_config().base_url.rstrip('/')}/auth/callback"
 
 
+class TestDevLogin:
+    """POST /auth/dev/login — username/password login that sets a session cookie."""
+
+    async def test_login_sets_session_cookie(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/login",
+            json={"username": _DEV_USER_USERNAME, "password": _DEV_USER_PASSWORD},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["username"] == _DEV_USER_USERNAME
+        assert body["user_id"] == "11111111-1111-1111-1111-111111111111"
+        cookie_name = get_config().auth_cookie_name
+        assert cookie_name in resp.cookies
+        assert resp.cookies[cookie_name]
+
+    async def test_login_cookie_authenticates_subsequent_request(
+        self, dev_client: AsyncClient
+    ) -> None:
+        # /auth/clients requires a logged-in principal. Anonymous (no cookie)
+        # is rejected as 403 by depends_permissions (no roles => deny). A valid
+        # session cookie is accepted by depends_access_token (no 401) and also
+        # 403s on the permission guard — but a *present-but-invalid* cookie is
+        # 401. So we assert the authenticated request is not 401, proving the
+        # cookie was recognized as a valid credential.
+        anon = await dev_client.get("/auth/clients")
+        assert anon.status_code == 403
+        resp = await dev_client.post(
+            "/auth/dev/login",
+            json={"username": _DEV_USER_USERNAME, "password": _DEV_USER_PASSWORD},
+        )
+        assert resp.status_code == 200, resp.text
+        authed = await dev_client.get("/auth/clients")
+        assert authed.status_code != 401
+        # A garbage cookie in the same name must produce 401 (sanity check that
+        # the != 401 above is meaningful, not a route that never 401s).
+        dev_client.cookies[get_config().auth_cookie_name] = "not-a-real-cookie"
+        bad = await dev_client.get("/auth/clients")
+        assert bad.status_code == 401
+
+    async def test_login_rejects_bad_password(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/login",
+            json={"username": _DEV_USER_USERNAME, "password": "wrong"},
+        )
+        assert resp.status_code == 401
+        cookie_name = get_config().auth_cookie_name
+        assert cookie_name not in resp.cookies
+
+    async def test_login_rejects_unknown_user(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/login",
+            json={"username": "nope", "password": _DEV_USER_PASSWORD},
+        )
+        assert resp.status_code == 401
+
+    async def test_login_rejects_missing_fields(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post("/auth/dev/login", json={"username": _DEV_USER_USERNAME})
+        assert resp.status_code == 422
+
+    async def test_login_cookie_is_federated_shape(
+        self, dev_client: AsyncClient, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        _set_dev_config(monkeypatch)
+        resp = await dev_client.post(
+            "/auth/dev/login",
+            json={"username": _DEV_USER_USERNAME, "password": _DEV_USER_PASSWORD},
+        )
+        assert resp.status_code == 200, resp.text
+        enc = get_encryption_service()
+        cookie = resp.cookies[get_config().auth_cookie_name]
+        payload = enc.decrypt_jwe_token(cookie)
+        # Same claims as the callback's cookie: sub, ttyp=cookie, aid, axp.
+        assert payload["sub"] == "11111111-1111-1111-1111-111111111111"
+        assert payload["ttyp"] == "cookie"
+        assert "aid" in payload
+        assert "axp" in payload
+        # A persisted IdP access-token row must back the cookie.
+        from sqlalchemy import select
+
+        from openhands.ev2.auth.auth_models import IdpAccessToken, IdpRefreshToken
+        from openhands.ev2.db import Base  # noqa: F401
+
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        async with factory() as s:
+            refresh = (await s.execute(select(IdpRefreshToken))).scalars().all()
+            access = (await s.execute(select(IdpAccessToken))).scalars().all()
+            assert len(refresh) == 1
+            assert len(access) == 1
+            assert str(access[0].id) == payload["aid"]
+
+
 class TestDevAuthorize:
     async def test_authorize_returns_401_without_credentials(self, dev_client: AsyncClient) -> None:
         resp = await dev_client.get(
