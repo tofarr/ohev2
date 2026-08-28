@@ -47,9 +47,8 @@ class Action(enum.StrEnum):
 
     CRUD verbs cover the standard REST operations; ``SEARCH`` covers collection
     retrieval, and ``USE`` covers non-CRUD resource-scoped actions (e.g. using
-    an access token). Unlike the legacy :class:`openhands.ev2.permission.Action`
-    there is no ``ALL`` wildcard — a policy decides for itself which actions it
-    covers, so a wildcard action is redundant.
+    an access token). There is no ``ALL`` wildcard — a policy decides for
+    itself which actions it covers, so a wildcard action is redundant.
     """
 
     CREATE = "create"

@@ -4,9 +4,9 @@
 // collection must uphold:
 //   - user ids are unique
 //   - emails are unique (case-insensitive)
-//   - a deleted user's permissions are cascade-removed (modeled by clearing)
+//   - a deleted user's role assignments are cascade-removed (modeled by clearing)
 //
-// Companion to permission.qnt which references users as principals.
+// Companion to auth2.qnt, which federates authentication and token lifetimes.
 
 module user {
   type User = {

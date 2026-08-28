@@ -17,8 +17,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.ev2.app import create_app
-from openhands.ev2.auth.auth_models import ApiKey  # noqa: F401
 from openhands.ev2.auth2.auth2_models import (  # noqa: F401
+    ApiKey,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
@@ -26,7 +26,6 @@ from openhands.ev2.auth2.auth2_models import (  # noqa: F401
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
-from openhands.ev2.permission.permission_models import Permission  # noqa: F401
 from openhands.ev2.security.security_models import Permitted, Role, RoleUser
 from openhands.ev2.user.user_models import User  # noqa: F401
 
@@ -50,22 +49,11 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point AppConfig at the test database and reset cached engine/factory."""
     get_config.cache_clear()
     reset_engine_factory()
-    from openhands.ev2.permission.permission_service import reset_base_permissions_cache
-
-    reset_base_permissions_cache()
     from openhands.ev2.cors.cors_service import reset_cors_cache
 
     reset_cors_cache()
     monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
     monkeypatch.setenv("OHEV_DATABASE_URL", _TEST_DB_URL)
-    # Baseline grants that allow all CRUD-L on user and permission resources so
-    # existing service/route tests pass without per-user DB permissions. Tests
-    # that verify denial override this env var locally.
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "all:user")
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_1", "all:permission")
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_2", "all:api_key")
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_3", "all:oauth_client")
-    monkeypatch.setenv("OHEV_BASE_PERMISSIONS_4", "all:cors_origin")
     # Federated OAuth (auth2) — required config fields. Tests that exercise the
     # real IdP HTTP flow override the URL / mock httpx.
     monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
@@ -83,7 +71,6 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
 _ADMIN_RESOURCE_TYPES = (
     "user",
     "role",
-    "permission",
     "api_key",
     "oauth_client",
     "cors_origin",
@@ -94,8 +81,8 @@ async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> No
     """Assign the test principal an admin role that permits all actions.
 
     The role's ``policies`` map grants :class:`Permitted` (unrestricted access)
-    for every shipped resource type, mirroring the legacy ``base_permissions``
-    baseline so route tests pass under the role-based authorization dependency.
+    for every shipped resource type, providing the baseline access route tests
+    need under the role-based authorization dependency.
     Idempotent: re-running on an already-seeded role is a no-op.
     """
     from sqlalchemy import select

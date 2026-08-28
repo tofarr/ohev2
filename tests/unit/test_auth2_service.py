@@ -17,12 +17,12 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
     IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
+    TokenType,
 )
 from openhands.ev2.auth2.auth2_service import (
     Auth2Error,

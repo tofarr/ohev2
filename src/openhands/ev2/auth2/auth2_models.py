@@ -29,9 +29,11 @@ stable IdP subject used to look up the local user on callback.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,6 +42,126 @@ from openhands.ev2.db import Base
 # All auth2 timestamps are timezone-aware (TIMESTAMPTZ) so comparisons against
 # datetime.now(UTC) never mix naive and aware values.
 _TZ = DateTime(timezone=True)
+
+
+class TokenType(enum.StrEnum):
+    """The kind of credential a token represents.
+
+    COOKIE and ACCESS_TOKEN are short-lived JWE tokens validated against the
+    user row only. API_KEY and REFRESH_TOKEN are additionally validated
+    against their DB rows.
+    """
+
+    COOKIE = "cookie"
+    API_KEY = "api_key"
+    ACCESS_TOKEN = "access_token"
+    REFRESH_TOKEN = "refresh_token"
+    # auth2 (federated OAuth) refresh token. Exchange-only: never accepted as a
+    # bearer credential by AuthService.authenticate. Handled by the auth2
+    # refresh endpoint, which validates it against the idp_refresh_tokens row.
+    IDP_REFRESH_TOKEN = "idp_refresh_token"
+
+
+class AuthToken(BaseModel):
+    """The decrypted view of a credential, normalized across all flows.
+
+    ``enabled`` is resolved by :class:`AuthService` from the user row (and the
+    token's DB row for API_KEY/REFRESH_TOKEN).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+    enabled: bool
+    expires_at: datetime
+    token_type: TokenType
+
+
+class ApiKey(Base):
+    """A revocable backing row for an API-key credential.
+
+    The row shares its ``jti`` with the API-key JWE token minted for it; a
+    token whose jti has no live row is rejected even if the JWE itself is
+    decryptable and unexpired.
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    jti: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    name: Mapped[str | None] = mapped_column(default=None, nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
+    expires_at: Mapped[datetime | None] = mapped_column(
+        _TZ,
+        default=None,
+        nullable=True,
+        comment="Null means the API key never expires on its own.",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class RefreshToken(Base):
+    """A backing row for a refresh-token credential.
+
+    Rotation invalidates the row (``enabled = False``) and mints a successor
+    token with a fresh ``jti``. ``expires_at`` is the absolute cap of the
+    sliding window: each rotation extends a *new* row's expiry to
+    ``min(now + sliding_window, first_issued_at + absolute_ttl)``.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    jti: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        comment="Absolute cap of the sliding refresh window.",
+    )
+    replaced_by: Mapped[uuid.UUID | None] = mapped_column(
+        default=None,
+        nullable=True,
+    )
+    enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class IdpRefreshToken(Base):

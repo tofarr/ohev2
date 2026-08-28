@@ -20,8 +20,6 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from openhands.ev2.auth.auth_models import AuthToken, TokenType
-from openhands.ev2.auth.auth_service import AuthService
 from openhands.ev2.auth2.auth2_dependencies import (
     _ACCESS_TOKEN_KEY,
     _ROLES_CACHE_THRESHOLD,
@@ -32,6 +30,8 @@ from openhands.ev2.auth2.auth2_dependencies import (
     depends_user_id,
     register_resource_policy,
 )
+from openhands.ev2.auth2.auth2_models import ApiKey, AuthToken, TokenType
+from openhands.ev2.auth2.auth2_tokens import AuthService
 from openhands.ev2.security.security_models import (
     Action,
     Denied,
@@ -467,8 +467,6 @@ async def test_depends_permissions_uses_policies_map(session, user_id):
 
 async def test_depends_permissions_policies_map_for_arbitrary_resource(session, user_id):
     """A policies entry for a non-legacy resource type (e.g. api_key) authorizes."""
-    from openhands.ev2.auth.auth_models import ApiKey
-
     await _seed_user(session, user_id, "apikey-admin-user")
     await _assign_role(
         session,

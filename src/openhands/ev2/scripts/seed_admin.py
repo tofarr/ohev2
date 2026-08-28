@@ -40,7 +40,6 @@ from openhands.ev2.util.password import hash_password
 _ADMIN_RESOURCE_TYPES = (
     "user",
     "role",
-    "permission",
     "api_key",
     "oauth_client",
     "cors_origin",

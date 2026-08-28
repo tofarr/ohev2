@@ -6,7 +6,7 @@ service, and serialize — no business logic here. Every endpoint is guarded by
 the centralized permission checker (AGENTS.md §9); the returned
 :class:`SearchFilter` is passed into the service constructor so search/update/
 delete SQL and create payloads are scoped to the principal. Login/logout and
-OAuth2 token endpoints live in the auth package (`openhands.ev2.auth.auth_router`).
+OAuth2 token endpoints live in the auth2 package (`openhands.ev2.auth2.auth2_router`).
 """
 
 from __future__ import annotations
