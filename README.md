@@ -110,7 +110,7 @@ To start a local PostgreSQL instance for development, run (with the same
 values you set in your `.env` / environment):
 
 ```bash
-docker run --name runtime-api-postgres \
+docker run --name ohe-postgres \
     -e POSTGRES_PASSWORD=$OHE_DB_CONFIG_PASSWORD \
     -e POSTGRES_USER=$OHE_DB_CONFIG_USERNAME \
     -e POSTGRES_DB=$OHE_DB_CONFIG_DB_NAME \
