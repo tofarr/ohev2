@@ -256,7 +256,7 @@ class TestPermissionEnforcement:
         principal = await _make_principal(
             session, email="permitted@example.com", username="permitted"
         )
-        await _assign_role(session, principal.id, {"user": Permitted()})
+        await _assign_role(session, principal.id, {"user_permission": Permitted()})
         await session.commit()
 
         token = create_auth_token(principal.id)
@@ -270,7 +270,7 @@ class TestPermissionEnforcement:
         principal = await _make_principal(
             session, email="readonly@example.com", username="readonly"
         )
-        await _assign_role(session, principal.id, {"user": ReadOnly()})
+        await _assign_role(session, principal.id, {"user_permission": ReadOnly()})
         await session.commit()
 
         token = create_auth_token(principal.id)
