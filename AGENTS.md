@@ -41,7 +41,8 @@ locally and ensure they are green *before* opening (or updating) a pull request:
    ```
    uv run playwright install --with-deps chromium
    docker compose up -d
-   OHEV_DATABASE_URL=postgresql+asyncpg://ohev:ohev@localhost:5432/ohev uv run alembic upgrade head
+   OHE_DB_CONFIG_HOST=localhost OHE_DB_CONFIG_PORT=5432 OHE_DB_CONFIG_DB_NAME=ohev \
+   OHE_DB_CONFIG_USERNAME=ohev OHE_DB_CONFIG_PASSWORD=ohev uv run alembic upgrade head
    uv run pytest tests/e2e -q --no-cov
    docker compose down
    ```

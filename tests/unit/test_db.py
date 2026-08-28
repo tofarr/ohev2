@@ -17,6 +17,19 @@ from openhands.ev2.db import (
 )
 
 
+def _set_db_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the structured DbConfig at the test postgres for caching tests."""
+    monkeypatch.setenv("OHE_DB_CONFIG_HOST", "localhost")
+    monkeypatch.setenv("OHE_DB_CONFIG_PORT", "5432")
+    monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", "ohev")
+    monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
+    monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+    monkeypatch.setenv("OHE_IDP_CLIENT_ID", "test-client")
+    monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "test-secret")
+
+
 class TestBase:
     def test_base_is_declarative(self) -> None:
         from sqlalchemy.orm import DeclarativeBase
@@ -40,11 +53,7 @@ class TestFactoryFunctions:
     def test_get_engine_caches(self, monkeypatch) -> None:
         reset_engine_factory()
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+        _set_db_env(monkeypatch)
         eng1 = get_engine()
         eng2 = get_engine()
         assert eng1 is eng2
@@ -54,11 +63,7 @@ class TestFactoryFunctions:
     def test_get_session_factory_caches(self, monkeypatch) -> None:
         reset_engine_factory()
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+        _set_db_env(monkeypatch)
         f1 = get_session_factory()
         f2 = get_session_factory()
         assert f1 is f2
@@ -68,11 +73,7 @@ class TestFactoryFunctions:
     def test_reset_engine_factory_clears_cache(self, monkeypatch) -> None:
         reset_engine_factory()
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+        _set_db_env(monkeypatch)
         eng1 = get_engine()
         reset_engine_factory()
         eng2 = get_engine()
@@ -85,11 +86,7 @@ class TestGetSessionDependency:
     async def test_get_session_yields_session(self, monkeypatch) -> None:
         reset_engine_factory()
         get_config.cache_clear()
-        monkeypatch.setenv("OHEV_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-        monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-        monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-        monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+        _set_db_env(monkeypatch)
         gen = get_session()
         session = await gen.__anext__()
         assert isinstance(session, AsyncSession)

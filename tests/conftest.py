@@ -31,11 +31,11 @@ from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
 # to the default localhost DSN used by docker-compose.
-_PGSOCK = os.environ.get("OHEV_PGSOCK", "")
+_PGSOCK = os.environ.get("OHE_PGSOCK", "")
 _TEST_DB_URL = (
     f"postgresql+asyncpg://ohev@/ohev?host={_PGSOCK}"
     if _PGSOCK
-    else os.environ.get("OHEV_DATABASE_URL", "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev")
+    else "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev"
 )
 
 # Default test principal — authenticated via a JWE cookie token minted in the
@@ -52,18 +52,23 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     from openhands.ev2.cors.cors_service import reset_cors_cache
 
     reset_cors_cache()
-    monkeypatch.setenv("OHEV_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-    monkeypatch.setenv("OHEV_DATABASE_URL", _TEST_DB_URL)
+    monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
+    # Point the structured DbConfig at the test database (TCP localhost).
+    monkeypatch.setenv("OHE_DB_CONFIG_HOST", "localhost")
+    monkeypatch.setenv("OHE_DB_CONFIG_PORT", "5432")
+    monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", "ohev")
     # Federated OAuth (auth) — required config fields. Tests that exercise the
     # real IdP HTTP flow override the URL / mock httpx.
-    monkeypatch.setenv("OHEV_IDP_URL", "https://idp.example.com")
-    monkeypatch.setenv("OHEV_IDP_CLIENT_ID", "test-client")
-    monkeypatch.setenv("OHEV_IDP_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
+    monkeypatch.setenv("OHE_IDP_CLIENT_ID", "test-client")
+    monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "test-secret")
     # Public base URL of the service; the callback URL handed to the IdP is
     # derived from this (config-driven, not request.base_url).
-    monkeypatch.setenv("OHEV_BASE_URL", "http://test")
+    monkeypatch.setenv("OHE_BASE_URL", "http://test")
     # Keep the background cleanup loop out of the test process.
-    monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "0")
+    monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
 
 
 # Resource types governed by role policies. Mirrors the keys registered in
