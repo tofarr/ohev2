@@ -182,14 +182,15 @@ class TestCascadeViaRoutes:
 class TestPermissionEnforcement:
     """Tests for the permission check on protected endpoints."""
 
-    async def test_missing_auth_token_anonymous_allowed(self, app) -> None:
-        # No auth token → anonymous; baseline permissions grant access (200).
+    async def test_missing_auth_token_anonymous_denied(self, app) -> None:
+        # No auth token -> anonymous; role-based authorization requires an
+        # authenticated principal with a role, so protected endpoints return 403.
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get("/users")
-        assert resp.status_code == 200
+        assert resp.status_code == 403
 
     async def test_invalid_auth_token_returns_401(self, client: AsyncClient) -> None:
         resp = await client.get("/users", headers={"X-API-Key": "not-a-valid-token"})

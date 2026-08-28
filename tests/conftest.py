@@ -27,7 +27,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.permission.permission_models import Permission  # noqa: F401
-from openhands.ev2.security.security_models import Role, RoleUser  # noqa: F401
+from openhands.ev2.security.security_models import Permitted, Role, RoleUser
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
@@ -76,6 +76,47 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHEV_BASE_URL", "http://test")
     # Keep the background cleanup loop out of the test process.
     monkeypatch.setenv("OHEV_CLEANUP_INTERVAL", "0")
+
+
+# Resource types governed by role policies. Mirrors the keys registered in
+# auth2_dependencies so the seeded admin role grants access to every resource.
+_ADMIN_RESOURCE_TYPES = (
+    "user",
+    "role",
+    "permission",
+    "api_key",
+    "oauth_client",
+    "cors_origin",
+)
+
+
+async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """Assign the test principal an admin role that permits all actions.
+
+    The role's ``policies`` map grants :class:`Permitted` (unrestricted access)
+    for every shipped resource type, mirroring the legacy ``base_permissions``
+    baseline so route tests pass under the role-based authorization dependency.
+    Idempotent: re-running on an already-seeded role is a no-op.
+    """
+    from sqlalchemy import select
+
+    role = (
+        await session.execute(select(Role).where(Role.name == "test-admin"))
+    ).scalar_one_or_none()
+    if role is None:
+        role = Role(
+            name="test-admin",
+            policies={rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES},
+        )
+        session.add(role)
+        await session.flush()
+    existing = (
+        await session.execute(
+            select(RoleUser).where(RoleUser.role_id == role.id, RoleUser.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(RoleUser(role_id=role.id, user_id=user_id))
 
 
 @pytest_asyncio.fixture
@@ -134,6 +175,7 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
             ),
             {"id": _TEST_USER_ID, "email": "test@example.com", "username": _TEST_USERNAME},
         )
+        await _seed_test_admin_role(s, _TEST_USER_ID)
         await s.commit()
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:

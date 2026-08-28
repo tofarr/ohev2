@@ -8,14 +8,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-from openhands.ev2.scripts.seed_admin import seed_admin
+from openhands.ev2.scripts.seed_admin import _ADMIN_RESOURCE_TYPES, seed_admin
+from openhands.ev2.security.security_models import Permitted, Role, RoleUser
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
 
 
 class TestSeedAdmin:
-    async def test_seeds_user_and_permissions(self, session: AsyncSession) -> None:
+    async def test_seeds_user_and_admin_role(self, session: AsyncSession) -> None:
         user = await seed_admin(
             session,
             username="root",
@@ -32,12 +32,11 @@ class TestSeedAdmin:
         assert user.password != "s3cret!"
         assert verify_password("s3cret!", user.password)
 
-        grants = await _admin_grants(session, user.id)
-        assert {g.resource_type for g in grants} == set(ResourceType)
-        for grant in grants:
-            assert grant.action is Action.ALL
-            assert grant.attributes is None
-            assert grant.search_filter is None
+        role = await _admin_role(session, user.id)
+        assert role.name == "admin"
+        assert set(role.policies.keys()) == set(_ADMIN_RESOURCE_TYPES)
+        for policy in role.policies.values():
+            assert isinstance(policy, Permitted)
 
     async def test_rerun_is_idempotent(self, session: AsyncSession) -> None:
         await seed_admin(
@@ -62,27 +61,24 @@ class TestSeedAdmin:
         users = await session.scalars(select(User).where(User.username == "root"))
         assert len(users.all()) == 1
 
-        grants = await _admin_grants(session, user.id)
-        assert len(grants) == len(set(ResourceType))
+        # Exactly one admin role, assigned once.
+        roles = await session.scalars(select(Role).where(Role.name == "admin"))
+        assert len(roles.all()) == 1
+        memberships = await session.scalars(select(RoleUser).where(RoleUser.user_id == user.id))
+        assert len(memberships.all()) == 1
 
     async def test_backfills_new_resource_types(self, session: AsyncSession) -> None:
-        """A pre-existing partial grant set is completed on re-seed."""
+        """A missing policies entry is restored on re-seed."""
         user = await seed_admin(
             session,
             username="root",
             email="root@example.com",
             password="pw",
         )
-        # Simulate a new resource type added after the first seed by deleting one
-        # grant; re-running should recreate exactly it.
-        grant = await session.scalar(
-            select(Permission).where(
-                Permission.user_id == user.id,
-                Permission.resource_type == ResourceType.USER,
-            )
-        )
-        assert grant is not None
-        await session.delete(grant)
+        role = await _admin_role(session, user.id)
+        # Simulate a new resource type added after the first seed by dropping one
+        # policies entry; re-running should restore it.
+        role.policies = {k: v for k, v in role.policies.items() if k != "user"}
         await session.commit()
 
         await seed_admin(
@@ -92,8 +88,8 @@ class TestSeedAdmin:
             password="pw",
         )
 
-        grants = await _admin_grants(session, user.id)
-        assert {g.resource_type for g in grants} == set(ResourceType)
+        role = await _admin_role(session, user.id)
+        assert set(role.policies.keys()) == set(_ADMIN_RESOURCE_TYPES)
 
     async def test_invalid_email_raises(self, session: AsyncSession) -> None:
         with pytest.raises(ValueError, match="invalid email"):
@@ -123,13 +119,11 @@ class TestSeedAdmin:
             )
 
 
-async def _admin_grants(
-    session: AsyncSession,
-    user_id: uuid.UUID,
-) -> list[Permission]:
-    stmt = select(Permission).where(
-        Permission.user_id == user_id,
-        Permission.action == Action.ALL,
+async def _admin_role(session: AsyncSession, user_id: uuid.UUID) -> Role:
+    """The admin role assigned to *user_id*."""
+    stmt = (
+        select(Role).join(RoleUser, RoleUser.role_id == Role.id).where(RoleUser.user_id == user_id)
     )
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    role = await session.scalar(stmt)
+    assert role is not None, "admin role not assigned to user"
+    return role

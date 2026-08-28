@@ -23,7 +23,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 
-from openhands.ev2.auth.auth_dependencies import CurrentUserId
+from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_schemas import (
     ApiKeyCreate,
     ApiKeyCreateResponse,
@@ -38,10 +38,10 @@ from openhands.ev2.auth.auth_schemas import (
     RefreshRequest,
 )
 from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
+from openhands.ev2.auth2.auth2_dependencies import UserId, depends_permissions
 from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
-from openhands.ev2.permission.permission_dependencies import require_permission
-from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_service import UserService
 from openhands.ev2.util.search_filter import SearchFilter
 
@@ -196,19 +196,14 @@ async def refresh(
 )
 async def search_api_keys(
     session: SessionDep,
-    user_id: CurrentUserId,
-    perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.SEARCH, ResourceType.API_KEY)),
-    ],
+    user_id: UserId,
+    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(ApiKey, Action.SEARCH))],
     search_filter: ApiKeySearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> ApiKeySearchResult:
     """List API keys, scoped to the principal's permission filter and
     additionally to the current user (a key's owner may always see their own)."""
-    from openhands.ev2.auth.auth_models import ApiKey
-
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     stmt = perm_filter.filter_sql(select(ApiKey).order_by(ApiKey.id))
     if search_filter is not None:
@@ -236,7 +231,7 @@ async def search_api_keys(
 async def create_api_key(
     payload: ApiKeyCreate,
     session: SessionDep,
-    user_id: CurrentUserId,
+    user_id: UserId,
 ) -> ApiKeyCreateResponse:
     """Mint an API key for the current user.
 
@@ -262,15 +257,10 @@ async def create_api_key(
 async def get_api_key(
     api_key_id: uuid.UUID,
     session: SessionDep,
-    user_id: CurrentUserId,
-    perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.READ, ResourceType.API_KEY)),
-    ],
+    user_id: UserId,
+    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(ApiKey, Action.READ))],
 ) -> ApiKeyRead:
     """Retrieve an API key by id, scoped to the principal."""
-    from openhands.ev2.auth.auth_models import ApiKey
-
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)
     row = result.scalar_one_or_none()
@@ -290,15 +280,10 @@ async def update_api_key(
     api_key_id: uuid.UUID,
     payload: ApiKeyUpdate,
     session: SessionDep,
-    user_id: CurrentUserId,
-    perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.UPDATE, ResourceType.API_KEY)),
-    ],
+    user_id: UserId,
+    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(ApiKey, Action.UPDATE))],
 ) -> ApiKeyRead:
     """Partially update an API key (enable/disable, rename, re-expire)."""
-    from openhands.ev2.auth.auth_models import ApiKey
-
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)
     row = result.scalar_one_or_none()
@@ -326,15 +311,10 @@ async def update_api_key(
 async def delete_api_key(
     api_key_id: uuid.UUID,
     session: SessionDep,
-    user_id: CurrentUserId,
-    perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.DELETE, ResourceType.API_KEY)),
-    ],
+    user_id: UserId,
+    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(ApiKey, Action.DELETE))],
 ) -> None:
     """Delete (revoke) an API key by id, scoped to the principal."""
-    from openhands.ev2.auth.auth_models import ApiKey
-
     stmt = perm_filter.filter_sql(select(ApiKey).where(ApiKey.id == api_key_id))
     result = await session.execute(stmt)
     row = result.scalar_one_or_none()
