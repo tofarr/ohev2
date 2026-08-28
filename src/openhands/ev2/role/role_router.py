@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions
 from openhands.ev2.db import SessionDep
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.role.role_schemas import (
     RoleCreate,
     RoleRead,
@@ -30,7 +31,7 @@ from openhands.ev2.role.role_service import (
     RolePermissionScopeError,
     RoleService,
 )
-from openhands.ev2.security.security_models import Action, Role
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 

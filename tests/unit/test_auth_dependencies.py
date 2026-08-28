@@ -32,13 +32,12 @@ from openhands.ev2.auth.auth_dependencies import (
 )
 from openhands.ev2.auth.auth_models import ApiKey, AuthToken, TokenType
 from openhands.ev2.auth.auth_tokens import TokenService
+from openhands.ev2.role.role_models import Role, UserRole
 from openhands.ev2.security.security_models import (
     Action,
     Denied,
     Permitted,
     ReadOnly,
-    Role,
-    RoleUser,
 )
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.auth_token import create_auth_token
@@ -95,19 +94,12 @@ async def _assign_role(
     *,
     user_id: uuid.UUID,
     name: str,
-    policies: dict[str, Any] | None = None,
-    user_permission: Any | None = None,
-    role_permission: Any | None = None,
+    **permissions: Any,
 ) -> Role:
-    role = Role(
-        name=name,
-        policies=policies,
-        user_permission=user_permission,
-        role_permission=role_permission,
-    )
+    role = Role(name=name, **permissions)
     session.add(role)
     await session.flush()
-    session.add(RoleUser(role_id=role.id, user_id=user_id))
+    session.add(UserRole(role_id=role.id, user_id=user_id))
     await session.flush()
     return role
 
@@ -215,7 +207,7 @@ async def test_depends_roles_anonymous_yields_nothing(session, user_id):
 
 
 async def test_depends_roles_yields_assigned_roles(session, user_id):
-    """Roles assigned via role_users are yielded in order."""
+    """Roles assigned via user_roles are yielded in order."""
     await _seed_user(session, user_id, "roles-user")
     await _assign_role(session, user_id=user_id, name="admin", user_permission=Permitted())
     await _assign_role(session, user_id=user_id, name="viewer", user_permission=ReadOnly())
@@ -371,20 +363,18 @@ async def test_depends_permissions_unregistered_resource_denies(session, user_id
 
 
 async def test_register_resource_policy_adds_mapping(session, user_id):
-    """register_resource_policy maps a model to a resource-type name consulted
-    in the role's policies map."""
+    """register_resource_policy maps a model to a Role Permission column consulted
+    by the policy lookup."""
     await _seed_user(session, user_id, "reg-user")
 
     class Widget:
         pass
 
-    # Register a resource-type name; the role has no entry for it in its
-    # policies map, so the policy resolves to None (deny), confirming the
-    # mapping is consulted.
-    register_resource_policy(Widget, "widget")
-    await _assign_role(
-        session, user_id=user_id, name="widget-admin", policies={"user": Permitted()}
-    )
+    # Register a model against an existing Role column. The role has no grant
+    # on that column (None), so the policy resolves to deny (403), confirming
+    # the registered column is consulted.
+    register_resource_policy(Widget, "user_permission")
+    await _assign_role(session, user_id=user_id, name="widget-admin", role_permission=Permitted())
 
     request = _make_request()
     token = _auth_token(user_id)
@@ -444,16 +434,14 @@ async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session
     assert token.user_id == user_id
 
 
-async def test_depends_permissions_uses_policies_map(session, user_id):
-    """The policies map (canonical store) authorizes when present, overriding
-    the legacy column fallback."""
+async def test_depends_permissions_uses_entity_column(session, user_id):
+    """A per-entity Permission column on the role authorizes the matching resource."""
     await _seed_user(session, user_id, "policies-user")
-    # policies map grants Permitted for user; legacy column is None.
     await _assign_role(
         session,
         user_id=user_id,
         name="policies-admin",
-        policies={"user": Permitted()},
+        user_permission=Permitted(),
     )
 
     request = _make_request()
@@ -465,14 +453,14 @@ async def test_depends_permissions_uses_policies_map(session, user_id):
     assert isinstance(filt, AllSearchFilter)
 
 
-async def test_depends_permissions_policies_map_for_arbitrary_resource(session, user_id):
-    """A policies entry for a non-legacy resource type (e.g. api_key) authorizes."""
+async def test_depends_permissions_entity_column_for_arbitrary_resource(session, user_id):
+    """A per-entity column for a non-user resource (e.g. api_key) authorizes."""
     await _seed_user(session, user_id, "apikey-admin-user")
     await _assign_role(
         session,
         user_id=user_id,
         name="apikey-admin",
-        policies={"api_key": Permitted()},
+        api_key_permission=Permitted(),
     )
 
     request = _make_request()

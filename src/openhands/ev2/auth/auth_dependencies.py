@@ -39,7 +39,8 @@ from openhands.ev2.auth.auth_models import AuthToken
 from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
-from openhands.ev2.security.security_models import Action, Permission, Role, RoleUser
+from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.security.security_models import Action, Permission
 from openhands.ev2.util.search_filter import (
     ALL_SEARCH_FILTER,
     AllSearchFilter,
@@ -313,7 +314,7 @@ async def depends_roles(
     """Yield the roles assigned to the current principal.
 
     Returns an async iterator over the :class:`Role` rows assigned to the
-    principal via the ``role_users`` link table. Anonymous principals (no
+    principal via the ``user_roles`` link table. Anonymous principals (no
     token) yield no roles.
 
     When the principal has fewer than ``_ROLES_CACHE_THRESHOLD`` roles the full
@@ -367,7 +368,7 @@ async def _iter_roles(
 async def _load_roles(session: AsyncSession, user_id: uuid.UUID) -> list[Role]:
     """Materialize all roles for *user_id* in one query."""
     stmt = (
-        select(Role).join(RoleUser, RoleUser.role_id == Role.id).where(RoleUser.user_id == user_id)
+        select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id)
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -377,8 +378,8 @@ async def _stream_roles(session: AsyncSession, user_id: uuid.UUID) -> AsyncItera
     """Yield roles for *user_id* one at a time from the DB cursor."""
     stmt = (
         select(Role)
-        .join(RoleUser, RoleUser.role_id == Role.id)
-        .where(RoleUser.user_id == user_id)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.user_id == user_id)
         .execution_options(yield_per=1)
     )
     result = await session.stream(stmt)
@@ -391,37 +392,47 @@ async def _stream_roles(session: AsyncSession, user_id: uuid.UUID) -> AsyncItera
 # Permissions (policy-based search filter).
 # ---------------------------------------------------------------------- #
 
-# Maps a resource's ORM model class to the resource-type name used as the key in
-# a Role's ``policies`` JSONB map. Resources without an entry default to deny.
-# New resources register here (or call ``register_resource_policy``) so
+# Maps a resource's ORM model class to the per-entity ``Permission`` column name
+# on :class:`Role` that governs it (e.g. ``"user_permission"``,
+# ``"api_key_permission"``). Resources without an entry default to deny. New
+# resources register here (or call ``register_resource_policy``) — and add a
+# matching column to :class:`Role` (see AGENTS.md §11) — so
 # depends_permissions can find their policy without editing the function body.
 _RESOURCE_POLICY: dict[type, str] = {}
 
 
-def register_resource_policy(model: type, resource_type: str) -> None:
-    """Register the resource-type name that governs *model*.
+def register_resource_policy(model: type, column: str) -> None:
+    """Register the Role ``Permission`` column name that governs *model*.
 
-    Resources register their ORM model class against the key used in a Role's
-    ``policies`` map (e.g. ``"user"``, ``"api_key"``). This keeps the policy
-    lookup table in one place and lets new resources opt in without editing
-    ``depends_permissions``.
+    Resources register their ORM model class against the per-entity ``Permission``
+    column on :class:`Role` (e.g. ``"user_permission"``, ``"api_key_permission"``).
+    Adding a governed entity is a two-step change: add the column to
+    :class:`Role` (and ``ROLE_ENTITY_COLUMNS``) and register it here. See
+    AGENTS.md §11.
     """
-    _RESOURCE_POLICY[model] = resource_type
+    if column not in ROLE_ENTITY_COLUMNS:
+        raise ValueError(
+            f"Unknown role permission column {column!r}; "
+            f"add it to ROLE_ENTITY_COLUMNS and Role first (AGENTS.md §11)."
+        )
+    _RESOURCE_POLICY[model] = column
 
 
 # Register every shipped resource at import time so the mapping is populated
-# before any request runs. Resource-type names are lowercased resource nouns.
+# before any request runs. Column names are `<entity>_permission` on Role.
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
-from openhands.ev2.security.security_models import Role as _Role  # noqa: E402
+from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
+from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
 
-register_resource_policy(_User, "user")
-register_resource_policy(_Role, "role")
-register_resource_policy(_ApiKey, "api_key")
-register_resource_policy(_OAuthClient, "oauth_client")
-register_resource_policy(_AllowedOrigin, "cors_origin")
+register_resource_policy(_User, "user_permission")
+register_resource_policy(_Role, "role_permission")
+register_resource_policy(_UserRole, "user_role_permission")
+register_resource_policy(_ApiKey, "api_key_permission")
+register_resource_policy(_OAuthClient, "oauth_client_permission")
+register_resource_policy(_AllowedOrigin, "cors_origin_permission")
 
 
 def depends_permissions(
@@ -456,8 +467,8 @@ def depends_permissions(
         token: Annotated[AuthToken | None, Depends(depends_access_token)],
     ) -> SearchFilter[Any]:
         user_id = token.user_id if token is not None else None
-        resource_type = _policy_attr_for(model_type)
-        if resource_type is None:
+        column = _policy_attr_for(model_type)
+        if column is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -468,7 +479,7 @@ def depends_permissions(
 
         filters: list[SearchFilter[Any]] = []
         async for role in depends_roles(request, session, token):
-            policy = _role_policy_for(role, resource_type)
+            policy = _role_policy_for(role, column)
             if policy is None:
                 continue
             filters.append(policy.to_search_filter(user_id, action))
@@ -485,26 +496,18 @@ def depends_permissions(
 
 
 def _policy_attr_for(model_type: type) -> str | None:
-    """The resource-type name governing *model_type*, or ``None``."""
+    """The Role ``Permission`` column name governing *model_type*, or ``None``."""
     return _RESOURCE_POLICY.get(model_type)
 
 
-def _role_policy_for(role: Role, resource_type: str) -> Permission | None:
-    """The :class:`Permission` policy for *resource_type* on *role*.
+def _role_policy_for(role: Role, column: str) -> Permission | None:
+    """The :class:`Permission` policy for the Role attribute *column*.
 
-    Reads from the Role's ``policies`` map (the canonical store). Falls back to
-    the legacy ``role_permission`` / ``user_permission`` columns for roles
-    created before the ``policies`` column existed, so existing data continues
-    to authorize during the migration.
+    Each governed entity is an explicit ``Permission`` column on :class:`Role`;
+    a ``None`` (NULL) column means "deny" for that entity. There is no map and
+    no legacy fallback.
     """
-    policies = role.policies
-    if policies is not None and resource_type in policies:
-        return policies[resource_type]
-    if resource_type == "user":
-        return role.user_permission
-    if resource_type in ("role", "permission"):
-        return role.role_permission
-    return None
+    return getattr(role, column, None)
 
 
 def _combine(filters: list[SearchFilter[Any]]) -> SearchFilter[Any] | None:

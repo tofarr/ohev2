@@ -165,6 +165,35 @@ reject the change.
   README "Cleanup processes".
 * Authorization checks live in services (not just routers) — defense in depth.
 
+## 11. Roles & per-entity permission columns
+
+* A `Role` (`role/role_models.py`) bundles one explicit `Permission` JSONB
+  column **per governed entity** (e.g. `user_permission`, `role_permission`,
+  `user_role_permission`, `api_key_permission`, `oauth_client_permission`,
+  `cors_origin_permission`). A `NULL` column means "deny" for that entity.
+  There is **no** `policies` map and **no** legacy `role_permission`/
+  `user_permission` fallback: every governed entity is its own column.
+* The canonical list of entity columns is `ROLE_ENTITY_COLUMNS` in
+  `role/role_models.py` — each entry is the full column name
+  (``<entity>_permission``). Adding a governed entity is a three-step change:
+  1. append the ``<entity>_permission`` column name to `ROLE_ENTITY_COLUMNS`;
+  2. add the matching column to `Role` (and to the initial migration
+     `0001_initial.py`, since the schema is not yet published);
+  3. register the resource's ORM model against the column name in
+     `auth_dependencies.register_resource_policy(model, "<entity>_permission")`.
+  `register_resource_policy` validates the column is in
+  `ROLE_ENTITY_COLUMNS` and raises at import time if not, so a mismatched
+  registration fails fast.
+* `Role` and `UserRole` live in `role/role_models.py`, **not** in
+  `security_models.py`. `security_models.py` only defines the policy types
+  (`Permission` and subclasses) and the `PermissionType` JSONB column type.
+* The role-to-user link table is `user_roles` (model `UserRole`), plural
+  noun-first naming per §3. A user may have multiple roles; there is no
+  single `role` column on `User`.
+* `seed_admin.py` grants `Permitted()` on every column in
+  `ROLE_ENTITY_COLUMNS`, so re-running it after adding a new entity
+  backfills the missing grant automatically.
+
 ## 10. Review checklist (for agents reviewing PRs)
 
 - [ ] REST verbs/names consistent with §3.
@@ -175,4 +204,5 @@ reject the change.
 - [ ] e2e suite green locally (§2.1).
 - [ ] Spec updated and passing if behavior changed (§7).
 - [ ] No secrets/hardcoded credentials (§9).
+- [ ] New governed entity: column added to `Role` + `ROLE_ENTITY_COLUMNS` (full `<entity>_permission` name) + migration + registered in `auth_dependencies` (§11).
 - [ ] Comments follow §6.

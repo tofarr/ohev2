@@ -1,6 +1,6 @@
-"""Pydantic schemas for the role-user assignment feature.
+"""Pydantic schemas for the user-role assignment feature.
 
-Uniform REST surface (AGENTS.md §3): the collection is ``/role-users`` with
+Uniform REST surface (AGENTS.md §3): the collection is ``/user-roles`` with
 cursor pagination; create is ``POST``, retrieve is ``GET``, and remove is
 ``DELETE``. Assignments are immutable (no ``PATCH``) — to change an
 assignment, delete and re-create, mirroring the CORS allow-list.
@@ -13,11 +13,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.ev2.security.security_models import RoleUser
+from openhands.ev2.role.role_models import UserRole
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
-class RoleUserCreate(BaseModel):
+class UserRoleCreate(BaseModel):
     """Payload to assign a role to a user."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -26,8 +26,8 @@ class RoleUserCreate(BaseModel):
     user_id: uuid.UUID
 
 
-class RoleUserRead(BaseModel):
-    """Role-user assignment representation returned by the API."""
+class UserRoleRead(BaseModel):
+    """User-role assignment representation returned by the API."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,8 +37,8 @@ class RoleUserRead(BaseModel):
     created_at: datetime
 
 
-class RoleUserSearchFilter(BaseSearchFilter[RoleUser]):
-    """Optional filter clauses for `GET /role-users`.
+class UserRoleSearchFilter(BaseSearchFilter[UserRole]):
+    """Optional filter clauses for `GET /user-roles`.
 
     Field names follow the `<attr>__<op>` convention so the base class derives
     both the in-memory `matches` predicate and the SQL `filter_sql` clauses
@@ -61,10 +61,10 @@ class RoleUserSearchFilter(BaseSearchFilter[RoleUser]):
     )
 
 
-class RoleUserSearchResult(BaseModel):
-    """Paginated collection of role-user assignments."""
+class UserRoleSearchResult(BaseModel):
+    """Paginated collection of user-role assignments."""
 
-    items: list[RoleUserRead]
+    items: list[UserRoleRead]
     next_cursor: str | None = Field(
         default=None,
         description="Opaque cursor for the next page; null when no more results.",

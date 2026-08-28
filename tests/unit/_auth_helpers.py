@@ -7,7 +7,8 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.security.security_models import Permission, Role, RoleUser
+from openhands.ev2.role.role_models import Role, UserRole
+from openhands.ev2.security.security_models import Permission
 from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import UserCreate
 from openhands.ev2.user.user_service import UserService
@@ -30,19 +31,21 @@ async def make_principal(
 async def assign_role(
     session: AsyncSession,
     user_id: uuid.UUID,
-    policies: dict[str, Permission],
+    permissions: dict[str, Permission | None],
     *,
     role_name: str | None = None,
 ) -> Role:
-    """Create (or reuse) a role with *policies* and assign it to *user_id*.
+    """Create (or reuse) a role with *permissions* and assign it to *user_id*.
 
-    Each call creates a fresh role so per-test policy isolation is preserved.
+    *permissions* maps a Role per-entity ``Permission`` column name (e.g.
+    ``"user_permission"``) to its policy. Each call creates a fresh role so
+    per-test policy isolation is preserved.
     """
-    name = role_name or f"role-{user_id}-{len(policies)}"
-    role = Role(name=name, policies=dict(policies))
+    name = role_name or f"role-{user_id}-{len(permissions)}"
+    role = Role(name=name, **dict(permissions))
     session.add(role)
     await session.flush()
-    session.add(RoleUser(role_id=role.id, user_id=user_id))
+    session.add(UserRole(role_id=role.id, user_id=user_id))
     await session.flush()
     return role
 
@@ -50,6 +53,6 @@ async def assign_role(
 async def roles_for(session: AsyncSession, user_id: uuid.UUID) -> list[Role]:
     """Return the roles assigned to *user_id*."""
     stmt = (
-        select(Role).join(RoleUser, RoleUser.role_id == Role.id).where(RoleUser.user_id == user_id)
+        select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id)
     )
     return list((await session.execute(stmt)).scalars().all())
