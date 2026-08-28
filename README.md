@@ -118,11 +118,10 @@ docker run --name ohe-postgres \
     -d postgres
 ```
 
-Then apply migrations and start the app:
+Then apply migrations:
 
 ```bash
 uv run alembic upgrade head
-uv run uvicorn openhands.ev2.app:app --reload
 ```
 
 Seed an admin user (credentials default from `OHE_SEED_ADMIN_*` env vars, or dev
@@ -131,6 +130,12 @@ grants unrestricted access to every resource type:
 
 ```bash
 uv run python -m openhands.ev2.scripts.seed_admin
+```
+
+Start the app with:
+
+```bash
+uv run uvicorn openhands.ev2.app:app --reload
 ```
 
 ## Federated authentication
