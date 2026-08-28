@@ -32,8 +32,8 @@ class User(Base):
         default=None,
         nullable=True,
     )
-    # Stable subject from the federated identity provider (auth2). Nullable: a
-    # user created before auth2 or managed locally has no IdP link. Indexed so
+    # Stable subject from the federated identity provider (auth). Nullable: a
+    # user created before auth or managed locally has no IdP link. Indexed so
     # the callback's lookup-by-subject is O(log n).
     idp_user_id: Mapped[str | None] = mapped_column(
         String(255),

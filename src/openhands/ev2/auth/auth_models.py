@@ -1,6 +1,6 @@
-"""ORM models for the federated OAuth (auth2) feature.
+"""ORM models for the federated OAuth (auth) feature.
 
-auth2 delegates authentication to an external identity provider (OIDC/OAuth2).
+auth delegates authentication to an external identity provider (OIDC/OAuth2).
 The project acts as a federated proxy: clients authorize against the IdP, the
 callback exchanges the code for IdP tokens, and the project mints its own
 JWE access tokens and DB-backed refresh tokens for clients to use.
@@ -39,7 +39,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.ev2.db import Base
 
-# All auth2 timestamps are timezone-aware (TIMESTAMPTZ) so comparisons against
+# All auth timestamps are timezone-aware (TIMESTAMPTZ) so comparisons against
 # datetime.now(UTC) never mix naive and aware values.
 _TZ = DateTime(timezone=True)
 
@@ -56,8 +56,8 @@ class TokenType(enum.StrEnum):
     API_KEY = "api_key"
     ACCESS_TOKEN = "access_token"
     REFRESH_TOKEN = "refresh_token"
-    # auth2 (federated OAuth) refresh token. Exchange-only: never accepted as a
-    # bearer credential by AuthService.authenticate. Handled by the auth2
+    # auth (federated OAuth) refresh token. Exchange-only: never accepted as a
+    # bearer credential by TokenService.authenticate. Handled by the auth
     # refresh endpoint, which validates it against the idp_refresh_tokens row.
     IDP_REFRESH_TOKEN = "idp_refresh_token"
 
@@ -65,7 +65,7 @@ class TokenType(enum.StrEnum):
 class AuthToken(BaseModel):
     """The decrypted view of a credential, normalized across all flows.
 
-    ``enabled`` is resolved by :class:`AuthService` from the user row (and the
+    ``enabled`` is resolved by :class:`TokenService` from the user row (and the
     token's DB row for API_KEY/REFRESH_TOKEN).
     """
 
@@ -275,7 +275,7 @@ class OAuthClientRedirectUri(Base):
     """A permitted redirect URI for an OAuth client.
 
     The ``uri`` may contain wildcard segments (``*``) matched segment-wise
-    against the redirect_uri supplied at ``/auth2/authorize``.
+    against the redirect_uri supplied at ``/auth/authorize``.
     """
 
     __tablename__ = "oauth_client_redirect_uris"

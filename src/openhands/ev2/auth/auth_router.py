@@ -1,21 +1,21 @@
-"""HTTP routes for the federated OAuth (auth2) feature.
+"""HTTP routes for the federated OAuth (auth) feature.
 
 Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 
-* ``GET  /auth2/authorize`` — validate the client + redirect URI and redirect
+* ``GET  /auth/authorize`` — validate the client + redirect URI and redirect
   the browser to the IdP authorization endpoint. ``response_type`` is either
   ``code`` (standard OAuth: a code is returned after the callback) or ``cookie``
   (the callback sets a session cookie and returns no code).
-* ``GET  /auth2/callback``  — exchange the IdP code, JIT-provision the user,
+* ``GET  /auth/callback``  — exchange the IdP code, JIT-provision the user,
   persist the encrypted IdP refresh token, set a session cookie, and redirect
   to the client's redirect URI. For ``response_type=code`` the redirect carries
   our authorization code + the original state; for ``response_type=cookie`` no
   code is returned (the cookie authenticates the browser).
-* ``POST /auth2/token``     — exchange our authorization code for an access +
+* ``POST /auth/token``     — exchange our authorization code for an access +
   refresh token pair (RFC 6749 §4.1.3). Also handles the refresh grant.
-* ``POST /auth2/refresh``   — rotate the access + refresh pair via the IdP.
+* ``POST /auth/refresh``   — rotate the access + refresh pair via the IdP.
 
-OAuth client management is a REST resource at ``/auth2/clients``.
+OAuth client management is a REST resource at ``/auth/clients``.
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from openhands.ev2.auth2.auth2_dependencies import depends_permissions
-from openhands.ev2.auth2.auth2_models import OAuthClient
-from openhands.ev2.auth2.auth2_schemas import (
+from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_models import OAuthClient
+from openhands.ev2.auth.auth_schemas import (
     OAuthClientCreate,
     OAuthClientRead,
     OAuthClientSearchResult,
@@ -39,10 +39,10 @@ from openhands.ev2.auth2.auth2_schemas import (
     TokenRequest,
     TokenResponse,
 )
-from openhands.ev2.auth2.auth2_service import (
+from openhands.ev2.auth.auth_service import (
     _RESPONSE_TYPE_COOKIE,
-    Auth2Error,
-    Auth2Service,
+    AuthError,
+    AuthService,
     IdpError,
     InvalidClientError,
     InvalidGrantError,
@@ -57,7 +57,7 @@ from openhands.ev2.encryption.encryption_service import get_encryption_service
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/auth2", tags=["auth2"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _callback_url() -> str:
@@ -67,7 +67,7 @@ def _callback_url() -> str:
     behind K8s ingresses / proxies that rewrite Host or scheme.
     """
     base_url = get_config().base_url.rstrip("/")
-    return f"{base_url}/auth2/callback"
+    return f"{base_url}/auth/callback"
 
 
 def _set_session_cookie(
@@ -77,17 +77,17 @@ def _set_session_cookie(
     access_id: uuid.UUID,
     access_expires_at: datetime,
 ) -> None:
-    """Set an auth2 session cookie synced to the IdP access-token row.
+    """Set an auth session cookie synced to the IdP access-token row.
 
     The cookie is a JWE carrying ``user_id``, ``access_token_id`` and the
     access-token expiry, so ``get_current_user_id`` can detect when it is about
     to expire and trigger a server-side refresh (mirroring what a standard
-    OAuth client does at ``/auth2/refresh``). The cookie's own max-age mirrors
+    OAuth client does at ``/auth/refresh``). The cookie's own max-age mirrors
     the access-token lifetime; it is re-minted on every refresh. SameSite is
     config-driven and defaults to ``strict`` (strongest XSRF mitigation); the
     cookie flow is a same-site flow so strict does not break it.
     """
-    from openhands.ev2.auth2.auth2_service import _mint_cookie_jwe
+    from openhands.ev2.auth.auth_service import _mint_cookie_jwe
 
     cfg = get_config()
     enc = get_encryption_service()
@@ -108,7 +108,7 @@ def _set_session_cookie(
     )
 
 
-def _error_status(exc: Auth2Error) -> int:
+def _error_status(exc: AuthError) -> int:
     if isinstance(exc, InvalidClientError):
         return status.HTTP_401_UNAUTHORIZED
     if isinstance(exc, InvalidRedirectUriError):
@@ -154,14 +154,14 @@ async def authorize(
 
     * ``code``   — standard OAuth (RFC 6749 §4.1.1). After the IdP redirects
       back, the callback mints an authorization code the client exchanges at
-      ``/auth2/token``.
+      ``/auth/token``.
     * ``cookie`` — a browser-oriented variant. After the IdP redirects back,
       the callback sets a session cookie and returns **no** code; the browser
       is authenticated by the cookie alone.
 
     Any other value is rejected by the OpenAPI-declared enum (HTTP 422).
     """
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         url = await service.build_authorize_redirect(
             client_id=client_id,
@@ -173,7 +173,7 @@ async def authorize(
             callback_url=_callback_url(),
             response_type=response_type,
         )
-    except Auth2Error as exc:
+    except AuthError as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
     finally:
         await service.aclose()
@@ -193,18 +193,18 @@ async def callback(
 
     Sets a session cookie on the redirect response. For ``response_type=code``
     the redirect goes to ``redirect_uri?code=…&state=…`` so the client can
-    exchange the code at ``/auth2/token``. For ``response_type=cookie`` no code
+    exchange the code at ``/auth/token``. For ``response_type=cookie`` no code
     is returned (the redirect carries only the optional ``state``); the session
     cookie authenticates the browser.
     """
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         ctx = await service.handle_callback(
             code=code,
             state=state,
             callback_url=_callback_url(),
         )
-    except Auth2Error as exc:
+    except AuthError as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
     finally:
         await service.aclose()
@@ -222,7 +222,7 @@ async def callback(
     )
     # The session cookie is the sole credential for the ``cookie`` response
     # type (a first-party browser flow). For the ``code`` response type the
-    # client exchanges the code at ``/auth2/token``; no cookie is minted, so a
+    # client exchanges the code at ``/auth/token``; no cookie is minted, so a
     # confidential (token-based) client is never handed a browser session.
     if ctx.response_type == _RESPONSE_TYPE_COOKIE:
         _set_session_cookie(
@@ -245,7 +245,7 @@ async def token(
     ``authorization_code`` grant trades our short-lived code for an access +
     refresh token pair, and the ``refresh_token`` grant rotates that pair.
     """
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         if payload.grant_type == "authorization_code":
             if payload.code is None:
@@ -276,7 +276,7 @@ async def token(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="grant_type must be 'authorization_code' or 'refresh_token'.",
             )
-    except Auth2Error as exc:
+    except AuthError as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
     finally:
         await service.aclose()
@@ -307,14 +307,14 @@ async def refresh(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="refresh_token is required.",
         )
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         pair = await service.exchange_refresh_token(
             refresh_token=payload.refresh_token,
             client_id=payload.client_id,
             client_secret=payload.client_secret,
         )
-    except Auth2Error as exc:
+    except AuthError as exc:
         raise HTTPException(status_code=_error_status(exc), detail=str(exc)) from exc
     finally:
         await service.aclose()
@@ -327,7 +327,7 @@ async def refresh(
 # ---------------------------------------------------------------------- #
 
 
-async def _to_read(service: Auth2Service, client: OAuthClient) -> OAuthClientRead:
+async def _to_read(service: AuthService, client: OAuthClient) -> OAuthClientRead:
     return OAuthClientRead(
         id=client.id,
         client_id=client.client_id,
@@ -352,7 +352,7 @@ async def search_clients(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> OAuthClientSearchResult:
     """List OAuth clients, scoped to the principal's permission filter."""
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         cursor_uuid = uuid.UUID(cursor) if cursor is not None else None
         stmt = perm_filter.filter_sql(select(OAuthClient).order_by(OAuthClient.id))
@@ -384,7 +384,7 @@ async def create_client(
     ],
 ) -> OAuthClientRead:
     """Register an OAuth client with an encrypted secret + redirect URIs."""
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         client = await service.create_client(
             client_id=payload.client_id,
@@ -397,7 +397,7 @@ async def create_client(
         await service.aclose()
     await session.commit()
     await session.refresh(client)
-    return await _to_read(Auth2Service(session), client)
+    return await _to_read(AuthService(session), client)
 
 
 @router.get("/clients/{client_id}", response_model=OAuthClientRead)
@@ -409,7 +409,7 @@ async def get_client(
     ],
 ) -> OAuthClientRead:
     """Retrieve an OAuth client by id, scoped to the principal."""
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         client = await service.get_client(client_id)
         if client is None or not perm_filter.matches(client):
@@ -432,7 +432,7 @@ async def update_client(
     ],
 ) -> OAuthClientRead:
     """Partially update an OAuth client (rename, re-secret, re-uris, disable)."""
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         client = await service.get_client(client_id)
         if client is None or not perm_filter.matches(client):
@@ -466,7 +466,7 @@ async def delete_client(
     ],
 ) -> None:
     """Delete an OAuth client by id, scoped to the principal."""
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         client = await service.get_client(client_id)
         if client is None or not perm_filter.matches(client):

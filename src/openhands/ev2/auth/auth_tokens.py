@@ -1,6 +1,6 @@
-"""Token issuance, validation, and rotation for the auth2 feature.
+"""Token issuance, validation, and rotation for the auth feature.
 
-:meth:`AuthService.authenticate` is the single entry point that converts a
+:meth:`TokenService.authenticate` is the single entry point that converts a
 JWE-encoded token string into an :class:`AuthToken`. Per-type validity:
 
 * COOKIE / ACCESS_TOKEN — derived from the JWE claims alone; ``enabled`` is
@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth2.auth2_models import ApiKey, AuthToken, RefreshToken, TokenType
+from openhands.ev2.auth.auth_models import ApiKey, AuthToken, RefreshToken, TokenType
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
 from openhands.ev2.user.user_models import User
@@ -45,7 +45,7 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-class AuthService:
+class TokenService:
     """Issue, validate, and rotate JWE auth tokens.
 
     The service is constructed per request with the request-scoped session; it

@@ -1,4 +1,4 @@
-"""Route tests for the federated OAuth (auth2) feature (DB-backed, ASGI client)."""
+"""Route tests for the federated OAuth (auth) feature (DB-backed, ASGI client)."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _idp_token_response(sub: str, email: str, refresh: str = "idp-refresh-1") ->
 class TestOAuthClientCrud:
     async def test_create_and_get_client(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={
                 "client_id": "route-client-1",
                 "client_secret": "s3cr3t",
@@ -54,25 +54,25 @@ class TestOAuthClientCrud:
         assert "client_secret" not in body
         cid = body["id"]
 
-        got = await client.get(f"/auth2/clients/{cid}")
+        got = await client.get(f"/auth/clients/{cid}")
         assert got.status_code == 200
         assert got.json()["client_id"] == "route-client-1"
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get(f"/auth2/clients/{uuid.uuid4()}")
+        resp = await client.get(f"/auth/clients/{uuid.uuid4()}")
         assert resp.status_code == 404
 
     async def test_search_clients(self, client: AsyncClient) -> None:
         for i in range(3):
             await client.post(
-                "/auth2/clients",
+                "/auth/clients",
                 json={
                     "client_id": f"search-{i}",
                     "client_secret": "s",
                     "redirect_uris": [],
                 },
             )
-        resp = await client.get("/auth2/clients", params={"limit": 2})
+        resp = await client.get("/auth/clients", params={"limit": 2})
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["items"]) == 2
@@ -80,7 +80,7 @@ class TestOAuthClientCrud:
 
     async def test_update_client(self, client: AsyncClient) -> None:
         create = await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={
                 "client_id": "upd-1",
                 "client_secret": "s",
@@ -89,7 +89,7 @@ class TestOAuthClientCrud:
         )
         cid = create.json()["id"]
         resp = await client.patch(
-            f"/auth2/clients/{cid}",
+            f"/auth/clients/{cid}",
             json={"name": "Renamed", "enabled": False, "redirect_uris": ["https://b/cb"]},
         )
         assert resp.status_code == 200, resp.text
@@ -100,19 +100,19 @@ class TestOAuthClientCrud:
 
     async def test_delete_client(self, client: AsyncClient) -> None:
         create = await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={"client_id": "del-1", "client_secret": "s", "redirect_uris": []},
         )
         cid = create.json()["id"]
-        resp = await client.delete(f"/auth2/clients/{cid}")
+        resp = await client.delete(f"/auth/clients/{cid}")
         assert resp.status_code == 204
-        assert (await client.get(f"/auth2/clients/{cid}")).status_code == 404
+        assert (await client.get(f"/auth/clients/{cid}")).status_code == 404
 
 
 class TestAuthorizeRoute:
     async def test_authorize_redirects_to_idp(self, client: AsyncClient) -> None:
         await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={
                 "client_id": "auth-1",
                 "client_secret": "s",
@@ -120,7 +120,7 @@ class TestAuthorizeRoute:
             },
         )
         resp = await client.get(
-            "/auth2/authorize",
+            "/auth/authorize",
             params={
                 "response_type": "code",
                 "client_id": "auth-1",
@@ -138,11 +138,11 @@ class TestAuthorizeRoute:
 
     async def test_authorize_rejects_unlisted_redirect(self, client: AsyncClient) -> None:
         await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={"client_id": "auth-2", "client_secret": "s", "redirect_uris": ["https://ok/cb"]},
         )
         resp = await client.get(
-            "/auth2/authorize",
+            "/auth/authorize",
             params={
                 "response_type": "code",
                 "client_id": "auth-2",
@@ -154,7 +154,7 @@ class TestAuthorizeRoute:
 
     async def test_authorize_rejects_unknown_client(self, client: AsyncClient) -> None:
         resp = await client.get(
-            "/auth2/authorize",
+            "/auth/authorize",
             params={
                 "response_type": "code",
                 "client_id": "nope",
@@ -168,11 +168,11 @@ class TestAuthorizeRoute:
         # response_type is an OpenAPI enum (Literal["code", "cookie"]); a value
         # outside it is rejected as a validation error (422), not a 400.
         await client.post(
-            "/auth2/clients",
+            "/auth/clients",
             json={"client_id": "auth-3", "client_secret": "s", "redirect_uris": ["https://ok/cb"]},
         )
         resp = await client.get(
-            "/auth2/authorize",
+            "/auth/authorize",
             params={
                 "response_type": "token",
                 "client_id": "auth-3",
@@ -197,7 +197,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth2/clients",
+                "/auth/clients",
                 json={
                     "client_id": "flow-1",
                     "client_secret": "flow-secret",
@@ -207,7 +207,7 @@ class TestFullOAuthFlowRoute:
 
             # 1. authorize
             auth = await c.get(
-                "/auth2/authorize",
+                "/auth/authorize",
                 params={
                     "response_type": "code",
                     "client_id": "flow-1",
@@ -226,7 +226,7 @@ class TestFullOAuthFlowRoute:
                 )
             )
             cb = await c.get(
-                "/auth2/callback",
+                "/auth/callback",
                 params={"code": "idp-code", "state": idp_state},
                 follow_redirects=False,
             )
@@ -243,7 +243,7 @@ class TestFullOAuthFlowRoute:
 
             # 3. token exchange
             tok = await c.post(
-                "/auth2/token",
+                "/auth/token",
                 json={
                     "grant_type": "authorization_code",
                     "code": our_code,
@@ -271,7 +271,7 @@ class TestFullOAuthFlowRoute:
                 )
             )
             ref = await c.post(
-                "/auth2/refresh",
+                "/auth/refresh",
                 json={
                     "grant_type": "refresh_token",
                     "refresh_token": tokens["refresh_token"],
@@ -292,7 +292,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth2/clients",
+                "/auth/clients",
                 json={
                     "client_id": "flow-2",
                     "client_secret": "right",
@@ -300,7 +300,7 @@ class TestFullOAuthFlowRoute:
                 },
             )
             auth = await c.get(
-                "/auth2/authorize",
+                "/auth/authorize",
                 params={
                     "response_type": "code",
                     "client_id": "flow-2",
@@ -315,13 +315,13 @@ class TestFullOAuthFlowRoute:
                 )
             )
             cb = await c.get(
-                "/auth2/callback",
+                "/auth/callback",
                 params={"code": "idp-code", "state": idp_state},
                 follow_redirects=False,
             )
             our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
             tok = await c.post(
-                "/auth2/token",
+                "/auth/token",
                 json={
                     "grant_type": "authorization_code",
                     "code": our_code,
@@ -343,7 +343,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth2/clients",
+                "/auth/clients",
                 json={
                     "client_id": "cookie-flow",
                     "client_secret": "cookie-secret",
@@ -352,7 +352,7 @@ class TestFullOAuthFlowRoute:
             )
 
             auth = await c.get(
-                "/auth2/authorize",
+                "/auth/authorize",
                 params={
                     "response_type": "cookie",
                     "client_id": "cookie-flow",
@@ -370,7 +370,7 @@ class TestFullOAuthFlowRoute:
                 )
             )
             cb = await c.get(
-                "/auth2/callback",
+                "/auth/callback",
                 params={"code": "idp-code", "state": idp_state},
                 follow_redirects=False,
             )
@@ -387,14 +387,14 @@ class TestFullOAuthFlowRoute:
 
     async def test_token_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/auth2/token",
+            "/auth/token",
             json={"grant_type": "bogus", "client_id": "x", "client_secret": "y"},
         )
         assert resp.status_code == 400
 
     async def test_refresh_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/auth2/refresh",
+            "/auth/refresh",
             json={"grant_type": "bogus", "client_id": "x", "client_secret": "y"},
         )
         assert resp.status_code == 400

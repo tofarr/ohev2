@@ -31,12 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
-from openhands.ev2.security.security_models import Permission2, Permitted, Role, RoleUser
+from openhands.ev2.security.security_models import Permission, Permitted, Role, RoleUser
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
 
 # Resource types governed by role policies. Mirrors the keys registered in
-# auth2_dependencies so the seeded admin role grants access to every resource.
+# auth_dependencies so the seeded admin role grants access to every resource.
 _ADMIN_RESOURCE_TYPES = (
     "user",
     "role",
@@ -127,7 +127,7 @@ async def _backfill_admin_permissions(
     re-running backfills the missing entry.
     """
     role = await session.scalar(select(Role).where(Role.name == _ADMIN_ROLE_NAME))
-    desired: dict[str, Permission2] = {rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES}
+    desired: dict[str, Permission] = {rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES}
     if role is None:
         role = Role(name=_ADMIN_ROLE_NAME, policies=desired)
         session.add(role)

@@ -1,4 +1,4 @@
-"""Tests for the auth2 dependencies (federated auth + role-based authorization).
+"""Tests for the auth dependencies (federated auth + role-based authorization).
 
 These tests exercise the dependency functions directly with a real DB session
 and request state, verifying:
@@ -20,7 +20,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from openhands.ev2.auth2.auth2_dependencies import (
+from openhands.ev2.auth.auth_dependencies import (
     _ACCESS_TOKEN_KEY,
     _ROLES_CACHE_THRESHOLD,
     _ROLES_KEY,
@@ -30,8 +30,8 @@ from openhands.ev2.auth2.auth2_dependencies import (
     depends_user_id,
     register_resource_policy,
 )
-from openhands.ev2.auth2.auth2_models import ApiKey, AuthToken, TokenType
-from openhands.ev2.auth2.auth2_tokens import AuthService
+from openhands.ev2.auth.auth_models import ApiKey, AuthToken, TokenType
+from openhands.ev2.auth.auth_tokens import TokenService
 from openhands.ev2.security.security_models import (
     Action,
     Denied,
@@ -133,7 +133,7 @@ async def test_depends_access_token_anonymous_caches_sentinel(session, user_id):
 async def test_depends_access_token_bearer_resolves_and_caches(session, user_id):
     """A valid bearer access token resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "bearer-user")
-    service = AuthService(session)
+    service = TokenService(session)
     access = service.create_access_token(user_id)
     request = _make_request()
 
@@ -399,7 +399,7 @@ async def test_register_resource_policy_adds_mapping(session, user_id):
 async def test_depends_access_token_x_api_key_resolves_and_caches(session, user_id):
     """A valid X-API-Key header token resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "apikey-user")
-    service = AuthService(session)
+    service = TokenService(session)
     access = service.create_access_token(user_id)
     request = _make_request()
 
@@ -428,7 +428,7 @@ async def test_depends_access_token_invalid_x_api_key_raises_401(session, user_i
 async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session, user_id):
     """When both X-API-Key and Bearer are present, X-API-Key wins."""
     await _seed_user(session, user_id, "prio-user")
-    service = AuthService(session)
+    service = TokenService(session)
     api_key_token = service.create_access_token(user_id)
 
     request = _make_request()
@@ -503,7 +503,7 @@ async def test_depends_roles_above_threshold_does_not_cache(session, user_id):
 
     assert len(roles) == _ROLES_CACHE_THRESHOLD
     # Not cached: the streaming path leaves _ROLES_KEY unset.
-    from openhands.ev2.auth2.auth2_dependencies import _ROLES_MISSING
+    from openhands.ev2.auth.auth_dependencies import _ROLES_MISSING
 
     assert getattr(request.state, _ROLES_KEY, _ROLES_MISSING) is _ROLES_MISSING
 

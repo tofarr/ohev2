@@ -1,4 +1,4 @@
-"""FastAPI dependencies for federated (auth2) auth + authorization resolution.
+"""FastAPI dependencies for federated (auth) auth + authorization resolution.
 
 This module resolves the authenticated principal from a federated credential,
 caches the per-request work so subsequent dependencies in the same request reuse
@@ -6,15 +6,15 @@ it, and provides both role-based and policy-based authorization guards.
 
 Credential resolution priority:
 
-1. the ``Authorization: Bearer <token>`` header — an auth2 access-token JWE
+1. the ``Authorization: Bearer <token>`` header — an auth access-token JWE
    (``ttyp: access_token``), or a legacy auth access-token / API-key JWE.
-2. the session cookie (``ttyp: cookie``) set by the auth2 callback.
+2. the session cookie (``ttyp: cookie``) set by the auth callback.
 
 A token that is missing entirely means anonymous access (permissions with
 ``user_id IS NULL`` may still apply). A *present but invalid/expired* token is
 a 401. When the cookie flow is used and the federated access token backing it
 is about to expire, the dependency refreshes it server-side (mirroring
-``/auth2/refresh``) and re-mints the cookie (sliding session).
+``/auth/refresh``) and re-mints the cookie (sliding session).
 
 The decrypted :class:`AuthToken` is cached on ``request.state`` so
 ``depends_access_token``, ``depends_user_id``, ``depends_roles`` and
@@ -35,11 +35,11 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth2.auth2_models import AuthToken
-from openhands.ev2.auth2.auth2_tokens import AuthService, InvalidTokenError
+from openhands.ev2.auth.auth_models import AuthToken
+from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
-from openhands.ev2.security.security_models import Action, Permission2, Role, RoleUser
+from openhands.ev2.security.security_models import Action, Permission, Role, RoleUser
 from openhands.ev2.util.search_filter import (
     ALL_SEARCH_FILTER,
     AllSearchFilter,
@@ -70,14 +70,14 @@ _bearer_scheme = HTTPBearer(
 # Request-state keys for the per-request caches. Storing on request.state lets
 # multiple dependencies in the same request share one decrypted token / one
 # role fetch without a shared global.
-_ACCESS_TOKEN_KEY = "_auth2_access_token"
-_ROLES_KEY = "_auth2_roles"
+_ACCESS_TOKEN_KEY = "_auth_access_token"
+_ROLES_KEY = "_auth_roles"
 
 # When a principal has fewer than this many roles, the full list is materialized
 # and cached on the request so ``depends_roles`` can iterate without re-querying.
 _ROLES_CACHE_THRESHOLD = 100
 
-# Claim keys for the auth2 federated session cookie (carried in the JWE so the
+# Claim keys for the auth federated session cookie (carried in the JWE so the
 # dependency can detect imminent expiry and trigger a server-side refresh).
 _AUTH2_ACCESS_ID_CLAIM = "aid"
 _AUTH2_ACCESS_EXP_CLAIM = "axp"
@@ -101,7 +101,7 @@ async def depends_access_token(
 
     1. the ``X-API-Key`` header (an API-key JWE token),
     2. the ``Authorization: Bearer <token>`` header (an OAuth2 access token), or
-    3. the session cookie set by the login / auth2 callback endpoint.
+    3. the session cookie set by the login / auth callback endpoint.
 
     The decrypted :class:`AuthToken` is cached on ``request.state`` so
     ``depends_user_id``, ``depends_roles`` and ``depends_permissions`` reuse it
@@ -109,7 +109,7 @@ async def depends_access_token(
 
     Missing token => anonymous (None). Present-but-invalid token => 401. When the
     token is the session cookie, a fresh cookie is re-minted (sliding session);
-    for an auth2 federated cookie that is about to expire, the federated access
+    for an auth federated cookie that is about to expire, the federated access
     token is refreshed server-side first.
     """
     cached = getattr(request.state, _ACCESS_TOKEN_KEY, None)
@@ -128,7 +128,7 @@ async def depends_access_token(
         _cache_token(request, _ANON_SENTINEL)
         return None
 
-    service = AuthService(session)
+    service = TokenService(session)
     try:
         auth_token = await service.authenticate(token)
     except InvalidTokenError as exc:
@@ -146,7 +146,7 @@ async def depends_access_token(
         )
 
     if used_cookie:
-        await _maybe_refresh_auth2_cookie(token, response, session, service)
+        await _maybe_refresh_auth_cookie(token, response, session, service)
 
     _cache_token(request, auth_token)
     return auth_token
@@ -156,24 +156,24 @@ def _cache_token(request: Request, value: AuthToken | Any) -> None:
     setattr(request.state, _ACCESS_TOKEN_KEY, value)
 
 
-async def _maybe_refresh_auth2_cookie(
+async def _maybe_refresh_auth_cookie(
     token: str,
     response: Response,
     session: AsyncSession,
-    auth_service: AuthService,
+    auth_service: TokenService,
 ) -> None:
     """Re-mint the session cookie, refreshing the federated access token if needed.
 
     A legacy (password-flow) cookie has no federated claims and is simply
-    re-minted with a fresh expiry (sliding session). An auth2 federated cookie
+    re-minted with a fresh expiry (sliding session). An auth federated cookie
     carries an IdP access-token row id + expiry; when that expiry is imminent
     (within the drift tolerance) the dependency triggers a server-side refresh
-    (mirroring what a standard OAuth client does at ``/auth2/refresh``) before
+    (mirroring what a standard OAuth client does at ``/auth/refresh``) before
     re-minting the cookie. On a concurrent-refresh lock timeout the existing
     cookie is kept so the client is not logged out; the next request retries.
     """
-    from openhands.ev2.auth2.auth2_service import (
-        Auth2Service,
+    from openhands.ev2.auth.auth_service import (
+        AuthService,
         RefreshLockTimeoutError,
         _mint_cookie_jwe,
     )
@@ -215,7 +215,7 @@ async def _maybe_refresh_auth2_cookie(
         return
 
     # Imminent/expired: refresh the federated access token under a row lock.
-    service = Auth2Service(session)
+    service = AuthService(session)
     try:
         access_row, _ = await service.refresh_access_token(access_id)
         await session.commit()
@@ -411,8 +411,8 @@ def register_resource_policy(model: type, resource_type: str) -> None:
 
 # Register every shipped resource at import time so the mapping is populated
 # before any request runs. Resource-type names are lowercased resource nouns.
-from openhands.ev2.auth2.auth2_models import ApiKey as _ApiKey  # noqa: E402
-from openhands.ev2.auth2.auth2_models import OAuthClient as _OAuthClient  # noqa: E402
+from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
+from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
 from openhands.ev2.security.security_models import Role as _Role  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
@@ -430,7 +430,7 @@ def depends_permissions(
 ) -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
     """Build a FastAPI dependency that authorizes *action* on *model_type*.
 
-    Reduces every :class:`Permission2` policy on the principal's roles for the
+    Reduces every :class:`Permission` policy on the principal's roles for the
     resource governing *model_type* to a :class:`SearchFilter` for
     ``(user_id, action)``, combining them with ``Or``. Returns the effective
     filter so services can scope search/update/delete SQL and validate creates.
@@ -489,8 +489,8 @@ def _policy_attr_for(model_type: type) -> str | None:
     return _RESOURCE_POLICY.get(model_type)
 
 
-def _role_policy_for(role: Role, resource_type: str) -> Permission2 | None:
-    """The :class:`Permission2` policy for *resource_type* on *role*.
+def _role_policy_for(role: Role, resource_type: str) -> Permission | None:
+    """The :class:`Permission` policy for *resource_type* on *role*.
 
     Reads from the Role's ``policies`` map (the canonical store). Falls back to
     the legacy ``role_permission`` / ``user_permission`` columns for roles

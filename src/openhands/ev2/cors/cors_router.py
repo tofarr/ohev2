@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth2.auth2_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import depends_permissions
 from openhands.ev2.cors.cors_models import AllowedOrigin
 from openhands.ev2.cors.cors_schemas import (
     AllowedOriginCreate,

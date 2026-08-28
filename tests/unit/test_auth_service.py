@@ -1,4 +1,4 @@
-"""Tests for the auth2 service: IdP exchange, provisioning, token minting, cleanup.
+"""Tests for the auth service: IdP exchange, provisioning, token minting, cleanup.
 
 The IdP HTTP endpoints are mocked with respx so the tests are hermetic. The
 encryption service and config are the real singletons (pointed at a test DB
@@ -17,16 +17,16 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from openhands.ev2.auth2.auth2_models import (
+from openhands.ev2.auth.auth_models import (
     IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
     TokenType,
 )
-from openhands.ev2.auth2.auth2_service import (
-    Auth2Error,
-    Auth2Service,
+from openhands.ev2.auth.auth_service import (
+    AuthError,
+    AuthService,
     IdpError,
     InvalidClientError,
     InvalidGrantError,
@@ -46,7 +46,7 @@ from openhands.ev2.user.user_models import User
 # asyncio_mode=auto (pyproject) marks async tests; sync helper tests need no mark.
 
 _IDP_BASE = "https://idp.example.com"
-_CALLBACK = "https://app.example.com/auth2/callback"
+_CALLBACK = "https://app.example.com/auth/callback"
 
 
 def _test_cfg() -> AppConfig:
@@ -93,14 +93,14 @@ def http_client() -> httpx.AsyncClient:
 
 
 @pytest.fixture
-async def service(session, http_client: httpx.AsyncClient) -> Auth2Service:
-    s = Auth2Service(session, http_client=http_client)
+async def service(session, http_client: httpx.AsyncClient) -> AuthService:
+    s = AuthService(session, http_client=http_client)
     yield s
     # The session owns the lifecycle; do not close the injected client here.
 
 
 async def _create_client(
-    service: Auth2Service,
+    service: AuthService,
     *,
     client_id: str = "client-1",
     client_secret: str = "secret-1",
@@ -203,24 +203,24 @@ class TestHelpers:
 
 
 class TestClientManagement:
-    async def test_create_client_encrypts_secret(self, service: Auth2Service) -> None:
+    async def test_create_client_encrypts_secret(self, service: AuthService) -> None:
         client = await _create_client(service)
         assert client.client_secret != "secret-1"
         # Decrypt round-trips.
         enc = get_encryption_service()
         assert enc.decrypt_value(client.client_secret) == "secret-1"
 
-    async def test_list_redirect_uris(self, service: Auth2Service) -> None:
+    async def test_list_redirect_uris(self, service: AuthService) -> None:
         client = await _create_client(service, redirect_uris=["https://a/cb", "https://b/cb"])
         uris = await service.list_redirect_uris(client)
         assert uris == ["https://a/cb", "https://b/cb"]
 
-    async def test_replace_redirect_uris(self, service: Auth2Service) -> None:
+    async def test_replace_redirect_uris(self, service: AuthService) -> None:
         client = await _create_client(service, redirect_uris=["https://a/cb"])
         await service.replace_redirect_uris(client, ["https://c/cb", "https://d/cb"])
         assert await service.list_redirect_uris(client) == ["https://c/cb", "https://d/cb"]
 
-    async def test_search_clients_pagination(self, service: Auth2Service) -> None:
+    async def test_search_clients_pagination(self, service: AuthService) -> None:
         await _create_client(service, client_id="c1")
         await _create_client(service, client_id="c2")
         clients, next_cursor = await service.search_clients(limit=1)
@@ -230,7 +230,7 @@ class TestClientManagement:
         assert len(clients2) == 1
         assert next_cursor2 is None
 
-    async def test_delete_client_cascades_uris(self, service: Auth2Service) -> None:
+    async def test_delete_client_cascades_uris(self, service: AuthService) -> None:
         client = await _create_client(service, redirect_uris=["https://a/cb"])
         await service.delete_client(client)
         from sqlalchemy import select
@@ -240,21 +240,21 @@ class TestClientManagement:
         )
         assert result.scalars().all() == []
 
-    async def test_authenticate_client_success(self, service: Auth2Service) -> None:
+    async def test_authenticate_client_success(self, service: AuthService) -> None:
         await _create_client(service, client_id="c1", client_secret="s1")
         client = await service._authenticate_client("c1", "s1")
         assert client.client_id == "c1"
 
-    async def test_authenticate_client_wrong_secret(self, service: Auth2Service) -> None:
+    async def test_authenticate_client_wrong_secret(self, service: AuthService) -> None:
         await _create_client(service, client_id="c1", client_secret="s1")
         with pytest.raises(InvalidClientError):
             await service._authenticate_client("c1", "wrong")
 
-    async def test_authenticate_client_unknown(self, service: Auth2Service) -> None:
+    async def test_authenticate_client_unknown(self, service: AuthService) -> None:
         with pytest.raises(InvalidClientError):
             await service._authenticate_client("nope", "s1")
 
-    async def test_authenticate_client_disabled(self, service: Auth2Service) -> None:
+    async def test_authenticate_client_disabled(self, service: AuthService) -> None:
         await _create_client(service, client_id="c1", client_secret="s1")
         # Disable the client directly.
         client = await service.get_client_by_client_id("c1")
@@ -264,7 +264,7 @@ class TestClientManagement:
         with pytest.raises(InvalidClientError):
             await service._authenticate_client("c1", "s1")
 
-    async def test_redirect_uri_allowed_wildcard(self, service: Auth2Service) -> None:
+    async def test_redirect_uri_allowed_wildcard(self, service: AuthService) -> None:
         client = await _create_client(service, redirect_uris=["https://*.example.com/cb"])
         assert await service._redirect_uri_allowed(client, "https://app.example.com/cb")
         assert not await service._redirect_uri_allowed(client, "https://app.other.com/cb")
@@ -276,7 +276,7 @@ class TestClientManagement:
 
 
 class TestAuthorizeRedirect:
-    async def test_build_redirect_validates_client(self, service: Auth2Service) -> None:
+    async def test_build_redirect_validates_client(self, service: AuthService) -> None:
         with pytest.raises(InvalidClientError):
             await service.build_authorize_redirect(
                 client_id="unknown",
@@ -288,7 +288,7 @@ class TestAuthorizeRedirect:
                 callback_url=_CALLBACK,
             )
 
-    async def test_build_redirect_rejects_unlisted_uri(self, service: Auth2Service) -> None:
+    async def test_build_redirect_rejects_unlisted_uri(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         with pytest.raises(InvalidRedirectUriError):
             await service.build_authorize_redirect(
@@ -301,7 +301,7 @@ class TestAuthorizeRedirect:
                 callback_url=_CALLBACK,
             )
 
-    async def test_build_redirect_returns_idp_url(self, service: Auth2Service) -> None:
+    async def test_build_redirect_returns_idp_url(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -317,12 +317,12 @@ class TestAuthorizeRedirect:
         assert "code_challenge_method=S256" in url
 
     async def test_build_redirect_rejects_unsupported_response_type(
-        self, service: Auth2Service
+        self, service: AuthService
     ) -> None:
         # Defense in depth: the router's Literal guards this, but the service
         # also rejects an unsupported response_type before touching the client.
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
-        with pytest.raises(Auth2Error):
+        with pytest.raises(AuthError):
             await service.build_authorize_redirect(
                 client_id="client-1",
                 redirect_uri="https://app.example.com/cb",
@@ -335,7 +335,7 @@ class TestAuthorizeRedirect:
             )
 
     async def test_build_redirect_cookie_response_type_records_state(
-        self, service: Auth2Service
+        self, service: AuthService
     ) -> None:
         # response_type=cookie is accepted and round-trips through the
         # pending-auth state so the callback knows to skip the code.
@@ -365,7 +365,7 @@ class TestAuthorizeRedirect:
 class TestCallback:
     @respx.mock
     async def test_callback_provisions_user_and_persists_refresh(
-        self, service: Auth2Service
+        self, service: AuthService
     ) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         # Build a real authorize redirect to get a valid pending-auth state.
@@ -414,7 +414,7 @@ class TestCallback:
         assert row.expires_at > datetime.now(UTC)
 
     @respx.mock
-    async def test_callback_links_existing_user_by_email(self, service: Auth2Service) -> None:
+    async def test_callback_links_existing_user_by_email(self, service: AuthService) -> None:
         # Pre-existing local user without an IdP link.
         existing = User(email="bob@example.com", username="bob", enabled=True, idp_user_id=None)
         service._session.add(existing)
@@ -445,7 +445,7 @@ class TestCallback:
         assert existing.idp_user_id == "idp-sub-2"
 
     @respx.mock
-    async def test_callback_looks_up_existing_user_by_idp_id(self, service: Auth2Service) -> None:
+    async def test_callback_looks_up_existing_user_by_idp_id(self, service: AuthService) -> None:
         existing = User(
             email="carol@example.com",
             username="carol",
@@ -477,12 +477,12 @@ class TestCallback:
         await service._session.commit()
         assert ctx.user_id == existing.id
 
-    async def test_callback_bad_state_rejected(self, service: Auth2Service) -> None:
+    async def test_callback_bad_state_rejected(self, service: AuthService) -> None:
         with pytest.raises(InvalidGrantError):
             await service.handle_callback(code="idp-code", state="garbage", callback_url=_CALLBACK)
 
     @respx.mock
-    async def test_callback_idp_error_raises(self, service: Auth2Service) -> None:
+    async def test_callback_idp_error_raises(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -501,7 +501,7 @@ class TestCallback:
             await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
 
     @respx.mock
-    async def test_callback_missing_refresh_token_raises(self, service: Auth2Service) -> None:
+    async def test_callback_missing_refresh_token_raises(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -526,7 +526,7 @@ class TestCallback:
             await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
 
     @respx.mock
-    async def test_cookie_flow_provisions_without_minting_code(self, service: Auth2Service) -> None:
+    async def test_cookie_flow_provisions_without_minting_code(self, service: AuthService) -> None:
         # response_type=cookie: the callback provisions the user and persists
         # the IdP refresh token, but does NOT mint an authorization code.
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
@@ -569,7 +569,7 @@ class TestCallback:
         assert get_encryption_service().decrypt_value(row.refresh_token) == "idp-refresh-1"
 
     @respx.mock
-    async def test_cookie_flow_refresh_still_works(self, service: Auth2Service) -> None:
+    async def test_cookie_flow_refresh_still_works(self, service: AuthService) -> None:
         # The cookie flow still persists a refresh-token row, so the refresh
         # grant remains usable even though no code was minted.
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
@@ -630,7 +630,7 @@ class TestCallback:
 
 class TestTokenExchange:
     @respx.mock
-    async def test_full_flow_auth_code_grant(self, service: Auth2Service) -> None:
+    async def test_full_flow_auth_code_grant(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -670,7 +670,7 @@ class TestTokenExchange:
         assert payload["ttyp"] == TokenType.ACCESS_TOKEN.value
 
     @respx.mock
-    async def test_auth_code_wrong_client_secret_rejected(self, service: Auth2Service) -> None:
+    async def test_auth_code_wrong_client_secret_rejected(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -701,7 +701,7 @@ class TestTokenExchange:
             )
 
     @respx.mock
-    async def test_auth_code_redirect_uri_mismatch_rejected(self, service: Auth2Service) -> None:
+    async def test_auth_code_redirect_uri_mismatch_rejected(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -732,7 +732,7 @@ class TestTokenExchange:
             )
 
     @respx.mock
-    async def test_refresh_grant_rotates_via_idp(self, service: Auth2Service) -> None:
+    async def test_refresh_grant_rotates_via_idp(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -794,7 +794,7 @@ class TestTokenExchange:
         enc = get_encryption_service()
         assert enc.decrypt_value(row.refresh_token) == "idp-refresh-2"
 
-    async def test_refresh_bad_token_rejected(self, service: Auth2Service) -> None:
+    async def test_refresh_bad_token_rejected(self, service: AuthService) -> None:
         await _create_client(service, client_id="c1", client_secret="s1")
         with pytest.raises(InvalidGrantError):
             await service.exchange_refresh_token(
@@ -804,7 +804,7 @@ class TestTokenExchange:
             )
 
     @respx.mock
-    async def test_refresh_expired_row_rejected(self, service: Auth2Service) -> None:
+    async def test_refresh_expired_row_rejected(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         url = await service.build_authorize_redirect(
             client_id="client-1",
@@ -858,7 +858,7 @@ class TestTokenExchange:
 
 class TestPkce:
     @respx.mock
-    async def test_pkce_challenge_verified(self, service: Auth2Service) -> None:
+    async def test_pkce_challenge_verified(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         verifier = _generate_code_verifier()
         challenge = _derive_code_challenge(verifier, "S256")
@@ -893,7 +893,7 @@ class TestPkce:
         assert pair.access_token
 
     @respx.mock
-    async def test_pkce_wrong_verifier_rejected(self, service: Auth2Service) -> None:
+    async def test_pkce_wrong_verifier_rejected(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         verifier = _generate_code_verifier()
         challenge = _derive_code_challenge(verifier, "S256")
@@ -926,7 +926,7 @@ class TestPkce:
             )
 
     @respx.mock
-    async def test_pkce_missing_verifier_rejected(self, service: Auth2Service) -> None:
+    async def test_pkce_missing_verifier_rejected(self, service: AuthService) -> None:
         await _create_client(service, redirect_uris=["https://app.example.com/cb"])
         verifier = _generate_code_verifier()
         challenge = _derive_code_challenge(verifier, "S256")
@@ -965,7 +965,7 @@ class TestPkce:
 
 
 class TestCleanup:
-    async def test_delete_expired_removes_old_rows(self, service: Auth2Service) -> None:
+    async def test_delete_expired_removes_old_rows(self, service: AuthService) -> None:
         enc = get_encryption_service()
         # A user to attach rows to.
         user = User(email="x@example.com", username="x", enabled=True)
@@ -1000,7 +1000,7 @@ class TestCleanup:
         assert len(remaining) == 1
         assert enc.decrypt_value(remaining[0].refresh_token) == "r2"
 
-    async def test_delete_expired_respects_age_window(self, service: Auth2Service) -> None:
+    async def test_delete_expired_respects_age_window(self, service: AuthService) -> None:
         enc = get_encryption_service()
         user = User(email="y@example.com", username="y", enabled=True)
         service._session.add(user)
@@ -1023,12 +1023,12 @@ class TestCleanup:
 
 
 class TestCookieAutoRefresh:
-    """Cover the cookie-flow refresh path (Auth2Service.refresh_access_token,
+    """Cover the cookie-flow refresh path (AuthService.refresh_access_token,
     _refresh_rows_if_needed, mint_session_cookie) and the IdpAccessToken row
     persistence introduced for the federated access-token storage."""
 
     @respx.mock
-    async def test_persists_access_token_row_on_callback(self, service: Auth2Service) -> None:
+    async def test_persists_access_token_row_on_callback(self, service: AuthService) -> None:
         """A cookie-flow callback persists both a refresh row and an access
         row, joined by refresh_token_id."""
         await _create_client(service, redirect_uris=[_CALLBACK])
@@ -1062,7 +1062,7 @@ class TestCookieAutoRefresh:
         assert access_row.expires_at > datetime.now(UTC)
 
     @respx.mock
-    async def test_refresh_access_token_refreshes_when_expired(self, service: Auth2Service) -> None:
+    async def test_refresh_access_token_refreshes_when_expired(self, service: AuthService) -> None:
         """When the access row has expired, refresh_access_token performs the
         IdP refresh and rewrites both rows with the rotated tokens."""
         await _create_client(service, redirect_uris=[_CALLBACK])
@@ -1113,7 +1113,7 @@ class TestCookieAutoRefresh:
         assert new_access.expires_at > datetime.now(UTC)
 
     @respx.mock
-    async def test_refresh_access_token_skips_when_not_expired(self, service: Auth2Service) -> None:
+    async def test_refresh_access_token_skips_when_not_expired(self, service: AuthService) -> None:
         """When the access row is still valid, refresh_access_token does not
         call the IdP (no refresh needed)."""
         await _create_client(service, redirect_uris=[_CALLBACK])
@@ -1144,7 +1144,7 @@ class TestCookieAutoRefresh:
         assert new_access.id == ctx.access_id
 
     @respx.mock
-    async def test_refresh_access_token_expired_refresh_raises(self, service: Auth2Service) -> None:
+    async def test_refresh_access_token_expired_refresh_raises(self, service: AuthService) -> None:
         """When the backing refresh row has expired, refresh_access_token
         raises InvalidGrantError (the user must re-authenticate)."""
         await _create_client(service, redirect_uris=[_CALLBACK])
@@ -1178,12 +1178,12 @@ class TestCookieAutoRefresh:
         with pytest.raises(InvalidGrantError):
             await service.refresh_access_token(ctx.access_id)
 
-    async def test_refresh_access_token_unknown_id_raises(self, service: Auth2Service) -> None:
+    async def test_refresh_access_token_unknown_id_raises(self, service: AuthService) -> None:
         with pytest.raises(InvalidGrantError):
             await service.refresh_access_token(uuid.uuid4())
 
     @respx.mock
-    async def test_mint_session_cookie_carries_synced_expiry(self, service: Auth2Service) -> None:
+    async def test_mint_session_cookie_carries_synced_expiry(self, service: AuthService) -> None:
         """The cookie JWE carries the access row id + expiry so the auth
         dependency can detect imminent expiry."""
         await _create_client(service, redirect_uris=[_CALLBACK])

@@ -144,8 +144,8 @@ class TestGetConfig:
         get_config.cache_clear()
 
 
-class TestAuth2Config:
-    """Tests for the federated OAuth (auth2) config fields."""
+class TestAuthConfig:
+    """Tests for the federated OAuth (auth) config fields."""
 
     def test_idp_required_fields(self) -> None:
         config = _cfg()
@@ -201,7 +201,7 @@ class TestAuth2Config:
                 idp={"client_id": "c", "client_secret": SecretStr("s")},
             )
 
-    def test_loads_auth2_fields_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_loads_auth_fields_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from openhands.ev2.config import get_config
 
         get_config.cache_clear()

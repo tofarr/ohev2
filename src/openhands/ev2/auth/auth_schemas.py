@@ -1,4 +1,4 @@
-"""Pydantic schemas for the federated OAuth (auth2) feature."""
+"""Pydantic schemas for the federated OAuth (auth) feature."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.ev2.auth2.auth2_models import OAuthClient
+from openhands.ev2.auth.auth_models import OAuthClient
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
 class AuthorizeRequest(BaseModel):
-    """Query parameters for ``GET /auth2/authorize`` (RFC 6749 §4.1.1).
+    """Query parameters for ``GET /auth/authorize`` (RFC 6749 §4.1.1).
 
     The project acts as an OAuth provider to the client and as a client to the
     IdP, so the same parameters are forwarded to the IdP after the redirect URI
@@ -22,7 +22,7 @@ class AuthorizeRequest(BaseModel):
     ``response_type`` selects the provider-facing flow:
 
     * ``code``   — standard OAuth: the callback returns an authorization code
-      the client exchanges at ``/auth2/token``.
+      the client exchanges at ``/auth/token``.
     * ``cookie`` — the callback sets a session cookie and returns no code; the
       browser is authenticated by the cookie alone.
     """
@@ -41,7 +41,7 @@ class AuthorizeRequest(BaseModel):
 
 
 class TokenRequest(BaseModel):
-    """Body for ``POST /auth2/token`` (RFC 6749 §4.1.3).
+    """Body for ``POST /auth/token`` (RFC 6749 §4.1.3).
 
     Supports the ``authorization_code`` and ``refresh_token`` grant types.
     Client credentials are validated against the ``oauth_clients`` table.
@@ -60,12 +60,12 @@ class TokenResponse(BaseModel):
     """OAuth2 token response (RFC 6749 §5.1).
 
     ``access_token`` is a JWE the client sends as ``Authorization: Bearer``;
-    ``refresh_token`` is a JWE the client posts to ``/auth2/refresh``. Both
+    ``refresh_token`` is a JWE the client posts to ``/auth/refresh``. Both
     expiries are synced to the federated source: ``expires_at`` /
     ``refresh_token_expires_at`` are absolute drift-adjusted expiries taken
     from the IdP; the ``_in`` siblings are the same as relative seconds for
     client convenience. When the access token expires the client calls
-    ``/auth2/refresh``; when the refresh token expires the client must
+    ``/auth/refresh``; when the refresh token expires the client must
     re-authenticate.
     """
 
@@ -121,7 +121,7 @@ class OAuthClientRead(BaseModel):
 
 
 class OAuthClientSearchFilter(BaseSearchFilter[OAuthClient]):
-    """Optional filter clauses for ``GET /auth2/clients``."""
+    """Optional filter clauses for ``GET /auth/clients``."""
 
     name__contains: str | None = Field(default=None)
     enabled__eq: bool | None = Field(default=None)

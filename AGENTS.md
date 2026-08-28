@@ -92,7 +92,7 @@ reject the change.
 ### File & directory layout
 
 * One flat directory per feature, directly under `src/openhands/ev2/` (e.g. `user/`,
-  `permission/`). No `models/`/`routes/`/`services/` subfolders.
+  `security/`). No `models/`/`routes/`/`services/` subfolders.
 * Files inside a feature directory are flat and prefixed with the feature name for
   global uniqueness: `user_models.py`, `user_schemas.py`, `user_router.py`,
   `user_service.py`.
@@ -137,12 +137,12 @@ reject the change.
 
 * Password hashing via bcrypt (`util.password`). Never log or serialize password hashes.
 * Signed cookies for sessions; OAuth flows for federated identity.
-* Federated OAuth lives in `auth2/` (alongside legacy `auth/` until merged). The
-  project is an OAuth provider to first-party clients and an OAuth client to an
-  external IdP. Required config: `idp.url`, `idp.client_id`,
-  `idp.client_secret`, `idp.expire_drift_tolerance`. Optional OIDC claim
-  overrides: `idp.user_id_field`, `idp.email_field`, `idp.role_field`. Roles
-  are NOT pulled from scopes.
+* Federated OAuth lives in `auth/`. The project is an OAuth provider to
+  first-party clients and an OAuth client to an external IdP. Required config:
+  `idp.url`, `idp.client_id`, `idp.client_secret`,
+  `idp.expire_drift_tolerance`. Optional OIDC claim overrides:
+  `idp.user_id_field`, `idp.email_field`, `idp.role_field`. Roles are NOT
+  pulled from scopes.
 * IdP refresh tokens are stored encrypted (`encryption_service`) in
   `idp_refresh_tokens`; the IdP access token is stored encrypted in its own
   `idp_access_tokens` table, joined to the refresh row by
@@ -154,7 +154,7 @@ reject the change.
 * Refresh of an IdP token is gated by `SELECT ... FOR UPDATE` with
   `SET LOCAL lock_timeout` (config: `idp_refresh_lock_timeout_seconds`) so
   multiple processes do not refresh the same token at once. On lock timeout
-  the cookie path keeps the existing cookie; the explicit `/auth2/refresh`
+  the cookie path keeps the existing cookie; the explicit `/auth/refresh`
   endpoint returns 409. After acquiring the lock the access row is
   re-checked: if its expiry is now in the future another process already
   refreshed it and the IdP call is skipped.

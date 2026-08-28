@@ -1,9 +1,9 @@
 """Unit tests for the security module.
 
-Pure in-memory tests exercise the :class:`Permission2` discriminated-union
+Pure in-memory tests exercise the :class:`Permission` discriminated-union
 round-trip and the ``to_search_filter`` reductions for each implementation. The
 DB-backed tests (via the shared ``session`` fixture) verify the
-:class:`Permission2Type` JSONB ``TypeDecorator`` round-trips a stored policy
+:class:`PermissionType` JSONB ``TypeDecorator`` round-trips a stored policy
 through Postgres and that the ``Role``/``RoleUser`` models persist correctly.
 """
 
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.ev2.security.security_models import (
     Action,
     Denied,
-    Permission2,
+    Permission,
     Permitted,
     ReadOnly,
     Role,
@@ -30,7 +30,7 @@ from openhands.ev2.util.search_filter import AllSearchFilter, NoneSearchFilter
 _USER_ID = uuid.uuid4()
 
 
-class TestPermission2Reduction:
+class TestPermissionReduction:
     """Each implementation reduces to the correct SearchFilter per action."""
 
     def test_permitted_always_all(self) -> None:
@@ -52,7 +52,7 @@ class TestPermission2Reduction:
         assert isinstance(ReadOnly().to_search_filter(_USER_ID, action), NoneSearchFilter)
 
 
-class TestPermission2RoundTrip:
+class TestPermissionRoundTrip:
     """Serialized policies deserialize back to the concrete subclass."""
 
     @pytest.mark.parametrize(
@@ -63,9 +63,9 @@ class TestPermission2RoundTrip:
             (ReadOnly(), ReadOnly),
         ],
     )
-    def test_round_trip(self, policy: Permission2, cls: type[Permission2]) -> None:
+    def test_round_trip(self, policy: Permission, cls: type[Permission]) -> None:
         data = policy.model_dump(mode="json")
-        restored = Permission2.model_validate(data)
+        restored = Permission.model_validate(data)
         assert isinstance(restored, cls)
         assert restored.kind == cls.__name__
 
@@ -75,18 +75,18 @@ class TestPermission2RoundTrip:
         assert ReadOnly().kind == "ReadOnly"
 
 
-class TestPermission2Abstract:
+class TestPermissionAbstract:
     def test_base_to_search_filter_not_implemented(self) -> None:
-        # The base Permission2 raises NotImplementedError; concrete subclasses
+        # The base Permission raises NotImplementedError; concrete subclasses
         # override it. Validating without a kind should fail to resolve a subclass.
         with pytest.raises(ValueError, match="kind"):
-            Permission2.model_validate({})
+            Permission.model_validate({})
 
 
 class TestRoleModel:
-    """DB-backed persistence of Role with Permission2 JSONB columns."""
+    """DB-backed persistence of Role with Permission JSONB columns."""
 
-    async def test_role_persists_permission2_policies(self, session: AsyncSession) -> None:
+    async def test_role_persists_permission_policies(self, session: AsyncSession) -> None:
         role = Role(
             name="admin",
             role_permission=Permitted(),
@@ -109,7 +109,7 @@ class TestRoleModel:
         assert role.role_permission is None
         assert role.user_permission is None
 
-    async def test_role_permission2_round_trips_concrete_subclass(
+    async def test_role_permission_round_trips_concrete_subclass(
         self, session: AsyncSession
     ) -> None:
         role = Role(name="viewer", user_permission=ReadOnly())

@@ -6,7 +6,7 @@
 //   - emails are unique (case-insensitive)
 //   - a deleted user's role assignments are cascade-removed (modeled by clearing)
 //
-// Companion to auth2.qnt, which federates authentication and token lifetimes.
+// Companion to auth.qnt, which federates authentication and token lifetimes.
 
 module user {
   type User = {

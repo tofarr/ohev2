@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from openhands.ev2 import __version__
-from openhands.ev2.auth2.auth2_router import router as auth2_router
+from openhands.ev2.auth.auth_router import router as auth_router
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
@@ -33,7 +33,7 @@ async def _cleanup_loop() -> None:
     ``cleanup_interval`` is 0 the loop is not started and cleanup must be
     driven by an external scheduler (cron) — see README 'Cleanup processes'.
     """
-    from openhands.ev2.auth2.auth2_service import Auth2Service
+    from openhands.ev2.auth.auth_service import AuthService
 
     cfg = get_config()
     interval = cfg.cleanup_interval
@@ -44,21 +44,21 @@ async def _cleanup_loop() -> None:
         try:
             factory = get_session_factory()
             async with factory() as session:
-                service = Auth2Service(session)
+                service = AuthService(session)
                 try:
                     deleted = await service.delete_expired_tokens()
                 finally:
                     await service.aclose()
             if deleted:
-                logger.info("auth2 cleanup deleted %d expired IdP refresh tokens", deleted)
+                logger.info("auth cleanup deleted %d expired IdP refresh tokens", deleted)
         except Exception:
-            logger.exception("auth2 cleanup sweep failed; will retry next interval")
+            logger.exception("auth cleanup sweep failed; will retry next interval")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background cleanup task across the app lifetime."""
-    task = asyncio.create_task(_cleanup_loop(), name="auth2-cleanup")
+    task = asyncio.create_task(_cleanup_loop(), name="auth-cleanup")
     try:
         yield
     finally:
@@ -83,7 +83,7 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(auth2_router)
+    app.include_router(auth_router)
     app.include_router(cors_router)
     app.include_router(user_router)
     return app

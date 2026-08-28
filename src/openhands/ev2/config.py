@@ -27,11 +27,11 @@ class EncryptionKeyConfig(BaseModel):
 
 
 class IdpConfig(BaseModel):
-    """Federated OAuth (auth2) — identity provider configuration.
+    """Federated OAuth (auth) — identity provider configuration.
 
     The project delegates authentication to an external identity provider
     (OIDC/OAuth2). It acts as an OAuth provider to first-party clients and an
-    OAuth client to the IdP. These fields wire the federated flow; auth2 runs
+    OAuth client to the IdP. These fields wire the federated flow; auth runs
     alongside the legacy auth module until it is proven and merged.
     """
 
@@ -189,7 +189,7 @@ class AppConfig(BaseModel):
     # SameSite attribute for the session cookie. Defaults to "strict" (the
     # strongest browser-side XSRF mitigation): the cookie is never sent on
     # cross-site requests, including top-level navigations from another origin.
-    # The auth2 cookie flow is a same-site flow (the client app and API share a
+    # The auth cookie flow is a same-site flow (the client app and API share a
     # site), so strict does not break it. Set to "lax" only if a deployment
     # genuinely needs the cookie on cross-site top-level GET navigations (SSO
     # redirect scenarios), or "none" when the client app is on a different site

@@ -1,20 +1,20 @@
-"""Service layer for the federated OAuth (auth2) feature.
+"""Service layer for the federated OAuth (auth) feature.
 
 The project acts as a federated OAuth proxy:
 
-1. ``/auth2/authorize`` validates the client + redirect URI, then redirects the
+1. ``/auth/authorize`` validates the client + redirect URI, then redirects the
    browser to the IdP authorization endpoint. A short-lived signed "pending
    auth" JWE is carried as the IdP ``state`` so the callback can recover the
    client context (client id, redirect uri, client state, PKCE challenge).
-2. ``/auth2/callback`` exchanges the IdP code for IdP tokens, extracts the
+2. ``/auth/callback`` exchanges the IdP code for IdP tokens, extracts the
    user identity from the id_token (or refresh-token JWT), JIT-provisions or
    looks up the local user, persists the encrypted IdP refresh *and* access
    tokens (synced expiries), and mints a short-lived authorization code (JWE)
-   that the client exchanges at ``/auth2/token``. A session cookie is also set
+   that the client exchanges at ``/auth/token``. A session cookie is also set
    so browser flows work without a second round trip.
-3. ``/auth2/token`` exchanges the authorization code for our access + refresh
+3. ``/auth/token`` exchanges the authorization code for our access + refresh
    tokens, validating PKCE and the client secret.
-4. ``/auth2/refresh`` rotates the access + refresh pair by refreshing the IdP
+4. ``/auth/refresh`` rotates the access + refresh pair by refreshing the IdP
    refresh token and re-persisting both rows. The refresh is gated by a
    ``SELECT ... FOR UPDATE`` row lock (with a lock timeout) so concurrent
    processes do not refresh the same IdP token simultaneously; a waiter that
@@ -25,10 +25,10 @@ Access tokens are self-contained JWEs (``ttyp: access_token``) so the existing
 :func:`get_current_user_id` dependency authenticates them unchanged; their
 ``exp`` is synced to the backing IdP access-token row's expiry. Refresh tokens
 are JWEs (``ttyp: idp_refresh_token``) carrying the ``idp_refresh_tokens`` row
-id; only the auth2 refresh endpoint accepts them. The cookie flow mints a JWE
+id; only the auth refresh endpoint accepts them. The cookie flow mints a JWE
 session cookie (``ttyp: cookie``) carrying the access-token row id + expiry so
 the auth dependency can auto-refresh it server-side when it is about to expire
-(mirroring what a standard OAuth client does at ``/auth2/refresh``).
+(mirroring what a standard OAuth client does at ``/auth/refresh``).
 
 All IdP HTTP calls go through :class:`httpx.AsyncClient`; tests inject a mock
 transport. Sensitive values (IdP refresh token, IdP access token, client
@@ -50,7 +50,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth2.auth2_models import (
+from openhands.ev2.auth.auth_models import (
     IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
@@ -96,27 +96,27 @@ _AUTH_CODE_TTL = timedelta(minutes=10)
 _PENDING_AUTH_TTL = timedelta(minutes=10)
 
 
-class Auth2Error(Exception):
-    """Base class for auth2 domain errors."""
+class AuthError(Exception):
+    """Base class for auth domain errors."""
 
 
-class InvalidClientError(Auth2Error):
+class InvalidClientError(AuthError):
     """The client_id / client_secret pair is unknown or disabled."""
 
 
-class InvalidRedirectUriError(Auth2Error):
+class InvalidRedirectUriError(AuthError):
     """The redirect_uri is not permitted for the client."""
 
 
-class InvalidGrantError(Auth2Error):
+class InvalidGrantError(AuthError):
     """The authorization code or refresh token is invalid/expired/revoked."""
 
 
-class IdpError(Auth2Error):
+class IdpError(AuthError):
     """The identity provider returned an error or an unusable response."""
 
 
-class RefreshLockTimeoutError(Auth2Error):
+class RefreshLockTimeoutError(AuthError):
     """The refresh-row lock could not be acquired within the timeout.
 
     A concurrent refresh is in progress; the caller should retry or
@@ -128,7 +128,7 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-class Auth2Service:
+class AuthService:
     """Issue, exchange, and rotate federated OAuth tokens.
 
     Constructed per request with the request-scoped session. The IdP HTTP
@@ -181,7 +181,7 @@ class Auth2Service:
         Raises :class:`InvalidClientError` / :class:`InvalidRedirectUriError`.
         """
         if response_type not in _RESPONSE_TYPES:
-            raise Auth2Error(f"response_type must be one of {_RESPONSE_TYPES}")
+            raise AuthError(f"response_type must be one of {_RESPONSE_TYPES}")
         client = await self._load_client(client_id)
         if not await self._redirect_uri_allowed(client, redirect_uri):
             raise InvalidRedirectUriError(redirect_uri)
@@ -319,7 +319,7 @@ class Auth2Service:
     ) -> TokenPair:
         """Rotate the access + refresh pair by refreshing the IdP token.
 
-        This is the explicit client-facing refresh grant (``/auth2/refresh``):
+        This is the explicit client-facing refresh grant (``/auth/refresh``):
         the client decided its access token is about to expire and is
         requesting a fresh pair, so the IdP refresh is always performed. The
         IdP refresh is gated by a ``SELECT ... FOR UPDATE`` row lock so
@@ -386,7 +386,7 @@ class Auth2Service:
         Carries ``sub`` (user_id), ``aid`` (access-token row id) and ``axp``
         (access-token expiry, epoch seconds) so the auth dependency can detect
         when the cookie is about to expire and trigger a server-side refresh
-        (mirroring what a standard OAuth client does at ``/auth2/refresh``).
+        (mirroring what a standard OAuth client does at ``/auth/refresh``).
         """
         return _mint_cookie_jwe(
             self._enc,
@@ -717,7 +717,7 @@ class Auth2Service:
     ) -> None:
         """Perform the IdP refresh and rewrite both rows in place.
 
-        Used by the explicit ``/auth2/refresh`` grant: the client requested a
+        Used by the explicit ``/auth/refresh`` grant: the client requested a
         rotation, so the IdP refresh-token grant is always performed. The
         row lock held by the caller serializes concurrent refreshes of the
         same IdP token so the IdP is not asked twice in parallel.
@@ -964,7 +964,7 @@ _AUTH_CODE_TYP = "authorization_code"
 
 
 class CallbackContext:
-    """The result of ``/auth2/callback``: client redirect + token context.
+    """The result of ``/auth/callback``: client redirect + token context.
 
     ``auth_code`` is ``None`` for the ``cookie`` response type, where the
     session cookie (set by the router) is the sole credential. ``access_id``
