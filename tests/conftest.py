@@ -27,6 +27,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.permission.permission_models import Permission  # noqa: F401
+from openhands.ev2.security.security_models import Role, RoleUser  # noqa: F401
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
