@@ -60,13 +60,24 @@ class TokenResponse(BaseModel):
     """OAuth2 token response (RFC 6749 §5.1).
 
     ``access_token`` is a JWE the client sends as ``Authorization: Bearer``;
-    ``refresh_token`` is a JWE the client posts to ``/auth2/refresh``.
+    ``refresh_token`` is a JWE the client posts to ``/auth2/refresh``. Both
+    expiries are synced to the federated source: ``expires_at`` /
+    ``refresh_token_expires_at`` are absolute drift-adjusted expiries taken
+    from the IdP; the ``_in`` siblings are the same as relative seconds for
+    client convenience. When the access token expires the client calls
+    ``/auth2/refresh``; when the refresh token expires the client must
+    re-authenticate.
     """
 
     access_token: str
     refresh_token: str
     token_type: str = "Bearer"
     expires_in: int = Field(description="Access-token lifetime in seconds.")
+    expires_at: datetime = Field(description="Absolute access-token expiry (drift-adjusted).")
+    refresh_token_expires_in: int = Field(description="Refresh-token lifetime in seconds.")
+    refresh_token_expires_at: datetime = Field(
+        description="Absolute refresh-token expiry (drift-adjusted)."
+    )
     id_token: str | None = Field(default=None, description="Optional id_token passthrough.")
 
 

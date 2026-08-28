@@ -209,9 +209,17 @@ class TestAuth2Config:
         config = _cfg()
         assert config.idp_delete_expired_seconds > 0
 
-    def test_auth2_access_token_ttl_default(self) -> None:
+    def test_idp_access_token_expires_in_default(self) -> None:
         config = _cfg()
-        assert config.auth2_access_token_ttl_seconds > 0
+        assert config.idp_access_token_expires_in > 0
+
+    def test_idp_refresh_token_expires_in_default(self) -> None:
+        config = _cfg()
+        assert config.idp_refresh_token_expires_in > 0
+
+    def test_idp_refresh_lock_timeout_default(self) -> None:
+        config = _cfg()
+        assert config.idp_refresh_lock_timeout_seconds > 0
 
     def test_missing_idp_url_raises(self) -> None:
         from pydantic import ValidationError

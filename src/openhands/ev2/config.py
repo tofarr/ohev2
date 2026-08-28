@@ -153,12 +153,39 @@ class AppConfig(BaseModel):
             "Defaults to the token endpoint (RFC 6749)."
         ),
     )
-    # Lifetime of the *local* access tokens minted by auth2 (JWE). The IdP
-    # access token is never exposed to clients; this is the proxy token.
-    auth2_access_token_ttl_seconds: int = Field(
+    # Fallback access-token lifetime (seconds) used only when the IdP token
+    # response omits both ``expires_in`` and ``expires_at``. The IdP is the
+    # source of truth for access control; this is a last-resort default.
+    idp_access_token_expires_in: int = Field(
         default=900,
         ge=1,
-        description="Lifetime (seconds) of auth2 access tokens (JWE).",
+        description=(
+            "Fallback access-token lifetime (seconds) when the IdP does not "
+            "advertise one. The IdP-advertised expiry is always preferred."
+        ),
+    )
+    # Fallback refresh-token lifetime (seconds) used only when the IdP token
+    # response omits a refresh-token expiry (``refresh_expires_in`` /
+    # ``refresh_expires_at``). The IdP is the source of truth when present.
+    idp_refresh_token_expires_in: int = Field(
+        default=2_592_000,
+        ge=1,
+        description=(
+            "Fallback refresh-token lifetime (seconds) when the IdP does not "
+            "advertise one. The IdP-advertised expiry is always preferred."
+        ),
+    )
+    # Lock timeout (seconds) for the DB row lock held during an IdP refresh.
+    # If a concurrent refresh holds the lock longer than this, the waiter
+    # abandons the refresh rather than blocking indefinitely.
+    idp_refresh_lock_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Max seconds to wait for the refresh-row lock during a concurrent "
+            "IdP token refresh. On timeout the refresh is abandoned with an "
+            "error so the client can retry / re-authenticate."
+        ),
     )
     # Public base URL of this service. Used to derive the OAuth callback URL
     # (and any other absolute URLs handed to the IdP / clients). Sourced from
