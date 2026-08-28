@@ -22,20 +22,21 @@ class TestCreateRoleRoute:
         assert uuid.UUID(body["id"])
         assert body["created_at"] is not None
 
-    async def test_create_role_with_policies(self, client: AsyncClient) -> None:
+    async def test_create_role_with_entity_permissions(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/roles",
             json={
                 "name": "admin",
-                "policies": {"user": {"kind": "Permitted"}, "role": {"kind": "ReadOnly"}},
+                "user_permission": {"kind": "Permitted"},
+                "role_permission": {"kind": "ReadOnly"},
             },
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert body["policies"]["user"]["kind"] == "Permitted"
-        assert body["policies"]["role"]["kind"] == "ReadOnly"
+        assert body["user_permission"]["kind"] == "Permitted"
+        assert body["role_permission"]["kind"] == "ReadOnly"
 
-    async def test_create_role_with_legacy_permissions(self, client: AsyncClient) -> None:
+    async def test_create_role_with_single_permission(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/roles",
             json={"name": "viewer", "user_permission": {"kind": "ReadOnly"}},
@@ -162,9 +163,9 @@ class TestUpdateRoleRoute:
     async def test_update_policies(self, client: AsyncClient) -> None:
         create = await client.post("/roles", json={"name": "r"})
         rid = create.json()["id"]
-        resp = await client.patch(f"/roles/{rid}", json={"policies": {"user": {"kind": "Denied"}}})
+        resp = await client.patch(f"/roles/{rid}", json={"user_permission": {"kind": "Denied"}})
         assert resp.status_code == 200
-        assert resp.json()["policies"]["user"]["kind"] == "Denied"
+        assert resp.json()["user_permission"]["kind"] == "Denied"
 
     async def test_update_no_fields(self, client: AsyncClient) -> None:
         create = await client.post("/roles", json={"name": "keep"})
@@ -178,9 +179,9 @@ class TestUpdateRoleRoute:
         assert resp.status_code == 404
 
     async def test_update_to_existing_name_conflict(self, client: AsyncClient, session) -> None:
+        from openhands.ev2.role.role_models import Role
         from openhands.ev2.role.role_schemas import RoleCreate
         from openhands.ev2.role.role_service import RoleService
-        from openhands.ev2.security.security_models import Role
         from openhands.ev2.util.search_filter import AllSearchFilter
 
         await RoleService(session, AllSearchFilter[Role]()).create(RoleCreate(name="taken"))
@@ -237,7 +238,7 @@ class TestPermissionEnforcement:
         principal = await _make_principal(
             session, email="permitted@example.com", username="permitted"
         )
-        await _assign_role(session, principal.id, {"role": Permitted()})
+        await _assign_role(session, principal.id, {"role_permission": Permitted()})
         await session.commit()
 
         token = create_auth_token(principal.id)
@@ -250,7 +251,7 @@ class TestPermissionEnforcement:
         principal = await _make_principal(
             session, email="readonly@example.com", username="readonly"
         )
-        await _assign_role(session, principal.id, {"role": ReadOnly()})
+        await _assign_role(session, principal.id, {"role_permission": ReadOnly()})
         await session.commit()
 
         token = create_auth_token(principal.id)

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.role.role_schemas import RoleCreate, RoleSearchFilter, RoleUpdate
 from openhands.ev2.role.role_service import (
     RoleNameConflictError,
@@ -15,7 +16,7 @@ from openhands.ev2.role.role_service import (
     RolePermissionScopeError,
     RoleService,
 )
-from openhands.ev2.security.security_models import Denied, Permitted, ReadOnly, Role
+from openhands.ev2.security.security_models import Denied, Permitted, ReadOnly
 from openhands.ev2.util.search_filter import AllSearchFilter, NoneSearchFilter
 
 _ALL = AllSearchFilter[Role]()
@@ -36,13 +37,16 @@ class TestCreateRole:
         assert role.created_at is not None
         assert role.updated_at is not None
 
-    async def test_create_role_with_policies(self, service: RoleService) -> None:
+    async def test_create_role_with_entity_permissions(self, service: RoleService) -> None:
         role = await service.create(
-            RoleCreate(name="admin", policies={"user": Permitted(), "role": ReadOnly()})
+            RoleCreate(
+                name="admin",
+                user_permission=Permitted(),
+                role_permission=ReadOnly(),
+            )
         )
-        assert role.policies is not None
-        assert isinstance(role.policies["user"], Permitted)
-        assert isinstance(role.policies["role"], ReadOnly)
+        assert isinstance(role.user_permission, Permitted)
+        assert isinstance(role.role_permission, ReadOnly)
 
     async def test_create_role_with_legacy_permissions(self, service: RoleService) -> None:
         role = await service.create(RoleCreate(name="viewer", user_permission=ReadOnly()))
@@ -170,9 +174,8 @@ class TestUpdateRole:
 
     async def test_update_policies(self, service: RoleService) -> None:
         role = await service.create(RoleCreate(name="r"))
-        updated = await service.update(role.id, RoleUpdate(policies={"user": Denied()}))
-        assert updated.policies is not None
-        assert isinstance(updated.policies["user"], Denied)
+        updated = await service.update(role.id, RoleUpdate(user_permission=Denied()))
+        assert isinstance(updated.user_permission, Denied)
 
     async def test_update_user_permission(self, service: RoleService) -> None:
         role = await service.create(RoleCreate(name="r"))

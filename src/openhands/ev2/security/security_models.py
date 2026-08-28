@@ -17,6 +17,11 @@ Initial implementations:
 ``Action`` is redefined here without the legacy ``ALL`` wildcard; the wildcard
 was a property of the old per-row permission grant and is not meaningful for a
 policy object that is already action-aware.
+
+The :class:`Role` and :class:`UserRole` ORM models live in
+``openhands.ev2.role.role_models``; this module only defines the policy types
+(:class:`Permission` and subclasses) and the :class:`PermissionType` JSONB
+column type used by those models.
 """
 
 from __future__ import annotations
@@ -24,17 +29,12 @@ from __future__ import annotations
 import enum
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
 from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
-from sqlalchemy import ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
-from openhands.ev2.db import Base
-from openhands.ev2.user.user_models import User
 from openhands.ev2.util.search_filter import (
     AllSearchFilter,
     NoneSearchFilter,
@@ -150,122 +150,3 @@ class PermissionType(TypeDecorator[Permission | None]):
         if value is None:
             return None
         return Permission.model_validate(value)
-
-
-class PermissionMapType(TypeDecorator[dict[str, Permission] | None]):
-    """SQLAlchemy column type for a ``{resource_type: Permission}`` JSONB map.
-
-    Each value is serialized/deserialized via the discriminated-union
-    ``Permission.model_validate`` so the round-trip restores the concrete
-    subclass. A missing key (or ``None`` map) means "no policy for this
-    resource" (deny). Keys are resource-type names (e.g. ``"user"``,
-    ``"api_key"``).
-    """
-
-    impl = JSONB
-    cache_ok = True
-
-    def process_bind_param(
-        self,
-        value: dict[str, Permission] | None,
-        dialect: Any,
-    ) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        return {
-            k: (v.model_dump(mode="json") if not isinstance(v, dict) else v)
-            for k, v in value.items()
-        }
-
-    def process_result_value(
-        self,
-        value: dict[str, Any] | None,
-        dialect: Any,
-    ) -> dict[str, Permission] | None:
-        if value is None:
-            return None
-        return {k: Permission.model_validate(v) for k, v in value.items()}
-
-
-class Role(Base):
-    """A named role bundling per-resource permission policies.
-
-    The ``policies`` JSONB column maps a resource-type name (e.g. ``"user"``,
-    ``"api_key"``) to a :class:`Permission` policy that applies when a user
-    assigned this role performs an action on that resource. A missing key means
-    "deny" for that resource. This is the canonical, extensible store: new
-    resource types are governed by adding a key rather than a column.
-
-    The legacy ``role_permission`` and ``user_permission`` columns are retained
-    for backward compatibility with existing data but are no longer consulted
-    by the auth authorization dependency.
-    """
-
-    __tablename__ = "roles"
-    __table_args__ = {"comment": "Named role bundling permission policies"}  # noqa: RUF012
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    policies: Mapped[dict[str, Permission] | None] = mapped_column(
-        PermissionMapType,
-        default=None,
-        comment="Map of resource-type name -> Permission policy; missing key = deny.",
-    )
-    role_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role/permission resources; null = deny.",
-    )
-    user_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for user resources; null = deny.",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        init=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-
-class RoleUser(Base):
-    """Assignment of a :class:`Role` to a :class:`User`.
-
-    Many-to-many link table. A user's effective permissions are the union of
-    the policies on every role assigned to them.
-    """
-
-    __tablename__ = "role_users"
-    __table_args__ = (
-        UniqueConstraint("role_id", "user_id", name="uq_role_users_role_id_user_id"),
-        {"comment": "Role-to-user assignments"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"),
-        index=True,
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        init=False,
-        server_default=func.now(),
-    )
-
-    role: Mapped[Role] = relationship(init=False, lazy="selectin")
-    user: Mapped[User] = relationship(init=False, lazy="selectin")

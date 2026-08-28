@@ -1,11 +1,11 @@
 """Seed an admin user with unrestricted access to every resource type.
 
 Idempotent: re-running with the same username upserts the user (password, email,
-enabled) and ensures the user is a member of the ``admin`` role, whose
-``policies`` map grants :class:`Permitted` (unrestricted access) for every
+enabled) and ensures the user is a member of the ``admin`` role, whose per-entity
+``Permission`` columns grant :class:`Permitted` (unrestricted access) for every
 shipped resource type. Safe to call on a fresh database, on one that already has
 the admin, or after adding new resource types (re-running backfills the missing
-policies-map entries).
+per-entity columns).
 
 Run via ``uv run python -m openhands.ev2.scripts.seed_admin``; credentials default from the
 ``OHE_SEED_ADMIN_*`` environment variables, or dev defaults if those are unset.
@@ -31,19 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
-from openhands.ev2.security.security_models import Permission, Permitted, Role, RoleUser
+from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.security.security_models import Permission, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
 
-# Resource types governed by role policies. Mirrors the keys registered in
-# auth_dependencies so the seeded admin role grants access to every resource.
-_ADMIN_RESOURCE_TYPES = (
-    "user",
-    "role",
-    "api_key",
-    "oauth_client",
-    "cors_origin",
-)
+# Per-entity ``Permission`` columns the seeded admin role grants unrestricted
+# access to. Mirrors ``ROLE_ENTITY_COLUMNS`` (the canonical list on the model)
+# so newly added entities are picked up automatically.
+_ADMIN_ENTITY_COLUMNS: tuple[str, ...] = ROLE_ENTITY_COLUMNS
 _ADMIN_ROLE_NAME = "admin"
 
 # Matches the RFC 5322-ish shape enforced by EmailStr loosely; the canonical
@@ -122,25 +118,30 @@ async def _backfill_admin_permissions(
     """Assign an admin role granting Permitted on every resource type.
 
     Idempotent: re-seeding upserts the single admin role (refreshing its
-    policies map to cover all current resource types) and ensures the user is
-    a member. Adding a new resource type to ``_ADMIN_RESOURCE_TYPES`` and
-    re-running backfills the missing entry.
+    per-entity ``Permission`` columns to cover all current resource types) and
+    ensures the user is a member. Adding a new entity to
+    ``ROLE_ENTITY_COLUMNS`` and re-running backfills the missing column.
     """
     role = await session.scalar(select(Role).where(Role.name == _ADMIN_ROLE_NAME))
-    desired: dict[str, Permission] = {rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES}
+    desired: dict[str, Permission | None] = {col: Permitted() for col in _ADMIN_ENTITY_COLUMNS}
     if role is None:
-        role = Role(name=_ADMIN_ROLE_NAME, policies=desired)
+        role = Role(**desired, name=_ADMIN_ROLE_NAME)
         session.add(role)
         await session.flush()
-    elif role.policies != desired:
-        role.policies = desired
-        await session.flush()
+    else:
+        changed = False
+        for col, value in desired.items():
+            if getattr(role, col) != value:
+                setattr(role, col, value)
+                changed = True
+        if changed:
+            await session.flush()
 
     existing = await session.scalar(
-        select(RoleUser).where(RoleUser.role_id == role.id, RoleUser.user_id == user.id)
+        select(UserRole).where(UserRole.role_id == role.id, UserRole.user_id == user.id)
     )
     if existing is None:
-        session.add(RoleUser(role_id=role.id, user_id=user.id))
+        session.add(UserRole(role_id=role.id, user_id=user.id))
         await session.flush()
 
 

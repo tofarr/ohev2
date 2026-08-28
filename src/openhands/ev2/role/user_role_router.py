@@ -1,6 +1,6 @@
-"""HTTP routes for the role-user assignment feature.
+"""HTTP routes for the user-role assignment feature.
 
-Uniform REST surface (AGENTS.md §3). The collection is ``/role-users`` with
+Uniform REST surface (AGENTS.md §3). The collection is ``/user-roles`` with
 cursor pagination; create is ``POST``, retrieve is ``GET``, remove is
 ``DELETE``. Assignments are immutable; there is no update.
 
@@ -20,23 +20,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions
 from openhands.ev2.db import SessionDep
-from openhands.ev2.role.role_user_schemas import (
-    RoleUserCreate,
-    RoleUserRead,
-    RoleUserSearchFilter,
-    RoleUserSearchResult,
+from openhands.ev2.role.role_models import Role
+from openhands.ev2.role.user_role_schemas import (
+    UserRoleCreate,
+    UserRoleRead,
+    UserRoleSearchFilter,
+    UserRoleSearchResult,
 )
-from openhands.ev2.role.role_user_service import (
-    RoleUserConflictError,
-    RoleUserNotFoundError,
-    RoleUserOrphanError,
-    RoleUserService,
+from openhands.ev2.role.user_role_service import (
+    UserRoleConflictError,
+    UserRoleNotFoundError,
+    UserRoleOrphanError,
+    UserRoleService,
 )
-from openhands.ev2.security.security_models import Action, Role
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/role-users", tags=["role-users"])
+router = APIRouter(prefix="/user-roles", tags=["user-roles"])
 
 
 def _cursor(value: str) -> uuid.UUID:
@@ -49,8 +50,8 @@ def _cursor(value: str) -> uuid.UUID:
         ) from exc
 
 
-async def _to_read(link: Any) -> RoleUserRead:
-    return RoleUserRead(
+async def _to_read(link: Any) -> UserRoleRead:
+    return UserRoleRead(
         id=link.id,
         role_id=link.role_id,
         user_id=link.user_id,
@@ -58,23 +59,23 @@ async def _to_read(link: Any) -> RoleUserRead:
     )
 
 
-@router.get("", response_model=RoleUserSearchResult)
-async def search_role_users(
+@router.get("", response_model=UserRoleSearchResult)
+async def search_user_roles(
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
-    search_filter: RoleUserSearchFilter = Depends(),  # noqa: B008
+    search_filter: UserRoleSearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-) -> RoleUserSearchResult:
+) -> UserRoleSearchResult:
     _ = perm_filter  # assignments are global; the filter only gates access.
-    service = RoleUserService(session)
+    service = UserRoleService(session)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
-    links, next_cursor = await service.search_role_users(
+    links, next_cursor = await service.search_user_roles(
         cursor=cursor_uuid,
         limit=limit,
         search_filter=search_filter,
     )
-    return RoleUserSearchResult(
+    return UserRoleSearchResult(
         items=[await _to_read(link) for link in links],
         next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,
@@ -82,33 +83,33 @@ async def search_role_users(
 
 
 @router.get("/count", response_model=CountResult)
-async def count_role_users(
+async def count_user_roles(
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
-    search_filter: RoleUserSearchFilter = Depends(),  # noqa: B008
+    search_filter: UserRoleSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
     _ = perm_filter
-    service = RoleUserService(session)
+    service = UserRoleService(session)
     total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
 
 
-@router.post("", response_model=RoleUserRead, status_code=status.HTTP_201_CREATED)
-async def create_role_user(
-    payload: RoleUserCreate,
+@router.post("", response_model=UserRoleRead, status_code=status.HTTP_201_CREATED)
+async def create_user_role(
+    payload: UserRoleCreate,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
-) -> RoleUserRead:
+) -> UserRoleRead:
     _ = perm_filter
-    service = RoleUserService(session)
+    service = UserRoleService(session)
     try:
         link = await service.create(payload.role_id, payload.user_id)
-    except RoleUserConflictError as exc:
+    except UserRoleConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Assignment already exists: {exc}",
         ) from exc
-    except RoleUserOrphanError as exc:
+    except UserRoleOrphanError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Referenced role or user not found: {exc}",
@@ -117,17 +118,17 @@ async def create_role_user(
     return await _to_read(link)
 
 
-@router.get("/{role_user_id}", response_model=RoleUserRead)
-async def get_role_user(
-    role_user_id: uuid.UUID,
+@router.get("/{user_role_id}", response_model=UserRoleRead)
+async def get_user_role(
+    user_role_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
-) -> RoleUserRead:
+) -> UserRoleRead:
     _ = perm_filter
-    service = RoleUserService(session)
+    service = UserRoleService(session)
     try:
-        link = await service.get(role_user_id)
-    except RoleUserNotFoundError as exc:
+        link = await service.get(user_role_id)
+    except UserRoleNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Assignment not found: {exc}",
@@ -135,17 +136,17 @@ async def get_role_user(
     return await _to_read(link)
 
 
-@router.delete("/{role_user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_role_user(
-    role_user_id: uuid.UUID,
+@router.delete("/{user_role_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user_role(
+    user_role_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
 ) -> None:
     _ = perm_filter
-    service = RoleUserService(session)
+    service = UserRoleService(session)
     try:
-        await service.delete(role_user_id)
-    except RoleUserNotFoundError as exc:
+        await service.delete(user_role_id)
+    except UserRoleNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Assignment not found: {exc}",

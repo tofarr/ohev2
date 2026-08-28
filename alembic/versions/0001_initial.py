@@ -20,8 +20,8 @@ Tables:
 * ``oauth_clients``          — OAuth provider client registrations.
 * ``oauth_client_redirect_uris`` — permitted redirect URIs per client.
 * ``allowed_origins``        — CORS allow-list.
-* ``roles``                  — named role bundling per-resource Permission policies.
-* ``role_users``             — role-to-user assignments.
+* ``roles``                  — named role bundling per-entity Permission policies.
+* ``user_roles``             — role-to-user assignments.
 """
 
 from __future__ import annotations
@@ -308,22 +308,40 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column(
-            "policies",
+            "user_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Map of resource-type name -> Permission policy; missing key = deny.",
+            comment="Permission policy for user resources; null = deny.",
         ),
         sa.Column(
             "role_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Permission policy for role/permission resources; null = deny.",
+            comment="Permission policy for role resources; null = deny.",
         ),
         sa.Column(
-            "user_permission",
+            "user_role_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Permission policy for user resources; null = deny.",
+            comment="Permission policy for user-role assignment resources; null = deny.",
+        ),
+        sa.Column(
+            "api_key_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for api_key resources; null = deny.",
+        ),
+        sa.Column(
+            "oauth_client_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for oauth_client resources; null = deny.",
+        ),
+        sa.Column(
+            "cors_origin_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for cors_origin resources; null = deny.",
         ),
         sa.Column(
             "created_at",
@@ -338,15 +356,15 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        comment="Named role bundling permission policies",
+        comment="Named role bundling per-entity permission policies",
     )
     op.create_index("ix_roles_name", "roles", ["name"], unique=True)
 
     # ------------------------------------------------------------------ #
-    # role_users
+    # user_roles
     # ------------------------------------------------------------------ #
     op.create_table(
-        "role_users",
+        "user_roles",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("role_id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -357,23 +375,23 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["role_id"], ["roles.id"], ondelete="CASCADE", name="fk_role_users_role_id_roles"
+            ["role_id"], ["roles.id"], ondelete="CASCADE", name="fk_user_roles_role_id_roles"
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_role_users_user_id_users"
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_user_roles_user_id_users"
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("role_id", "user_id", name="uq_role_users_role_id_user_id"),
+        sa.UniqueConstraint("role_id", "user_id", name="uq_user_roles_role_id_user_id"),
         comment="Role-to-user assignments",
     )
-    op.create_index("ix_role_users_role_id", "role_users", ["role_id"], unique=False)
-    op.create_index("ix_role_users_user_id", "role_users", ["user_id"], unique=False)
+    op.create_index("ix_user_roles_role_id", "user_roles", ["role_id"], unique=False)
+    op.create_index("ix_user_roles_user_id", "user_roles", ["user_id"], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_role_users_user_id", table_name="role_users")
-    op.drop_index("ix_role_users_role_id", table_name="role_users")
-    op.drop_table("role_users")
+    op.drop_index("ix_user_roles_user_id", table_name="user_roles")
+    op.drop_index("ix_user_roles_role_id", table_name="user_roles")
+    op.drop_table("user_roles")
     op.drop_index("ix_roles_name", table_name="roles")
     op.drop_table("roles")
     op.drop_index("ix_allowed_origins_origin", table_name="allowed_origins")

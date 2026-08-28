@@ -17,8 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.role.role_schemas import RoleCreate, RoleSearchFilter, RoleUpdate
-from openhands.ev2.security.security_models import Role
 from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 
@@ -57,9 +57,12 @@ class RoleService:
         """
         role = Role(
             name=payload.name,
-            policies=payload.policies,
-            role_permission=payload.role_permission,
             user_permission=payload.user_permission,
+            role_permission=payload.role_permission,
+            user_role_permission=payload.user_role_permission,
+            api_key_permission=payload.api_key_permission,
+            oauth_client_permission=payload.oauth_client_permission,
+            cors_origin_permission=payload.cors_origin_permission,
         )
         if not self._perm_filter.matches(role):
             raise RolePermissionScopeError(str(payload.name))
@@ -114,12 +117,18 @@ class RoleService:
         role = await self.get(role_id)
         if payload.name is not None:
             role.name = payload.name
-        if payload.policies is not None:
-            role.policies = payload.policies
-        if payload.role_permission is not None:
-            role.role_permission = payload.role_permission
         if payload.user_permission is not None:
             role.user_permission = payload.user_permission
+        if payload.role_permission is not None:
+            role.role_permission = payload.role_permission
+        if payload.user_role_permission is not None:
+            role.user_role_permission = payload.user_role_permission
+        if payload.api_key_permission is not None:
+            role.api_key_permission = payload.api_key_permission
+        if payload.oauth_client_permission is not None:
+            role.oauth_client_permission = payload.oauth_client_permission
+        if payload.cors_origin_permission is not None:
+            role.cors_origin_permission = payload.cors_origin_permission
         try:
             await self._session.flush()
         except IntegrityError as exc:

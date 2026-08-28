@@ -8,10 +8,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.scripts.seed_admin import _ADMIN_RESOURCE_TYPES, seed_admin
-from openhands.ev2.security.security_models import Permitted, Role, RoleUser
+from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.scripts.seed_admin import seed_admin
+from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
+
+_ADMIN_COLUMNS = ROLE_ENTITY_COLUMNS
 
 
 class TestSeedAdmin:
@@ -34,9 +37,8 @@ class TestSeedAdmin:
 
         role = await _admin_role(session, user.id)
         assert role.name == "admin"
-        assert set(role.policies.keys()) == set(_ADMIN_RESOURCE_TYPES)
-        for policy in role.policies.values():
-            assert isinstance(policy, Permitted)
+        for column in _ADMIN_COLUMNS:
+            assert isinstance(getattr(role, column), Permitted)
 
     async def test_rerun_is_idempotent(self, session: AsyncSession) -> None:
         await seed_admin(
@@ -64,11 +66,11 @@ class TestSeedAdmin:
         # Exactly one admin role, assigned once.
         roles = await session.scalars(select(Role).where(Role.name == "admin"))
         assert len(roles.all()) == 1
-        memberships = await session.scalars(select(RoleUser).where(RoleUser.user_id == user.id))
+        memberships = await session.scalars(select(UserRole).where(UserRole.user_id == user.id))
         assert len(memberships.all()) == 1
 
     async def test_backfills_new_resource_types(self, session: AsyncSession) -> None:
-        """A missing policies entry is restored on re-seed."""
+        """A dropped per-entity column is restored on re-seed."""
         user = await seed_admin(
             session,
             username="root",
@@ -76,9 +78,8 @@ class TestSeedAdmin:
             password="pw",
         )
         role = await _admin_role(session, user.id)
-        # Simulate a new resource type added after the first seed by dropping one
-        # policies entry; re-running should restore it.
-        role.policies = {k: v for k, v in role.policies.items() if k != "user"}
+        # Simulate a missing grant by clearing one column; re-running restores it.
+        role.user_permission = None
         await session.commit()
 
         await seed_admin(
@@ -89,7 +90,7 @@ class TestSeedAdmin:
         )
 
         role = await _admin_role(session, user.id)
-        assert set(role.policies.keys()) == set(_ADMIN_RESOURCE_TYPES)
+        assert isinstance(role.user_permission, Permitted)
 
     async def test_invalid_email_raises(self, session: AsyncSession) -> None:
         with pytest.raises(ValueError, match="invalid email"):
@@ -122,7 +123,7 @@ class TestSeedAdmin:
 async def _admin_role(session: AsyncSession, user_id: uuid.UUID) -> Role:
     """The admin role assigned to *user_id*."""
     stmt = (
-        select(Role).join(RoleUser, RoleUser.role_id == Role.id).where(RoleUser.user_id == user_id)
+        select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id)
     )
     role = await session.scalar(stmt)
     assert role is not None, "admin role not assigned to user"

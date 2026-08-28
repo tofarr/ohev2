@@ -26,7 +26,8 @@ from openhands.ev2.auth.auth_models import (  # noqa: F401
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
-from openhands.ev2.security.security_models import Permitted, Role, RoleUser
+from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Detect a running postgres socket dir set up by the dev environment; fall back
@@ -71,24 +72,19 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
 
 
-# Resource types governed by role policies. Mirrors the keys registered in
-# auth_dependencies so the seeded admin role grants access to every resource.
-_ADMIN_RESOURCE_TYPES = (
-    "user",
-    "role",
-    "api_key",
-    "oauth_client",
-    "cors_origin",
-)
+# Per-entity ``Permission`` columns the seeded test admin role grants
+# unrestricted access to. ``ROLE_ENTITY_COLUMNS`` (imported above) is the
+# canonical list on the model, so the seeded admin role grants access to every
+# resource.
 
 
 async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Assign the test principal an admin role that permits all actions.
 
-    The role's ``policies`` map grants :class:`Permitted` (unrestricted access)
-    for every shipped resource type, providing the baseline access route tests
-    need under the role-based authorization dependency.
-    Idempotent: re-running on an already-seeded role is a no-op.
+    The role's per-entity ``Permission`` columns grant :class:`Permitted`
+    (unrestricted access) for every shipped resource type, providing the
+    baseline access route tests need under the role-based authorization
+    dependency. Idempotent: re-running on an already-seeded role is a no-op.
     """
     from sqlalchemy import select
 
@@ -98,17 +94,17 @@ async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> No
     if role is None:
         role = Role(
             name="test-admin",
-            policies={rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES},
+            **{col: Permitted() for col in ROLE_ENTITY_COLUMNS},
         )
         session.add(role)
         await session.flush()
     existing = (
         await session.execute(
-            select(RoleUser).where(RoleUser.role_id == role.id, RoleUser.user_id == user_id)
+            select(UserRole).where(UserRole.role_id == role.id, UserRole.user_id == user_id)
         )
     ).scalar_one_or_none()
     if existing is None:
-        session.add(RoleUser(role_id=role.id, user_id=user_id))
+        session.add(UserRole(role_id=role.id, user_id=user_id))
 
 
 @pytest_asyncio.fixture
