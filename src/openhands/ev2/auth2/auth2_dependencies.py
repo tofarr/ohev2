@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, Response, Security, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +41,7 @@ from openhands.ev2.auth.auth_models import AuthToken
 from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
-from openhands.ev2.security.security_models import Action, Role, RoleUser
+from openhands.ev2.security.security_models import Action, Permission2, Role, RoleUser
 from openhands.ev2.util.search_filter import (
     ALL_SEARCH_FILTER,
     AllSearchFilter,
@@ -50,10 +50,19 @@ from openhands.ev2.util.search_filter import (
     SearchFilter,
 )
 
-# Bearer scheme doubles as OpenAPI documentation. `auto_error=False` keeps it
-# optional so the cookie fallback is tried when the header is absent. The
-# session cookie is read directly from request.cookies (no FastAPI cookie
-# security scheme), so it is not registered here.
+# Security schemes double as OpenAPI documentation. Declared via `Security(...)`
+# rather than `Header()` so FastAPI registers them in `components.securitySchemes`
+# instead of surfacing them as per-operation header parameters. `auto_error=False`
+# makes them optional so the three sources are tried in priority order; FastAPI
+# emits one security requirement per scheme, so the docs present them as
+# alternatives. The session cookie is read directly from request.cookies (no
+# FastAPI cookie security scheme), so it is not registered here.
+_api_key_scheme = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="ApiKey",
+    auto_error=False,
+    description="API key (JWE) sent in the X-API-Key header.",
+)
 _bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
     auto_error=False,
@@ -85,15 +94,22 @@ async def depends_access_token(
     request: Request,
     response: Response,
     session: SessionDep,
+    x_api_key: Annotated[str | None, Security(_api_key_scheme)] = None,
     bearer: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer_scheme)] = None,
 ) -> AuthToken | None:
-    """Resolve the current principal from a federated credential, or ``None``.
+    """Resolve the current principal from a credential, or ``None``.
+
+    The credential is a JWE-encrypted token supplied via, in priority order:
+
+    1. the ``X-API-Key`` header (an API-key JWE token),
+    2. the ``Authorization: Bearer <token>`` header (an OAuth2 access token), or
+    3. the session cookie set by the login / auth2 callback endpoint.
 
     The decrypted :class:`AuthToken` is cached on ``request.state`` so
     ``depends_user_id``, ``depends_roles`` and ``depends_permissions`` reuse it
     without re-decrypting or re-loading the user row.
 
-    Missing token ⇒ anonymous (None). Present-but-invalid token ⇒ 401. When the
+    Missing token => anonymous (None). Present-but-invalid token => 401. When the
     token is the session cookie, a fresh cookie is re-minted (sliding session);
     for an auth2 federated cookie that is about to expire, the federated access
     token is refreshed server-side first.
@@ -102,8 +118,10 @@ async def depends_access_token(
     if cached is not None:
         return cached if cached is not _ANON_SENTINEL else None
 
-    token = bearer.credentials if bearer is not None else None
+    token = x_api_key
     used_cookie = False
+    if token is None and bearer is not None:
+        token = bearer.credentials
     if token is None:
         cookie_name = get_config().auth_cookie_name
         token = request.cookies.get(cookie_name)
@@ -375,32 +393,40 @@ async def _stream_roles(session: AsyncSession, user_id: uuid.UUID) -> AsyncItera
 # Permissions (policy-based search filter).
 # ---------------------------------------------------------------------- #
 
-# The per-resource policy attribute on a Role. Maps a resource's ORM model
-# class to the Role column holding its :class:`Permission2` policy. Resources
-# without an entry default to deny. New resources add an entry here (or call
-# ``register_resource_policy``) so depends_permissions can find their policy.
+# Maps a resource's ORM model class to the resource-type name used as the key in
+# a Role's ``policies`` JSONB map. Resources without an entry default to deny.
+# New resources register here (or call ``register_resource_policy``) so
+# depends_permissions can find their policy without editing the function body.
 _RESOURCE_POLICY: dict[type, str] = {}
 
 
-def register_resource_policy(model: type, attr: str) -> None:
-    """Register the Role column that governs *model*.
+def register_resource_policy(model: type, resource_type: str) -> None:
+    """Register the resource-type name that governs *model*.
 
-    Resources register their ORM model class against the :class:`Role` attribute
-    holding the :class:`Permission2` policy for that resource. This keeps the
-    policy lookup table in one place and lets new resources opt in without
-    editing ``depends_permissions``.
+    Resources register their ORM model class against the key used in a Role's
+    ``policies`` map (e.g. ``"user"``, ``"api_key"``). This keeps the policy
+    lookup table in one place and lets new resources opt in without editing
+    ``depends_permissions``.
     """
-    _RESOURCE_POLICY[model] = attr
+    _RESOURCE_POLICY[model] = resource_type
 
 
-# Register the two initial resources shipped with the security module at import
-# time so the mapping is populated before any request runs. Role/permission
-# resources are governed by ``role_permission``; user resources by
-# ``user_permission`` — the two policy columns currently defined on Role.
-register_resource_policy(Role, "role_permission")
+# Register every shipped resource at import time so the mapping is populated
+# before any request runs. The resource-type names mirror the legacy
+# ``ResourceType`` enum values (lowercased) for continuity.
+from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
+from openhands.ev2.auth2.auth2_models import OAuthClient as _OAuthClient  # noqa: E402
+from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
+from openhands.ev2.permission.permission_models import Permission as _Permission  # noqa: E402
+from openhands.ev2.security.security_models import Role as _Role  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
 
-register_resource_policy(_User, "user_permission")
+register_resource_policy(_User, "user")
+register_resource_policy(_Role, "role")
+register_resource_policy(_Permission, "permission")
+register_resource_policy(_ApiKey, "api_key")
+register_resource_policy(_OAuthClient, "oauth_client")
+register_resource_policy(_AllowedOrigin, "cors_origin")
 
 
 def depends_permissions(
@@ -425,9 +451,8 @@ def depends_permissions(
             ...,
         ): ...
 
-    Anonymous principals (no token) are evaluated with ``user_id=None``; a
-    policy that grants anonymous access (e.g. :class:`Permitted`) will allow
-    the action, otherwise the dependency denies with 403.
+    Anonymous principals (no token) have no roles, so they are denied (403)
+    unless a future anonymous-role mechanism grants access.
     """
 
     async def _guard(
@@ -436,8 +461,8 @@ def depends_permissions(
         token: Annotated[AuthToken | None, Depends(depends_access_token)],
     ) -> SearchFilter[Any]:
         user_id = token.user_id if token is not None else None
-        attr = _policy_attr_for(model_type)
-        if attr is None:
+        resource_type = _policy_attr_for(model_type)
+        if resource_type is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -448,7 +473,7 @@ def depends_permissions(
 
         filters: list[SearchFilter[Any]] = []
         async for role in depends_roles(request, session, token):
-            policy = getattr(role, attr, None)
+            policy = _role_policy_for(role, resource_type)
             if policy is None:
                 continue
             filters.append(policy.to_search_filter(user_id, action))
@@ -465,8 +490,26 @@ def depends_permissions(
 
 
 def _policy_attr_for(model_type: type) -> str | None:
-    """The Role attribute holding the policy for *model_type*, or ``None``."""
+    """The resource-type name governing *model_type*, or ``None``."""
     return _RESOURCE_POLICY.get(model_type)
+
+
+def _role_policy_for(role: Role, resource_type: str) -> Permission2 | None:
+    """The :class:`Permission2` policy for *resource_type* on *role*.
+
+    Reads from the Role's ``policies`` map (the canonical store). Falls back to
+    the legacy ``role_permission`` / ``user_permission`` columns for roles
+    created before the ``policies`` column existed, so existing data continues
+    to authorize during the migration.
+    """
+    policies = role.policies
+    if policies is not None and resource_type in policies:
+        return policies[resource_type]
+    if resource_type == "user":
+        return role.user_permission
+    if resource_type in ("role", "permission"):
+        return role.role_permission
+    return None
 
 
 def _combine(filters: list[SearchFilter[Any]]) -> SearchFilter[Any] | None:

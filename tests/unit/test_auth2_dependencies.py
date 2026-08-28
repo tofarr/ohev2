@@ -95,10 +95,16 @@ async def _assign_role(
     *,
     user_id: uuid.UUID,
     name: str,
+    policies: dict[str, Any] | None = None,
     user_permission: Any | None = None,
     role_permission: Any | None = None,
 ) -> Role:
-    role = Role(name=name, user_permission=user_permission, role_permission=role_permission)
+    role = Role(
+        name=name,
+        policies=policies,
+        user_permission=user_permission,
+        role_permission=role_permission,
+    )
     session.add(role)
     await session.flush()
     session.add(RoleUser(role_id=role.id, user_id=user_id))
@@ -115,7 +121,9 @@ async def test_depends_access_token_anonymous_caches_sentinel(session, user_id):
     """No bearer + no cookie resolves to None and caches the anonymous sentinel."""
     request = _make_request()
 
-    token = await depends_access_token(request, _NoopResponse(), session, None)
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=None, bearer=None
+    )
 
     assert token is None
     # The anonymous result is cached so a second resolution does no work.
@@ -133,7 +141,9 @@ async def test_depends_access_token_bearer_resolves_and_caches(session, user_id)
 
     bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials=access)
 
-    token = await depends_access_token(request, _NoopResponse(), session, bearer)
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=None, bearer=bearer
+    )
 
     assert token is not None
     assert token.user_id == user_id
@@ -150,7 +160,7 @@ async def test_depends_access_token_invalid_bearer_raises_401(session, user_id):
     bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="not-a-jwe")
 
     with pytest.raises(HTTPException) as exc:
-        await depends_access_token(request, _NoopResponse(), session, bearer)
+        await depends_access_token(request, _NoopResponse(), session, x_api_key=None, bearer=bearer)
 
     assert exc.value.status_code == 401
 
@@ -163,7 +173,7 @@ async def test_depends_access_token_cookie_re_mints_sliding(session, user_id):
     request.cookies["ohesession"] = cookie_token  # type: ignore[index]
 
     response = _NoopResponse()
-    token = await depends_access_token(request, response, session, None)
+    token = await depends_access_token(request, response, session, x_api_key=None, bearer=None)
 
     assert token is not None
     assert token.user_id == user_id
@@ -177,7 +187,9 @@ async def test_depends_access_token_reuses_cache(session, user_id):
     cached = _auth_token(user_id)
     setattr(request.state, _ACCESS_TOKEN_KEY, cached)
 
-    token = await depends_access_token(request, _NoopResponse(), session, None)
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=None, bearer=None
+    )
 
     assert token is cached
 
@@ -359,16 +371,20 @@ async def test_depends_permissions_unregistered_resource_denies(session, user_id
 
 
 async def test_register_resource_policy_adds_mapping(session, user_id):
-    """register_resource_policy makes a new model resolvable to a policy column."""
+    """register_resource_policy maps a model to a resource-type name consulted
+    in the role's policies map."""
     await _seed_user(session, user_id, "reg-user")
 
     class Widget:
         pass
 
-    # Register a fake column name; the role has no such attribute so the policy
-    # resolves to None (deny), confirming the mapping is consulted.
-    register_resource_policy(Widget, "widget_permission")
-    await _assign_role(session, user_id=user_id, name="widget-admin", user_permission=Permitted())
+    # Register a resource-type name; the role has no entry for it in its
+    # policies map, so the policy resolves to None (deny), confirming the
+    # mapping is consulted.
+    register_resource_policy(Widget, "widget")
+    await _assign_role(
+        session, user_id=user_id, name="widget-admin", policies={"user": Permitted()}
+    )
 
     request = _make_request()
     token = _auth_token(user_id)
@@ -378,6 +394,96 @@ async def test_register_resource_policy_adds_mapping(session, user_id):
         await guard(request, session, token)
 
     assert exc.value.status_code == 403
+
+
+async def test_depends_access_token_x_api_key_resolves_and_caches(session, user_id):
+    """A valid X-API-Key header token resolves to an AuthToken and is cached."""
+    await _seed_user(session, user_id, "apikey-user")
+    service = AuthService(session)
+    access = service.create_access_token(user_id)
+    request = _make_request()
+
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=access, bearer=None
+    )
+
+    assert token is not None
+    assert token.user_id == user_id
+    assert token.enabled is True
+    assert getattr(request.state, _ACCESS_TOKEN_KEY) is token
+
+
+async def test_depends_access_token_invalid_x_api_key_raises_401(session, user_id):
+    """A present-but-invalid X-API-Key token raises 401."""
+    request = _make_request()
+
+    with pytest.raises(HTTPException) as exc:
+        await depends_access_token(
+            request, _NoopResponse(), session, x_api_key="not-a-jwe", bearer=None
+        )
+
+    assert exc.value.status_code == 401
+
+
+async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session, user_id):
+    """When both X-API-Key and Bearer are present, X-API-Key wins."""
+    await _seed_user(session, user_id, "prio-user")
+    service = AuthService(session)
+    api_key_token = service.create_access_token(user_id)
+
+    request = _make_request()
+    token = await depends_access_token(
+        request,
+        _NoopResponse(),
+        session,
+        x_api_key=api_key_token,
+        bearer=None,
+    )
+
+    assert token is not None
+    assert token.user_id == user_id
+
+
+async def test_depends_permissions_uses_policies_map(session, user_id):
+    """The policies map (canonical store) authorizes when present, overriding
+    the legacy column fallback."""
+    await _seed_user(session, user_id, "policies-user")
+    # policies map grants Permitted for user; legacy column is None.
+    await _assign_role(
+        session,
+        user_id=user_id,
+        name="policies-admin",
+        policies={"user": Permitted()},
+    )
+
+    request = _make_request()
+    token = _auth_token(user_id)
+
+    guard = depends_permissions(User, Action.SEARCH)
+    filt = await guard(request, session, token)
+
+    assert isinstance(filt, AllSearchFilter)
+
+
+async def test_depends_permissions_policies_map_for_arbitrary_resource(session, user_id):
+    """A policies entry for a non-legacy resource type (e.g. api_key) authorizes."""
+    from openhands.ev2.auth.auth_models import ApiKey
+
+    await _seed_user(session, user_id, "apikey-admin-user")
+    await _assign_role(
+        session,
+        user_id=user_id,
+        name="apikey-admin",
+        policies={"api_key": Permitted()},
+    )
+
+    request = _make_request()
+    token = _auth_token(user_id)
+
+    guard = depends_permissions(ApiKey, Action.SEARCH)
+    filt = await guard(request, session, token)
+
+    assert isinstance(filt, AllSearchFilter)
 
 
 # ---------------------------------------------------------------------- #

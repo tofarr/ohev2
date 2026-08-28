@@ -153,14 +153,53 @@ class Permission2Type(TypeDecorator[Permission2 | None]):
         return Permission2.model_validate(value)
 
 
+class Permission2MapType(TypeDecorator[dict[str, Permission2] | None]):
+    """SQLAlchemy column type for a ``{resource_type: Permission2}`` JSONB map.
+
+    Each value is serialized/deserialized via the discriminated-union
+    ``Permission2.model_validate`` so the round-trip restores the concrete
+    subclass. A missing key (or ``None`` map) means "no policy for this
+    resource" (deny). Keys are resource-type names (e.g. ``"user"``,
+    ``"api_key"``).
+    """
+
+    impl = JSONB
+    cache_ok = True
+
+    def process_bind_param(
+        self,
+        value: dict[str, Permission2] | None,
+        dialect: Any,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return {
+            k: (v.model_dump(mode="json") if not isinstance(v, dict) else v)
+            for k, v in value.items()
+        }
+
+    def process_result_value(
+        self,
+        value: dict[str, Any] | None,
+        dialect: Any,
+    ) -> dict[str, Permission2] | None:
+        if value is None:
+            return None
+        return {k: Permission2.model_validate(v) for k, v in value.items()}
+
+
 class Role(Base):
     """A named role bundling per-resource permission policies.
 
-    Each JSONB column holds a serialized :class:`Permission2` policy that
-    applies when a user assigned this role performs the corresponding action on
-    the associated resource. Initial columns are ``role_permission`` (actions
-    on the role/permission resources) and ``user_permission`` (actions on user
-    resources).
+    The ``policies`` JSONB column maps a resource-type name (e.g. ``"user"``,
+    ``"api_key"``) to a :class:`Permission2` policy that applies when a user
+    assigned this role performs an action on that resource. A missing key means
+    "deny" for that resource. This is the canonical, extensible store: new
+    resource types are governed by adding a key rather than a column.
+
+    The legacy ``role_permission`` and ``user_permission`` columns are retained
+    for backward compatibility with existing data but are no longer consulted
+    by the auth2 authorization dependency.
     """
 
     __tablename__ = "roles"
@@ -172,6 +211,11 @@ class Role(Base):
         server_default=func.gen_random_uuid(),
     )
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    policies: Mapped[dict[str, Permission2] | None] = mapped_column(
+        Permission2MapType,
+        default=None,
+        comment="Map of resource-type name -> Permission2 policy; missing key = deny.",
+    )
     role_permission: Mapped[Permission2 | None] = mapped_column(
         Permission2Type,
         default=None,

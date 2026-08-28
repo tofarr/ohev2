@@ -16,9 +16,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from openhands.ev2.auth2.auth2_dependencies import depends_permissions
 from openhands.ev2.db import SessionDep
-from openhands.ev2.permission.permission_dependencies import require_permission
-from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.permission.permission_models import Permission
 from openhands.ev2.permission.permission_schemas import (
     PermissionCreate,
     PermissionRead,
@@ -31,6 +31,7 @@ from openhands.ev2.permission.permission_service import (
     PermissionScopeError,
     PermissionService,
 )
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
@@ -54,7 +55,7 @@ def _cursor(value: str) -> uuid.UUID:
 async def search_permissions(
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any], Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))
+        SearchFilter[Any], Depends(depends_permissions(Permission, Action.SEARCH))
     ],
     # See user router: bare `Depends()` is required so FastAPI explodes the
     # filter model's fields as individual query params alongside scalar queries.
@@ -83,7 +84,7 @@ async def search_permissions(
 async def count_permissions(
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any], Depends(require_permission(Action.SEARCH, ResourceType.PERMISSION))
+        SearchFilter[Any], Depends(depends_permissions(Permission, Action.SEARCH))
     ],
     # See search_permissions: bare `Depends()` lets FastAPI explode the filter
     # model's fields as query params. Declared before `/{permission_id}` so the
@@ -104,7 +105,7 @@ async def create_permission(
     payload: PermissionCreate,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any], Depends(require_permission(Action.CREATE, ResourceType.PERMISSION))
+        SearchFilter[Any], Depends(depends_permissions(Permission, Action.CREATE))
     ],
 ) -> PermissionRead:
     service = PermissionService(session, perm_filter)
@@ -132,7 +133,7 @@ async def get_permission(
     permission_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any], Depends(require_permission(Action.READ, ResourceType.PERMISSION))
+        SearchFilter[Any], Depends(depends_permissions(Permission, Action.READ))
     ],
 ) -> PermissionRead:
     service = PermissionService(session, perm_filter)
@@ -154,7 +155,7 @@ async def delete_permission(
     permission_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any], Depends(require_permission(Action.DELETE, ResourceType.PERMISSION))
+        SearchFilter[Any], Depends(depends_permissions(Permission, Action.DELETE))
     ],
 ) -> None:
     service = PermissionService(session, perm_filter)

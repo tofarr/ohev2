@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
+from openhands.ev2.auth2.auth2_dependencies import depends_permissions
 from openhands.ev2.auth2.auth2_models import OAuthClient
 from openhands.ev2.auth2.auth2_schemas import (
     OAuthClientCreate,
@@ -53,8 +54,7 @@ from openhands.ev2.auth2.auth2_service import (
 from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.encryption.encryption_service import get_encryption_service
-from openhands.ev2.permission.permission_dependencies import require_permission
-from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/auth2", tags=["auth2"])
@@ -346,8 +346,7 @@ async def _to_read(service: Auth2Service, client: OAuthClient) -> OAuthClientRea
 async def search_clients(
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.SEARCH, ResourceType.OAUTH_CLIENT)),
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.SEARCH))
     ],
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -381,8 +380,7 @@ async def create_client(
     payload: OAuthClientCreate,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.CREATE, ResourceType.OAUTH_CLIENT)),
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.CREATE))
     ],
 ) -> OAuthClientRead:
     """Register an OAuth client with an encrypted secret + redirect URIs."""
@@ -407,8 +405,7 @@ async def get_client(
     client_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.READ, ResourceType.OAUTH_CLIENT)),
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.READ))
     ],
 ) -> OAuthClientRead:
     """Retrieve an OAuth client by id, scoped to the principal."""
@@ -431,8 +428,7 @@ async def update_client(
     payload: OAuthClientUpdate,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.UPDATE, ResourceType.OAUTH_CLIENT)),
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.UPDATE))
     ],
 ) -> OAuthClientRead:
     """Partially update an OAuth client (rename, re-secret, re-uris, disable)."""
@@ -466,8 +462,7 @@ async def delete_client(
     client_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.DELETE, ResourceType.OAUTH_CLIENT)),
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.DELETE))
     ],
 ) -> None:
     """Delete an OAuth client by id, scoped to the principal."""

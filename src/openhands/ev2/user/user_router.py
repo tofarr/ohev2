@@ -16,9 +16,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from openhands.ev2.auth2.auth2_dependencies import depends_permissions
 from openhands.ev2.db import SessionDep
-from openhands.ev2.permission.permission_dependencies import require_permission
-from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import (
     UserCreate,
@@ -56,9 +56,7 @@ def _cursor(value: str) -> uuid.UUID:
 )
 async def search_users(
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.SEARCH, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.SEARCH))],
     # `Depends()` (bare) lets FastAPI use the type annotation as the dependency
     # callable and explode the model's fields as individual query params. A
     # factory or `Annotated[..., Query()]` would NOT populate fields from query
@@ -87,9 +85,7 @@ async def search_users(
 )
 async def count_users(
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.SEARCH, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.SEARCH))],
     # See search_users: bare `Depends()` lets FastAPI explode the filter model's
     # fields as query params. Declared before `/{user_id}` so the static path
     # matches ahead of the UUID path param.
@@ -108,9 +104,7 @@ async def count_users(
 async def create_user(
     payload: UserCreate,
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.CREATE, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.CREATE))],
 ) -> UserRead:
     service = UserService(session, perm_filter)
     try:
@@ -141,9 +135,7 @@ async def create_user(
 async def get_user(
     user_id: uuid.UUID,
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.READ, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.READ))],
 ) -> UserRead:
     service = UserService(session, perm_filter)
     try:
@@ -164,9 +156,7 @@ async def update_user(
     user_id: uuid.UUID,
     payload: UserUpdate,
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.UPDATE, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.UPDATE))],
 ) -> UserRead:
     service = UserService(session, perm_filter)
     try:
@@ -197,9 +187,7 @@ async def update_user(
 async def delete_user(
     user_id: uuid.UUID,
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[User], Depends(require_permission(Action.DELETE, ResourceType.USER))
-    ],
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.DELETE))],
 ) -> None:
     service = UserService(session, perm_filter)
     try:

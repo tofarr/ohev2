@@ -1,9 +1,11 @@
 """Seed an admin user with unrestricted access to every resource type.
 
 Idempotent: re-running with the same username upserts the user (password, email,
-enabled) and skips permission grants that already exist. Safe to call on a fresh
-database, on one that already has the admin, or after adding new ResourceType
-values (it will backfill the grants the admin is missing).
+enabled) and ensures the user is a member of the ``admin`` role, whose
+``policies`` map grants :class:`Permitted` (unrestricted access) for every
+shipped resource type. Safe to call on a fresh database, on one that already has
+the admin, or after adding new resource types (re-running backfills the missing
+policies-map entries).
 
 Run via ``uv run python -m openhands.ev2.scripts.seed_admin``; credentials default from the
 ``OHEV_SEED_ADMIN_*`` environment variables, or dev defaults if those are unset.
@@ -22,7 +24,6 @@ import asyncio
 import os
 import re
 import sys
-import uuid
 from collections.abc import Iterable
 
 from sqlalchemy import select
@@ -30,9 +31,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
-from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
+from openhands.ev2.security.security_models import Permission2, Permitted, Role, RoleUser
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
+
+# Resource types governed by role policies. Mirrors the keys registered in
+# auth2_dependencies so the seeded admin role grants access to every resource.
+_ADMIN_RESOURCE_TYPES = (
+    "user",
+    "role",
+    "permission",
+    "api_key",
+    "oauth_client",
+    "cors_origin",
+)
+_ADMIN_ROLE_NAME = "admin"
 
 # Matches the RFC 5322-ish shape enforced by EmailStr loosely; the canonical
 # validation lives in the pydantic schema, but this script does not route through
@@ -107,38 +120,29 @@ async def _backfill_admin_permissions(
     session: AsyncSession,
     user: User,
 ) -> None:
-    """Grant ALL on every resource type, skipping grants that already exist.
+    """Assign an admin role granting Permitted on every resource type.
 
-    Iterating the ResourceType enum keeps the script correct as new resource
-    types land without editing this file.
+    Idempotent: re-seeding upserts the single admin role (refreshing its
+    policies map to cover all current resource types) and ensures the user is
+    a member. Adding a new resource type to ``_ADMIN_RESOURCE_TYPES`` and
+    re-running backfills the missing entry.
     """
-    existing_types = await _existing_admin_resource_types(session, user.id)
-    for resource_type in ResourceType:
-        if resource_type in existing_types:
-            continue
-        session.add(
-            Permission(
-                user_id=user.id,
-                action=Action.ALL,
-                resource_type=resource_type,
-                attributes=None,  # all attributes
-                search_filter=None,  # unrestricted (whole table in scope)
-            )
-        )
-    await session.flush()
+    role = await session.scalar(select(Role).where(Role.name == _ADMIN_ROLE_NAME))
+    desired: dict[str, Permission2] = {rt: Permitted() for rt in _ADMIN_RESOURCE_TYPES}
+    if role is None:
+        role = Role(name=_ADMIN_ROLE_NAME, policies=desired)
+        session.add(role)
+        await session.flush()
+    elif role.policies != desired:
+        role.policies = desired
+        await session.flush()
 
-
-async def _existing_admin_resource_types(
-    session: AsyncSession,
-    user_id: uuid.UUID,
-) -> set[ResourceType]:
-    """Resource types the user already has an ALL grant on."""
-    stmt = select(Permission.resource_type).where(
-        Permission.user_id == user_id,
-        Permission.action == Action.ALL,
+    existing = await session.scalar(
+        select(RoleUser).where(RoleUser.role_id == role.id, RoleUser.user_id == user.id)
     )
-    result = await session.execute(stmt)
-    return set(result.scalars().all())
+    if existing is None:
+        session.add(RoleUser(role_id=role.id, user_id=user.id))
+        await session.flush()
 
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:

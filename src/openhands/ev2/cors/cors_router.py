@@ -13,6 +13,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from openhands.ev2.auth2.auth2_dependencies import depends_permissions
+from openhands.ev2.cors.cors_models import AllowedOrigin
 from openhands.ev2.cors.cors_schemas import (
     AllowedOriginCreate,
     AllowedOriginRead,
@@ -24,8 +26,7 @@ from openhands.ev2.cors.cors_service import (
     CorsService,
 )
 from openhands.ev2.db import SessionDep
-from openhands.ev2.permission.permission_dependencies import require_permission
-from openhands.ev2.permission.permission_models import Action, ResourceType
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/cors-origins", tags=["cors-origins"])
@@ -53,8 +54,7 @@ async def _to_read(origin: Any) -> AllowedOriginRead:
 async def search_cors_origins(
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.SEARCH, ResourceType.CORS_ORIGIN)),
+        SearchFilter[Any], Depends(depends_permissions(AllowedOrigin, Action.SEARCH))
     ],
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -78,8 +78,7 @@ async def create_cors_origin(
     payload: AllowedOriginCreate,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.CREATE, ResourceType.CORS_ORIGIN)),
+        SearchFilter[Any], Depends(depends_permissions(AllowedOrigin, Action.CREATE))
     ],
 ) -> AllowedOriginRead:
     _ = perm_filter
@@ -100,8 +99,7 @@ async def delete_cors_origin(
     origin_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[Any],
-        Depends(require_permission(Action.DELETE, ResourceType.CORS_ORIGIN)),
+        SearchFilter[Any], Depends(depends_permissions(AllowedOrigin, Action.DELETE))
     ],
 ) -> None:
     _ = perm_filter

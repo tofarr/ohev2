@@ -6,8 +6,11 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from tests.unit._auth_helpers import assign_role as _assign_role
+from tests.unit._auth_helpers import make_principal as _make_principal
 
-from openhands.ev2.permission.permission_service import reset_base_permissions_cache
+from openhands.ev2.security.security_models import Permitted, ReadOnly
+from openhands.ev2.util.auth_token import create_auth_token
 
 
 class TestCreateUserRoute:
@@ -214,117 +217,63 @@ class TestDeleteUserRoute:
 class TestPermissionEnforcement:
     """Tests for the permission check on user endpoints."""
 
-    async def test_missing_auth_token_anonymous_allowed(self, app) -> None:
-        # No auth token at all → anonymous; baseline permissions grant 200.
+    async def test_missing_auth_token_anonymous_denied(self, app) -> None:
+        # No auth token at all -> anonymous; role-based authorization requires an
+        # authenticated principal with a role, so protected endpoints return 403.
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get("/users")
-        assert resp.status_code == 200
+        assert resp.status_code == 403
 
     async def test_invalid_auth_token_returns_401(self, client: AsyncClient) -> None:
         # A present-but-invalid token is a 401 (client claimed a principal).
         resp = await client.get("/users", headers={"X-API-Key": "not-a-valid-token"})
         assert resp.status_code == 401
 
-    async def test_denied_without_permission(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """With empty base permissions and no DB grant, all user endpoints return 403."""
-        from openhands.ev2.config import get_config
-
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        resp = await client.get("/users")
-        assert resp.status_code == 403
-        resp = await client.post("/users", json={"email": "x@example.com", "username": "x"})
-        assert resp.status_code == 403
-
-    async def test_allowed_with_db_permission(
+    async def test_denied_without_role(
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A per-user DB grant allows access even with empty base permissions."""
-        from openhands.ev2.config import get_config
+        """A principal with no role assigned is denied (403) on all actions."""
+        principal = await _make_principal(session, email="norole@example.com", username="norole")
+        await session.commit()
+        token = create_auth_token(principal.id)
 
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-        from openhands.ev2.permission.permission_schemas import PermissionCreate
-        from openhands.ev2.permission.permission_service import PermissionService
-        from openhands.ev2.user.user_models import User
-        from openhands.ev2.user.user_schemas import UserCreate
-        from openhands.ev2.user.user_service import UserService
-        from openhands.ev2.util.auth_token import create_auth_token
-        from openhands.ev2.util.search_filter import AllSearchFilter
-
-        # Create the principal user directly in the DB (bypassing the API,
-        # which is itself permission-guarded).
-        principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="principal@example.com", username="principal")
+        resp = await client.get("/users", headers={"X-API-Key": token})
+        assert resp.status_code == 403
+        resp = await client.post(
+            "/users",
+            json={"email": "x@example.com", "username": "x"},
+            headers={"X-API-Key": token},
         )
-        principal_id = principal.id
+        assert resp.status_code == 403
 
-        service = PermissionService(session, AllSearchFilter[Permission]())
-        await service.create(
-            PermissionCreate(
-                user_id=principal_id,
-                action=Action.SEARCH,
-                resource_type=ResourceType.USER,
-            ),
+    async def test_allowed_with_permitted_role(
+        self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A principal assigned a Permitted role for the user resource is allowed."""
+        principal = await _make_principal(
+            session, email="permitted@example.com", username="permitted"
         )
+        await _assign_role(session, principal.id, {"user": Permitted()})
         await session.commit()
 
-        # Mint a real JWE token for the principal and send it as X-API-Key.
-        token = create_auth_token(principal_id)
+        token = create_auth_token(principal.id)
         resp = await client.get("/users", headers={"X-API-Key": token})
         assert resp.status_code == 200
 
     async def test_partial_permission_denies_other_action(
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A SEARCH grant does not allow CREATE."""
-        from openhands.ev2.config import get_config
-
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-        from openhands.ev2.permission.permission_schemas import PermissionCreate
-        from openhands.ev2.permission.permission_service import PermissionService
-        from openhands.ev2.user.user_models import User
-        from openhands.ev2.user.user_schemas import UserCreate
-        from openhands.ev2.user.user_service import UserService
-        from openhands.ev2.util.auth_token import create_auth_token
-        from openhands.ev2.util.search_filter import AllSearchFilter
-
-        principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="principal@example.com", username="principal")
+        """A ReadOnly role grants SEARCH but not CREATE."""
+        principal = await _make_principal(
+            session, email="readonly@example.com", username="readonly"
         )
-        principal_id = principal.id
-
-        service = PermissionService(session, AllSearchFilter[Permission]())
-        await service.create(
-            PermissionCreate(
-                user_id=principal_id,
-                action=Action.SEARCH,
-                resource_type=ResourceType.USER,
-            ),
-        )
+        await _assign_role(session, principal.id, {"user": ReadOnly()})
         await session.commit()
 
-        token = create_auth_token(principal_id)
+        token = create_auth_token(principal.id)
         resp = await client.get("/users", headers={"X-API-Key": token})
         assert resp.status_code == 200
         resp = await client.post(
@@ -401,41 +350,17 @@ class TestLoginRoute:
         self, app, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The cookie minted by login authorizes a follow-up request via the
-        cookie fallback in get_current_user_id."""
-        from openhands.ev2.config import get_config
-
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-        from openhands.ev2.permission.permission_schemas import PermissionCreate
-        from openhands.ev2.permission.permission_service import PermissionService
-        from openhands.ev2.user.user_models import User
-        from openhands.ev2.user.user_schemas import UserCreate
-        from openhands.ev2.user.user_service import UserService
-        from openhands.ev2.util.search_filter import AllSearchFilter
-
-        principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        cookie fallback in the auth2 access-token dependency."""
+        principal = await _make_principal(
+            session, email="alice@example.com", username="alice", password="hunter2"
         )
-        principal_id = principal.id
-        psvc = PermissionService(session, AllSearchFilter[Permission]())
-        await psvc.create(
-            PermissionCreate(
-                user_id=principal_id,
-                action=Action.SEARCH,
-                resource_type=ResourceType.USER,
-            ),
-        )
+        await _assign_role(session, principal.id, {"user": Permitted()})
         await session.commit()
 
         # A bare client (no X-API-Key) that performs login then reuses the cookie.
         # The cookie is Secure, so httpx will not auto-replay it over the plain
         # http://test transport; send it explicitly via the Cookie header to
-        # exercise the cookie-fallback branch of get_current_user_id.
+        # exercise the cookie-fallback branch of depends_access_token.
         from httpx import ASGITransport, AsyncClient
 
         transport = ASGITransport(app=app)
@@ -449,35 +374,11 @@ class TestLoginRoute:
     async def test_login_bearer_token_authorizes_request(
         self, app, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The bearer-token fallback in get_current_user_id accepts the login token."""
-        from openhands.ev2.config import get_config
-
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-        from openhands.ev2.permission.permission_schemas import PermissionCreate
-        from openhands.ev2.permission.permission_service import PermissionService
-        from openhands.ev2.user.user_models import User
-        from openhands.ev2.user.user_schemas import UserCreate
-        from openhands.ev2.user.user_service import UserService
-        from openhands.ev2.util.search_filter import AllSearchFilter
-
-        principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        """The bearer-token fallback in depends_access_token accepts the login token."""
+        principal = await _make_principal(
+            session, email="alice@example.com", username="alice", password="hunter2"
         )
-        principal_id = principal.id
-        psvc = PermissionService(session, AllSearchFilter[Permission]())
-        await psvc.create(
-            PermissionCreate(
-                user_id=principal_id,
-                action=Action.SEARCH,
-                resource_type=ResourceType.USER,
-            ),
-        )
+        await _assign_role(session, principal.id, {"user": Permitted()})
         await session.commit()
 
         from httpx import ASGITransport, AsyncClient
@@ -505,33 +406,10 @@ class TestLogoutRoute:
     ) -> None:
         """After logout the session cookie is expired (max-age=0) so the
         client drops it and subsequent requests are unauthenticated."""
-        from openhands.ev2.config import get_config
-
-        get_config.cache_clear()
-        reset_base_permissions_cache()
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_0", raising=False)
-        monkeypatch.delenv("OHEV_BASE_PERMISSIONS_1", raising=False)
-        monkeypatch.setenv("OHEV_BASE_PERMISSIONS_0", "")
-
-        from openhands.ev2.permission.permission_models import Action, Permission, ResourceType
-        from openhands.ev2.permission.permission_schemas import PermissionCreate
-        from openhands.ev2.permission.permission_service import PermissionService
-        from openhands.ev2.user.user_models import User
-        from openhands.ev2.user.user_schemas import UserCreate
-        from openhands.ev2.user.user_service import UserService
-        from openhands.ev2.util.search_filter import AllSearchFilter
-
-        principal = await UserService(session, AllSearchFilter[User]()).create(
-            UserCreate(email="alice@example.com", username="alice", password="hunter2")
+        principal = await _make_principal(
+            session, email="alice@example.com", username="alice", password="hunter2"
         )
-        psvc = PermissionService(session, AllSearchFilter[Permission]())
-        await psvc.create(
-            PermissionCreate(
-                user_id=principal.id,
-                action=Action.SEARCH,
-                resource_type=ResourceType.USER,
-            ),
-        )
+        await _assign_role(session, principal.id, {"user": Permitted()})
         await session.commit()
 
         from httpx import ASGITransport, AsyncClient
