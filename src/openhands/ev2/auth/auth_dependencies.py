@@ -146,7 +146,7 @@ async def _maybe_refresh_auth2_cookie(
 
     access_id = uuid.UUID(access_id_raw)
     access_exp = _access_exp(payload)
-    drift = timedelta(seconds=cfg.idp_expire_drift_tolerance)
+    drift = timedelta(seconds=cfg.idp.expire_drift_tolerance)
 
     if access_exp is None or access_exp > datetime.now(UTC) + drift:
         # Not imminent: re-mint off the existing (synced) expiry.

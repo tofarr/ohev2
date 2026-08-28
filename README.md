@@ -99,17 +99,17 @@ legacy `auth` module until it is proven and merged. The project acts as an
 OAuth **provider** to first-party clients and as an OAuth **client** to an
 external identity provider (IdP).
 
-Required configuration (environment variables, `OHEV_` prefix):
+Required configuration (environment variables, `OHEV` prefix):
 
 | Field | Env var | Purpose |
 | --- | --- | --- |
-| `idp_url` | `OHEV_IDP_URL` | Base URL of the identity provider |
-| `idp_client_id` | `OHEV_IDP_CLIENT_ID` | Client id registered at the IdP |
-| `idp_client_secret` | `OHEV_IDP_CLIENT_SECRET` | Client secret registered at the IdP |
-| `idp_expire_drift_tolerance` | `OHEV_IDP_EXPIRE_DRIFT_TOLERANCE` | Seconds subtracted from IdP `expires_in`/`expires_at` to avoid drift bugs |
+| `idp.url` | `OHEV_IDP_URL` | Base URL of the identity provider |
+| `idp.client_id` | `OHEV_IDP_CLIENT_ID` | Client id registered at the IdP |
+| `idp.client_secret` | `OHEV_IDP_CLIENT_SECRET` | Client secret registered at the IdP |
+| `idp.expire_drift_tolerance` | `OHEV_IDP_EXPIRE_DRIFT_TOLERANCE` | Seconds subtracted from IdP `expires_in`/`expires_at` to avoid drift bugs |
 
-Optional OIDC claim overrides: `idp_user_id_field`, `idp_email_field`,
-`idp_role_field` (default to the standard `sub`, `email`, and a reserved
+Optional OIDC claim overrides: `idp.user_id_field`, `idp.email_field`,
+`idp.role_field` (default to the standard `sub`, `email`, and a reserved
 role claim). Role→permission mapping is deferred; roles are not pulled from
 scopes.
 
@@ -148,6 +148,6 @@ Expired IdP refresh tokens are pruned by a background sweep.
 * `cleanup_interval = 0` **disables** the in-process loop; drive cleanup with
   an external cron job hitting the same `delete_expired_tokens` service
   function (or a future admin endpoint).
-* `idp_delete_expired_seconds` (`OHEV_IDP_DELETE_EXPIRED_SECONDS`, default
+* `idp.delete_expired_seconds` (`OHEV_IDP_DELETE_EXPIRED_SECONDS`, default
   `86400`): rows whose `expires_at` is older than this window are deleted.
   `0` deletes any already-expired row regardless of age.

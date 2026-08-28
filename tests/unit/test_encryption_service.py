@@ -19,9 +19,11 @@ OLD_SECRET = "old-secret-key-at-least-32-bytes-long!!"
 def make_config(**overrides: object) -> AppConfig:
     """Build an AppConfig with required IdP fields filled in for tests."""
     defaults: dict[str, object] = {
-        "idp_url": "https://idp.example.com",
-        "idp_client_id": "test-client",
-        "idp_client_secret": SecretStr("test-secret"),
+        "idp": {
+            "url": "https://idp.example.com",
+            "client_id": "test-client",
+            "client_secret": SecretStr("test-secret"),
+        },
     }
     defaults.update(overrides)
     return AppConfig(**defaults)  # type: ignore[arg-type]
@@ -35,9 +37,11 @@ def config() -> AppConfig:
         decryption_keys=[
             EncryptionKeyConfig(id="old-key", value=SecretStr(OLD_SECRET)),
         ],
-        idp_url="https://idp.example.com",
-        idp_client_id="test-client",
-        idp_client_secret=SecretStr("test-secret"),
+        idp={
+            "url": "https://idp.example.com",
+            "client_id": "test-client",
+            "client_secret": SecretStr("test-secret"),
+        },
     )
 
 

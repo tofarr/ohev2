@@ -139,9 +139,10 @@ reject the change.
 * Signed cookies for sessions; OAuth flows for federated identity.
 * Federated OAuth lives in `auth2/` (alongside legacy `auth/` until merged). The
   project is an OAuth provider to first-party clients and an OAuth client to an
-  external IdP. Required config: `idp_url`, `idp_client_id`, `idp_client_secret`,
-  `idp_expire_drift_tolerance`. Optional OIDC claim overrides: `idp_user_id_field`,
-  `idp_email_field`, `idp_role_field`. Roles are NOT pulled from scopes.
+  external IdP. Required config: `idp.url`, `idp.client_id`,
+  `idp.client_secret`, `idp.expire_drift_tolerance`. Optional OIDC claim
+  overrides: `idp.user_id_field`, `idp.email_field`, `idp.role_field`. Roles
+  are NOT pulled from scopes.
 * IdP refresh tokens are stored encrypted (`encryption_service`) in
   `idp_refresh_tokens`; the IdP access token is stored encrypted in its own
   `idp_access_tokens` table, joined to the refresh row by
