@@ -38,9 +38,9 @@ class DbConfig(BaseModel):
 
     host: str = Field(default="localhost", description="Database host.")
     port: int = Field(default=5432, ge=1, le=65535, description="Database port.")
-    db_name: str = Field(default="ohev", description="Database name.")
-    username: str = Field(default="ohev", description="Database username.")
-    password: SecretStr = Field(default=SecretStr("ohev"), description="Database password.")
+    db_name: str = Field(default="ohe", description="Database name.")
+    username: str = Field(default="ohe", description="Database username.")
+    password: SecretStr = Field(default=SecretStr("ohe"), description="Database password.")
 
     @property
     def database_url(self) -> str:

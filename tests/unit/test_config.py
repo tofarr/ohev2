@@ -107,9 +107,9 @@ class TestDbConfig:
         db = DbConfig()
         assert db.host == "localhost"
         assert db.port == 5432
-        assert db.db_name == "ohev"
-        assert db.username == "ohev"
-        assert db.password.get_secret_value() == "ohev"
+        assert db.db_name == "ohe"
+        assert db.username == "ohe"
+        assert db.password.get_secret_value() == "ohe"
 
     def test_database_url_assembles_from_fields(self) -> None:
         db = DbConfig(

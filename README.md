@@ -102,9 +102,9 @@ structured `db_config` fields rather than a single connection string:
 | --- | --- | --- | --- |
 | `db_config.host` | `OHE_DB_CONFIG_HOST` | `localhost` | Database host |
 | `db_config.port` | `OHE_DB_CONFIG_PORT` | `5432` | Database port |
-| `db_config.db_name` | `OHE_DB_CONFIG_DB_NAME` | `ohev` | Database name |
-| `db_config.username` | `OHE_DB_CONFIG_USERNAME` | `ohev` | Database username |
-| `db_config.password` | `OHE_DB_CONFIG_PASSWORD` | `ohev` | Database password |
+| `db_config.db_name` | `OHE_DB_CONFIG_DB_NAME` | `ohe` | Database name |
+| `db_config.username` | `OHE_DB_CONFIG_USERNAME` | `ohe` | Database username |
+| `db_config.password` | `OHE_DB_CONFIG_PASSWORD` | `ohe` | Database password |
 
 To start a local PostgreSQL instance for development, run (with the same
 values you set in your `.env` / environment):
@@ -123,6 +123,14 @@ Then apply migrations and start the app:
 ```bash
 uv run alembic upgrade head
 uv run uvicorn openhands.ev2.app:app --reload
+```
+
+Seed an admin user (credentials default from `OHE_SEED_ADMIN_*` env vars, or dev
+defaults). Idempotent — re-running upserts the user and ensures the `admin` role
+grants unrestricted access to every resource type:
+
+```bash
+uv run python -m openhands.ev2.scripts.seed_admin
 ```
 
 ## Federated authentication
