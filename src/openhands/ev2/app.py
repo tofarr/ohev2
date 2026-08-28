@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -23,6 +24,11 @@ from openhands.ev2.db import get_session_factory
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.role_user_router import router as role_user_router
 from openhands.ev2.user.user_router import router as user_router
+
+# Sentinel IdP URL that selects the built-in dev identity provider
+# (auth.dev_router). When idp.url == this value the dev IdP router is mounted so
+# the system works out of the box without configuring an external IdP.
+_DEV_IDP_URL = "/auth/dev"
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,14 @@ def create_app() -> FastAPI:
     app.include_router(role_router)
     app.include_router(role_user_router)
     app.include_router(user_router)
+    # Mount the built-in dev identity provider when the configured IdP URL is the
+    # dev sentinel. Read the env var directly (rather than get_config()) so app
+    # construction does not require the full AppConfig env to be present at
+    # import time; the dev router handlers resolve the full config per request.
+    if os.environ.get("OHE_IDP_URL", _DEV_IDP_URL) == _DEV_IDP_URL:
+        from openhands.ev2.auth.dev_router import router as dev_router
+
+        app.include_router(dev_router)
     return app
 
 

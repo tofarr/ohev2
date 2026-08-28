@@ -155,6 +155,21 @@ class AuthService:
         if self._owns_client:
             await self._http.aclose()
 
+    def _idp_base(self) -> str:
+        """Resolve the IdP base URL, making a relative ``idp.url`` absolute.
+
+        ``idp.url`` may be a path-only sentinel (``/auth/dev``) that selects the
+        built-in dev identity provider (see ``auth.dev_router``). A relative
+        URL works for browser redirects (the browser resolves it against the
+        request origin) but not for the server-side ``httpx`` token calls, so it
+        is joined against the configured public ``base_url`` here. Absolute
+        URLs (``http(s)://…``) are returned unchanged.
+        """
+        url = self._idp.url
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+        return f"{self._cfg.base_url.rstrip('/')}/{url.lstrip('/')}"
+
     # ------------------------------------------------------------------ #
     # /authorize — build the IdP redirect URL.
     # ------------------------------------------------------------------ #
@@ -211,7 +226,7 @@ class AuthService:
             "code_challenge": idp_challenge,
             "code_challenge_method": "S256",
         }
-        return _join_url(self._idp.url, self._idp.authorize_path, params)
+        return _join_url(self._idp_base(), self._idp.authorize_path, params)
 
     # ------------------------------------------------------------------ #
     # /callback — exchange the IdP code, provision the user, mint our code.
@@ -542,7 +557,7 @@ class AuthService:
         return await self._idp_token_post(data)
 
     async def _idp_token_post(self, data: dict[str, str]) -> dict[str, Any]:
-        url = _join_url(self._idp.url, self._idp.token_path)
+        url = _join_url(self._idp_base(), self._idp.token_path)
         try:
             resp = await self._http.post(url, data=data)
         except httpx.HTTPError as exc:

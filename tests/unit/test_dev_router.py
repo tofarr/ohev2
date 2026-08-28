@@ -1,0 +1,535 @@
+"""Route + service tests for the built-in dev identity provider (/auth/dev).
+
+The dev router is mounted only when ``OHE_IDP_URL == "/auth/dev"``; these tests
+build a dedicated app fixture with that config so the dev IdP endpoints are live,
+then exercise them directly via the ASGI client and the DevIdpService.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from collections.abc import AsyncGenerator
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from openhands.ev2.app import create_app
+from openhands.ev2.auth.auth_models import OAuthClient
+from openhands.ev2.auth.dev_router import DevIdpService
+from openhands.ev2.config import get_config
+from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
+from openhands.ev2.db import Base, dispose_engine_factory
+from openhands.ev2.db import get_session as _app_get_session
+from openhands.ev2.user.user_models import User  # noqa: F401
+from openhands.ev2.util.password import hash_password
+
+_TEST_DB_URL = "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev"
+_DEV_USER_USERNAME = "dev-user"
+_DEV_USER_PASSWORD = "dev-pass"
+
+
+def _set_dev_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point AppConfig at the test DB and select the dev IdP."""
+    get_config.cache_clear()
+    monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
+    monkeypatch.setenv("OHE_DB_CONFIG_HOST", "localhost")
+    monkeypatch.setenv("OHE_DB_CONFIG_PORT", "5432")
+    monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", "ohev")
+    monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", "ohev")
+    # Select the built-in dev identity provider.
+    monkeypatch.setenv("OHE_IDP_URL", "/auth/dev")
+    monkeypatch.setenv("OHE_IDP_CLIENT_ID", "ohe")
+    monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "change-me")
+    monkeypatch.setenv("OHE_BASE_URL", "http://test")
+    monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
+
+
+async def _seed_dev_user(engine: create_async_engine) -> uuid.UUID:
+    """Insert an enabled user with a hashed password for /authorize auth."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO users (id, email, username, enabled, password) "
+                "VALUES (:id, :email, :username, true, :password) "
+                "ON CONFLICT (username) DO UPDATE SET password = EXCLUDED.password, "
+                "enabled = true"
+            ),
+            {
+                "id": uuid.UUID("11111111-1111-1111-1111-111111111111"),
+                "email": "dev@example.com",
+                "username": _DEV_USER_USERNAME,
+                "password": hash_password(_DEV_USER_PASSWORD),
+            },
+        )
+        await s.commit()
+    return uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+
+@pytest_asyncio.fixture
+async def dev_engine(monkeypatch: pytest.MonkeyPatch):
+    _set_dev_config(monkeypatch)
+    eng = create_async_engine(_TEST_DB_URL)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    await _seed_dev_user(eng)
+    yield eng
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await eng.dispose()
+    await dispose_engine_factory()
+
+
+@pytest_asyncio.fixture
+async def dev_app(dev_engine, monkeypatch: pytest.MonkeyPatch):
+    _set_dev_config(monkeypatch)
+    factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+
+    async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
+        async with factory() as s:
+            yield s
+
+    application = create_app()
+    application.dependency_overrides[_app_get_session] = _override_get_session
+    yield application
+    application.dependency_overrides.clear()
+    await dispose_engine_factory()
+
+
+@pytest_asyncio.fixture
+async def dev_client(dev_app) -> AsyncGenerator[AsyncClient, None]:
+    transport = ASGITransport(app=dev_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+def _basic_auth(username: str, password: str) -> str:
+    raw = f"{username}:{password}".encode()
+    return "Basic " + base64.b64encode(raw).decode()
+
+
+def _expected_callback() -> str:
+    return f"{get_config().base_url.rstrip('/')}/auth/callback"
+
+
+class TestDevAuthorize:
+    async def test_authorize_returns_401_without_credentials(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+        assert resp.headers["www-authenticate"].lower().startswith("basic")
+
+    async def test_authorize_returns_401_with_bad_password(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, "wrong")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+
+    async def test_authorize_returns_401_for_unknown_user(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            headers={"Authorization": _basic_auth("nope", _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+
+    async def test_authorize_rejects_unknown_client(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "not-ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+
+    async def test_authorize_rejects_bad_redirect_uri(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": "https://evil.example.com/cb",
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+
+    async def test_authorize_redirects_with_code(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+                "state": "client-state",
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        location = resp.headers["location"]
+        assert location.startswith(f"{_expected_callback()}/?")
+        qs = parse_qs(urlparse(location).query)
+        assert "code" in qs
+        assert qs["state"] == ["client-state"]
+
+
+class TestDevToken:
+    async def _get_code(self, client: AsyncClient) -> str:
+        resp = await client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        return parse_qs(urlparse(resp.headers["location"]).query)["code"][0]
+
+    async def test_token_exchange_happy_path(self, dev_client: AsyncClient) -> None:
+        code = await self._get_code(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _expected_callback(),
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["access_token"]
+        assert body["refresh_token"]
+        assert body["token_type"] == "Bearer"
+        assert body["expires_in"] > 0
+        assert body["refresh_expires_in"] > 0
+        # id_token carries sub (local user id) + email for JIT provisioning.
+        id_token = body["id_token"]
+        payload_b64 = id_token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+        assert claims["sub"] == "11111111-1111-1111-1111-111111111111"
+        assert claims["email"] == "dev@example.com"
+
+    async def test_token_rejects_bad_client_secret(self, dev_client: AsyncClient) -> None:
+        code = await self._get_code(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _expected_callback(),
+                "client_id": "ohe",
+                "client_secret": "wrong",
+            },
+        )
+        assert resp.status_code == 401
+
+    async def test_token_rejects_redirect_uri_mismatch(self, dev_client: AsyncClient) -> None:
+        code = await self._get_code(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "https://evil.example.com/cb",
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 400
+
+    async def test_token_rejects_garbage_code(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": "not-a-real-code",
+                "redirect_uri": _expected_callback(),
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 400
+
+    async def test_token_rejects_unsupported_grant(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "password",
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 400
+
+
+class TestDevRefresh:
+    async def _get_tokens(self, client: AsyncClient) -> dict[str, str]:
+        resp = await client.get(
+            "/auth/dev/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "ohe",
+                "redirect_uri": _expected_callback(),
+            },
+            headers={"Authorization": _basic_auth(_DEV_USER_USERNAME, _DEV_USER_PASSWORD)},
+            follow_redirects=False,
+        )
+        code = parse_qs(urlparse(resp.headers["location"]).query)["code"][0]
+        tok = await client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _expected_callback(),
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert tok.status_code == 200, tok.text
+        return tok.json()
+
+    async def test_refresh_at_token_endpoint(self, dev_client: AsyncClient) -> None:
+        tokens = await self._get_tokens(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["access_token"]
+        assert body["refresh_token"]
+        assert body["id_token"]
+
+    async def test_refresh_at_refresh_endpoint(self, dev_client: AsyncClient) -> None:
+        tokens = await self._get_tokens(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/refresh",
+            data={
+                "refresh_token": tokens["refresh_token"],
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["access_token"]
+        assert body["refresh_token"]
+
+    async def test_refresh_rejects_bad_client(self, dev_client: AsyncClient) -> None:
+        tokens = await self._get_tokens(dev_client)
+        resp = await dev_client.post(
+            "/auth/dev/refresh",
+            data={
+                "refresh_token": tokens["refresh_token"],
+                "client_id": "ohe",
+                "client_secret": "wrong",
+            },
+        )
+        assert resp.status_code == 401
+
+    async def test_refresh_rejects_garbage_token(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/refresh",
+            data={
+                "refresh_token": "not-a-real-refresh-token",
+                "client_id": "ohe",
+                "client_secret": "change-me",
+            },
+        )
+        assert resp.status_code == 400
+
+
+class TestDevIdpServicePkce:
+    """Unit tests for PKCE verification in the DevIdpService."""
+
+    async def test_pkce_s256_verifier_accepted(
+        self, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import hashlib
+
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        _set_dev_config(monkeypatch)
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        verifier = "v" * 64
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        async with factory() as session:
+            service = DevIdpService(session)
+            enc = get_encryption_service()
+            code = enc.create_jwe_token(
+                {
+                    "sub": "11111111-1111-1111-1111-111111111111",
+                    "ttyp": "dev_authorization_code",
+                    "jti": str(uuid.uuid4()),
+                    "email": "dev@example.com",
+                    "cid": "ohe",
+                    "ruri": _expected_callback(),
+                    "cc": challenge,
+                    "ccm": "S256",
+                },
+                expires_in=__import__("datetime").timedelta(minutes=5),
+            )
+            resp = await service.exchange_code(
+                code=code,
+                redirect_uri=_expected_callback(),
+                client_id="ohe",
+                client_secret="change-me",
+                code_verifier=verifier,
+            )
+            assert resp["access_token"]
+
+    async def test_pkce_wrong_verifier_rejected(
+        self, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import hashlib
+
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        _set_dev_config(monkeypatch)
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        verifier = "v" * 64
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        async with factory() as session:
+            service = DevIdpService(session)
+            enc = get_encryption_service()
+            code = enc.create_jwe_token(
+                {
+                    "sub": "11111111-1111-1111-1111-111111111111",
+                    "ttyp": "dev_authorization_code",
+                    "jti": str(uuid.uuid4()),
+                    "email": "dev@example.com",
+                    "cid": "ohe",
+                    "ruri": _expected_callback(),
+                    "cc": challenge,
+                    "ccm": "S256",
+                },
+                expires_in=__import__("datetime").timedelta(minutes=5),
+            )
+            from openhands.ev2.auth.dev_router import InvalidGrantError
+
+            with pytest.raises(InvalidGrantError):
+                await service.exchange_code(
+                    code=code,
+                    redirect_uri=_expected_callback(),
+                    client_id="ohe",
+                    client_secret="change-me",
+                    code_verifier="wrong-verifier",
+                )
+
+
+class TestAuthServiceDevUrlResolution:
+    """The AuthService resolves a relative idp.url against base_url for httpx."""
+
+    async def test_build_authorize_redirect_uses_absolute_dev_url(
+        self, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openhands.ev2.auth.auth_models import OAuthClientRedirectUri
+        from openhands.ev2.auth.auth_service import AuthService
+
+        _set_dev_config(monkeypatch)
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        async with factory() as session:
+            client = OAuthClient(
+                client_id="ohe",
+                client_secret="x",
+                name="dev",
+                enabled=True,
+            )
+            session.add(client)
+            await session.flush()
+            session.add(
+                OAuthClientRedirectUri(client_id=client.id, uri="https://app.example.com/cb")
+            )
+            await session.flush()
+            service = AuthService(session)
+            url = await service.build_authorize_redirect(
+                client_id="ohe",
+                redirect_uri="https://app.example.com/cb",
+                state=None,
+                scope=None,
+                code_challenge=None,
+                code_challenge_method=None,
+                callback_url=f"{get_config().base_url}/auth/callback",
+                response_type="code",
+            )
+            await service.aclose()
+        # The relative /auth/dev is resolved against base_url (http://test).
+        assert url.startswith("http://test/auth/dev/authorize?")
+
+    async def test_idp_base_resolves_relative(
+        self, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openhands.ev2.auth.auth_service import AuthService
+
+        _set_dev_config(monkeypatch)
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        async with factory() as session:
+            service = AuthService(session)
+            assert service._idp_base() == "http://test/auth/dev"
+            await service.aclose()
+
+    async def test_idp_base_passes_absolute_through(
+        self, dev_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openhands.ev2.auth.auth_service import AuthService
+
+        _set_dev_config(monkeypatch)
+        monkeypatch.setenv("OHE_IDP_URL", "https://real-idp.example.com")
+        get_config.cache_clear()
+        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        async with factory() as session:
+            service = AuthService(session)
+            assert service._idp_base() == "https://real-idp.example.com"
+            await service.aclose()
