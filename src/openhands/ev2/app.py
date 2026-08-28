@@ -15,13 +15,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from openhands.ev2 import __version__
-from openhands.ev2.auth.auth_router import router as auth_router
 from openhands.ev2.auth2.auth2_router import router as auth2_router
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
-from openhands.ev2.permission.permission_router import router as permission_router
 from openhands.ev2.user.user_router import router as user_router
 
 logger = logging.getLogger(__name__)
@@ -85,11 +83,9 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(auth_router)
     app.include_router(auth2_router)
     app.include_router(cors_router)
     app.include_router(user_router)
-    app.include_router(permission_router)
     return app
 
 

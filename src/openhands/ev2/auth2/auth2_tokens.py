@@ -1,4 +1,4 @@
-"""Service layer for the auth feature.
+"""Token issuance, validation, and rotation for the auth2 feature.
 
 :meth:`AuthService.authenticate` is the single entry point that converts a
 JWE-encoded token string into an :class:`AuthToken`. Per-type validity:
@@ -9,10 +9,12 @@ JWE-encoded token string into an :class:`AuthToken`. Per-type validity:
   user must be enabled.
 * REFRESH_TOKEN — the token's ``jti`` must match a live ``refresh_tokens``
   row, and the user must be enabled. (Refresh tokens are not accepted by
-  ``authenticate`` for general requests; they are exchanged at ``/auth/refresh``.)
+  ``authenticate`` for general requests; they are exchanged at the refresh
+  endpoint.)
 
 Cookie re-minting (sliding session) and refresh-token rotation are handled
-here so the logic is testable without HTTP.
+here so the logic is testable without HTTP. This module is the canonical home
+for token primitives formerly in the legacy ``auth`` package.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_models import ApiKey, AuthToken, RefreshToken, TokenType
+from openhands.ev2.auth2.auth2_models import ApiKey, AuthToken, RefreshToken, TokenType
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
 from openhands.ev2.user.user_models import User
@@ -148,8 +150,6 @@ class AuthService:
         if user is None or not user.enabled:
             raise InvalidTokenError("user not found or disabled")
 
-        # The encryption layer does not enforce exp; check it here. datetime.max
-        # (tokens with no exp, e.g. a no-expiry API key) never expires by claim.
         if exp <= _now():
             raise InvalidTokenError("token expired")
 
@@ -186,19 +186,14 @@ class AuthService:
         jti = self._jti(payload)
         user_id = self._user_id(payload)
 
-        # jti is unique but not the PK, so use a query rather than session.get().
         old = await self._load_refresh_row(jti)
         if old is None or not old.enabled or old.expires_at <= _now():
             raise InvalidTokenError("refresh token revoked or expired")
 
-        # Invalidate the old row; a successor jti is recorded for the family.
         successor_jti = uuid.uuid4()
         old.enabled = False
         old.replaced_by = successor_jti
 
-        # Sliding expiry capped by the absolute TTL measured from the row's
-        # creation. ``created_at`` may be timezone-naive if the server returns
-        # naive now(); normalize both to naive-UTC for the comparison.
         cap = old.created_at + timedelta(seconds=self._cfg.auth_refresh_token_ttl_seconds)
         sliding = _now() + self._refresh_sliding()
         new_expires_at = sliding if sliding <= cap else cap

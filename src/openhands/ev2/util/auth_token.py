@@ -1,14 +1,9 @@
-"""Backwards-compat shim for the legacy ``create_auth_token`` / ``extract_user_id``.
+"""Token mint/extract helpers for tests and bootstrap paths.
 
-The auth package (`openhands.ev2.auth.auth_service.AuthService`) is now the canonical
-entry point for issuing and validating tokens. This module remains so older
-callers that only need to mint or read an opaque token without going through
-the DB-backed validity checks can do so.
-
-`create_auth_token` mints a COOKIE-type JWE token (the same shape the
-``/auth/login`` endpoint issues) using only the EncryptionService — no DB
+``create_auth_token`` mints a COOKIE-type JWE token (the same shape the
+``/auth2`` callback endpoint issues) using only the EncryptionService — no DB
 session is required, so it is safe to call from setup paths that have no
-request-scoped session. `extract_user_id` decrypts and returns the ``sub``
+request-scoped session. ``extract_user_id`` decrypts and returns the ``sub``
 claim without DB or user-enabled checks — it is a *transport* decode, not
 authentication; use :meth:`AuthService.authenticate` for real auth.
 """
@@ -17,9 +12,11 @@ from __future__ import annotations
 
 import uuid
 
-from openhands.ev2.auth.auth_service import _SUB_CLAIM, _TYP_CLAIM, InvalidTokenError
 from openhands.ev2.config import get_config
 from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+_SUB_CLAIM = "sub"
+_TYP_CLAIM = "ttyp"
 
 
 def create_auth_token(
@@ -58,7 +55,3 @@ def extract_user_id(token: str) -> uuid.UUID | None:
         return uuid.UUID(sub)
     except ValueError:
         return None
-
-
-# Re-export for callers that import it from here.
-_ = InvalidTokenError

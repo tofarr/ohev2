@@ -50,12 +50,12 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
     IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
+    TokenType,
 )
 from openhands.ev2.config import AppConfig, IdpConfig, get_config
 from openhands.ev2.encryption.encryption_service import (

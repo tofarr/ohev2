@@ -21,10 +21,6 @@ def openapi_spec(app: FastAPI) -> dict[str, object]:
 
 _PUBLIC_PATHS = {
     "/health",
-    "/auth/login",
-    "/auth/logout",
-    "/auth/token",
-    "/auth/refresh",
     # auth2 OAuth entry points — public by design (they mint credentials).
     "/auth2/authorize",
     "/auth2/callback",
@@ -81,10 +77,10 @@ def test_protected_endpoints_carry_security(
         assert "BearerAuth" in scheme_names
 
 
-def test_health_and_login_are_public(openapi_spec: dict[str, object]) -> None:
+def test_health_and_auth2_token_endpoints_are_public(openapi_spec: dict[str, object]) -> None:
     paths = openapi_spec["paths"]  # type: ignore[index]
     assert not paths["/health"]["get"].get("security")  # type: ignore[index]
-    assert not paths["/auth/login"]["post"].get("security")  # type: ignore[index]
-    assert not paths["/auth/token"]["post"].get("security")  # type: ignore[index]
-    assert not paths["/auth/refresh"]["post"].get("security")  # type: ignore[index]
-    assert not paths["/auth/logout"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth2/authorize"]["get"].get("security")  # type: ignore[index]
+    assert not paths["/auth2/callback"]["get"].get("security")  # type: ignore[index]
+    assert not paths["/auth2/token"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth2/refresh"]["post"].get("security")  # type: ignore[index]

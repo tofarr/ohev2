@@ -1,10 +1,8 @@
 """FastAPI dependencies for federated (auth2) auth + authorization resolution.
 
-This module is the successor to :mod:`openhands.ev2.auth.auth_dependencies` and
-:mod:`openhands.ev2.permission.permission_dependencies`. It resolves the
-authenticated principal from a federated credential, caches the per-request
-work so subsequent dependencies in the same request reuse it, and provides
-both role-based and policy-based authorization guards.
+This module resolves the authenticated principal from a federated credential,
+caches the per-request work so subsequent dependencies in the same request reuse
+it, and provides both role-based and policy-based authorization guards.
 
 Credential resolution priority:
 
@@ -37,8 +35,8 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_models import AuthToken
-from openhands.ev2.auth.auth_service import AuthService, InvalidTokenError
+from openhands.ev2.auth2.auth2_models import AuthToken
+from openhands.ev2.auth2.auth2_tokens import AuthService, InvalidTokenError
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.security.security_models import Action, Permission2, Role, RoleUser
@@ -412,18 +410,15 @@ def register_resource_policy(model: type, resource_type: str) -> None:
 
 
 # Register every shipped resource at import time so the mapping is populated
-# before any request runs. The resource-type names mirror the legacy
-# ``ResourceType`` enum values (lowercased) for continuity.
-from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
+# before any request runs. Resource-type names are lowercased resource nouns.
+from openhands.ev2.auth2.auth2_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth2.auth2_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
-from openhands.ev2.permission.permission_models import Permission as _Permission  # noqa: E402
 from openhands.ev2.security.security_models import Role as _Role  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
 
 register_resource_policy(_User, "user")
 register_resource_policy(_Role, "role")
-register_resource_policy(_Permission, "permission")
 register_resource_policy(_ApiKey, "api_key")
 register_resource_policy(_OAuthClient, "oauth_client")
 register_resource_policy(_AllowedOrigin, "cors_origin")

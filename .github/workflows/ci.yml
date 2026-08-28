@@ -55,21 +55,16 @@ jobs:
       - name: Run Quint tests
         run: |
           quint test specs/sandbox.qnt --main=sandbox
-          quint test specs/auth.qnt --main=auth
           quint test specs/rest.qnt --main=rest
           quint test specs/encryption.qnt --main=encryption
           quint test specs/user.qnt --main=user
-          quint test specs/permission.qnt --main=permission
           quint test specs/auth2.qnt --main=auth2
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
-          quint run specs/auth.qnt --main=auth --invariant=jtiUniqueInvariant --max-steps=100
           quint run specs/encryption.qnt --main=encryption --invariant=encryptionKeyInDecryptionKeys --max-steps=100
           quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100
           quint run specs/user.qnt --main=user --invariant=userEmailsUnique --max-steps=100
-          quint run specs/permission.qnt --main=permission --invariant=permissionIdsUnique --max-steps=100
-          quint run specs/permission.qnt --main=permission --invariant=permissionsReferenceValidUsers --max-steps=100
           quint run specs/auth2.qnt --main=auth2 --invariant=codeConsumedOnceInvariant --max-steps=100
           quint run specs/auth2.qnt --main=auth2 --invariant=cleanupOnlyExpiredInvariant --max-steps=100
           quint run specs/auth2.qnt --main=auth2 --invariant=cookieFlowNeverCodedInvariant --max-steps=100
