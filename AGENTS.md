@@ -143,8 +143,20 @@ reject the change.
   `idp_expire_drift_tolerance`. Optional OIDC claim overrides: `idp_user_id_field`,
   `idp_email_field`, `idp_role_field`. Roles are NOT pulled from scopes.
 * IdP refresh tokens are stored encrypted (`encryption_service`) in
-  `idp_refresh_tokens`; the IdP access token is never exposed to clients — a
-  short-lived local JWE is minted instead.
+  `idp_refresh_tokens`; the IdP access token is stored encrypted in its own
+  `idp_access_tokens` table, joined to the refresh row by
+  `refresh_token_id`. Both expiries are synced to the IdP response (with the
+  drift tolerance subtracted). The IdP access token is never exposed to
+  clients - a short-lived local JWE is minted instead. The session cookie
+  (cookie flow) carries the access row id + expiry so the auth dependency
+  can detect imminent expiry and trigger a server-side refresh.
+* Refresh of an IdP token is gated by `SELECT ... FOR UPDATE` with
+  `SET LOCAL lock_timeout` (config: `idp_refresh_lock_timeout_seconds`) so
+  multiple processes do not refresh the same token at once. On lock timeout
+  the cookie path keeps the existing cookie; the explicit `/auth2/refresh`
+  endpoint returns 409. After acquiring the lock the access row is
+  re-checked: if its expiry is now in the future another process already
+  refreshed it and the IdP call is skipped.
 * Background cleanup of expired IdP refresh tokens: `cleanup_interval` (non-zero)
   runs an in-process `asyncio` loop in the app lifespan; `cleanup_interval = 0`
   disables it and cleanup must be driven by an external scheduler (cron). See

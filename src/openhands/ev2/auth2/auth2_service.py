@@ -8,23 +8,31 @@ The project acts as a federated OAuth proxy:
    client context (client id, redirect uri, client state, PKCE challenge).
 2. ``/auth2/callback`` exchanges the IdP code for IdP tokens, extracts the
    user identity from the id_token (or refresh-token JWT), JIT-provisions or
-   looks up the local user, persists the encrypted IdP refresh token, and
-   mints a short-lived authorization code (JWE) that the client exchanges at
-   ``/auth2/token``. A session cookie is also set so browser flows work without
-   a second round trip.
+   looks up the local user, persists the encrypted IdP refresh *and* access
+   tokens (synced expiries), and mints a short-lived authorization code (JWE)
+   that the client exchanges at ``/auth2/token``. A session cookie is also set
+   so browser flows work without a second round trip.
 3. ``/auth2/token`` exchanges the authorization code for our access + refresh
    tokens, validating PKCE and the client secret.
 4. ``/auth2/refresh`` rotates the access + refresh pair by refreshing the IdP
-   refresh token and re-persisting it.
+   refresh token and re-persisting both rows. The refresh is gated by a
+   ``SELECT ... FOR UPDATE`` row lock (with a lock timeout) so concurrent
+   processes do not refresh the same IdP token simultaneously; a waiter that
+   acquires the lock re-checks the row and skips the IdP call if another
+   process already refreshed it.
 
 Access tokens are self-contained JWEs (``ttyp: access_token``) so the existing
-:func:`get_current_user_id` dependency authenticates them unchanged. Refresh
-tokens are JWEs (``ttyp: idp_refresh_token``) carrying the ``idp_refresh_tokens``
-row id; only the auth2 refresh endpoint accepts them.
+:func:`get_current_user_id` dependency authenticates them unchanged; their
+``exp`` is synced to the backing IdP access-token row's expiry. Refresh tokens
+are JWEs (``ttyp: idp_refresh_token``) carrying the ``idp_refresh_tokens`` row
+id; only the auth2 refresh endpoint accepts them. The cookie flow mints a JWE
+session cookie (``ttyp: cookie``) carrying the access-token row id + expiry so
+the auth dependency can auto-refresh it server-side when it is about to expire
+(mirroring what a standard OAuth client does at ``/auth2/refresh``).
 
 All IdP HTTP calls go through :class:`httpx.AsyncClient`; tests inject a mock
-transport. Sensitive values (IdP refresh token, client secret) are encrypted at
-rest via the encryption service (AGENTS.md §9).
+transport. Sensitive values (IdP refresh token, IdP access token, client
+secret) are encrypted at rest via the encryption service (AGENTS.md §9).
 """
 
 from __future__ import annotations
@@ -38,11 +46,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
+    IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
@@ -67,7 +77,9 @@ _REDIRECT_URI_CLAIM = "ruri"
 _STATE_CLAIM = "st"
 _CODE_CHALLENGE_CLAIM = "cc"
 _CODE_METHOD_CLAIM = "ccm"
-_ROW_ID_CLAIM = "rid"
+_ROW_ID_CLAIM = "rid"  # idp_refresh_tokens row id
+_ACCESS_ID_CLAIM = "aid"  # idp_access_tokens row id
+_ACCESS_EXP_CLAIM = "axp"  # access-token expiry (epoch seconds), for cookie sync
 _RESPONSE_TYPE_CLAIM = "rtyp"
 
 # Supported response_type values for the provider-facing authorize request.
@@ -102,6 +114,14 @@ class InvalidGrantError(Auth2Error):
 
 class IdpError(Auth2Error):
     """The identity provider returned an error or an unusable response."""
+
+
+class RefreshLockTimeoutError(Auth2Error):
+    """The refresh-row lock could not be acquired within the timeout.
+
+    A concurrent refresh is in progress; the caller should retry or
+    re-authenticate rather than block indefinitely.
+    """
 
 
 def _now() -> datetime:
@@ -218,14 +238,15 @@ class Auth2Service:
             callback_url=callback_url,
         )
         user = await self._provision_user(idp_tokens)
-        row = await self._persist_idp_refresh(user.id, idp_tokens)
+        refresh_row, access_row = await self._persist_idp_tokens(user.id, idp_tokens)
 
         response_type = pending["response_type"]
         auth_code: str | None = None
         if response_type == _RESPONSE_TYPE_CODE:
             auth_code = self._mint_auth_code(
                 user_id=user.id,
-                row_id=row.id,
+                row_id=refresh_row.id,
+                access_id=access_row.id,
                 client_id=pending["client_id"],
                 redirect_uri=pending["redirect_uri"],
                 client_code_challenge=pending["client_code_challenge"],
@@ -233,13 +254,15 @@ class Auth2Service:
             )
         return CallbackContext(
             user_id=user.id,
-            row_id=row.id,
+            row_id=refresh_row.id,
+            access_id=access_row.id,
+            access_expires_at=access_row.expires_at,
             client_id=pending["client_id"],
             redirect_uri=pending["redirect_uri"],
             client_state=pending["client_state"],
             response_type=response_type,
             auth_code=auth_code,
-            expires_in=self._access_ttl_seconds(),
+            expires_in=_seconds_until(access_row.expires_at),
         )
 
     # ------------------------------------------------------------------ #
@@ -274,10 +297,13 @@ class Auth2Service:
         )
         user_id = _uuid(payload, _SUB_CLAIM)
         row_id = _uuid(payload, _ROW_ID_CLAIM)
-        row = await self._load_refresh_row(row_id)
-        if row is None or row.user_id != user_id:
+        access_id = _uuid(payload, _ACCESS_ID_CLAIM)
+        refresh_row, access_row = await self._load_token_rows(row_id, access_id)
+        if refresh_row is None or refresh_row.user_id != user_id:
             raise InvalidGrantError("stale authorization code")
-        return await self._mint_token_pair(user_id, row)
+        if access_row is None or access_row.refresh_token_id != refresh_row.id:
+            raise InvalidGrantError("stale authorization code")
+        return await self._mint_token_pair(user_id, refresh_row, access_row)
 
     # ------------------------------------------------------------------ #
     # /refresh — rotate the access + refresh pair via the IdP.
@@ -292,8 +318,18 @@ class Auth2Service:
     ) -> TokenPair:
         """Rotate the access + refresh pair by refreshing the IdP token.
 
+        This is the explicit client-facing refresh grant (``/auth2/refresh``):
+        the client decided its access token is about to expire and is
+        requesting a fresh pair, so the IdP refresh is always performed. The
+        IdP refresh is gated by a ``SELECT ... FOR UPDATE`` row lock so
+        concurrent processes do not refresh the same IdP token at once; after
+        acquiring the lock the row is re-checked, and if another process
+        already refreshed it (expiry now in the future) the IdP call is
+        skipped and the existing rows are reused. On lock timeout the refresh
+        is abandoned with :class:`RefreshLockTimeoutError`.
+
         Raises :class:`InvalidClientError` / :class:`InvalidGrantError` /
-        :class:`IdpError`.
+        :class:`IdpError` / :class:`RefreshLockTimeoutError`.
         """
         await self._authenticate_client(client_id, client_secret)
         payload = self._decrypt(refresh_token)
@@ -301,21 +337,16 @@ class Auth2Service:
             raise InvalidGrantError("not a refresh token")
         row_id = _uuid(payload, _ROW_ID_CLAIM)
         user_id = _uuid(payload, _SUB_CLAIM)
-        row = await self._load_refresh_row(row_id)
-        if row is None or row.user_id != user_id:
+        refresh_row, access_row = await self._lock_token_rows(row_id)
+        if refresh_row is None or refresh_row.user_id != user_id:
             raise InvalidGrantError("refresh token not recognized")
-        if row.expires_at <= _now():
+        if refresh_row.expires_at <= _now():
             raise InvalidGrantError("refresh token expired")
+        if access_row is None:
+            raise InvalidGrantError("refresh token not recognized")
 
-        idp_refresh = self._enc.decrypt_value(row.refresh_token)
-        idp_tokens = await self._refresh_with_idp(idp_refresh)
-        # Update the row with the new IdP refresh token (if the IdP rotated it)
-        # and its expiry.
-        new_idp_refresh = idp_tokens.get("refresh_token") or idp_refresh
-        row.refresh_token = self._enc.encrypt_value(new_idp_refresh)
-        row.expires_at = _idp_expiry(idp_tokens, self._cfg.idp_expire_drift_tolerance)
-        await self._session.flush()
-        return await self._mint_token_pair(user_id, row)
+        await self._refresh_rows(refresh_row, access_row)
+        return await self._mint_token_pair(user_id, refresh_row, access_row)
 
     # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
@@ -339,6 +370,55 @@ class Auth2Service:
         )
         await self._session.commit()
         return result.rowcount or 0
+
+    # ------------------------------------------------------------------ #
+    # Cookie flow — mint + auto-refresh the session cookie.
+    # ------------------------------------------------------------------ #
+
+    def mint_session_cookie(
+        self,
+        user_id: uuid.UUID,
+        access_row: IdpAccessToken,
+    ) -> str:
+        """Mint a session-cookie JWE synced to the access token row.
+
+        Carries ``sub`` (user_id), ``aid`` (access-token row id) and ``axp``
+        (access-token expiry, epoch seconds) so the auth dependency can detect
+        when the cookie is about to expire and trigger a server-side refresh
+        (mirroring what a standard OAuth client does at ``/auth2/refresh``).
+        """
+        return _mint_cookie_jwe(
+            self._enc,
+            user_id=user_id,
+            access_id=access_row.id,
+            access_expires_at=access_row.expires_at,
+        )
+
+    async def refresh_access_token(
+        self,
+        access_token_id: uuid.UUID,
+    ) -> tuple[IdpAccessToken, IdpRefreshToken]:
+        """Refresh the IdP access token backing *access_token_id*.
+
+        Used by the cookie auto-refresh path. Acquires a ``FOR UPDATE`` lock on
+        the backing refresh row (with a lock timeout), re-checks whether the
+        access token still needs refreshing, performs the IdP refresh if so,
+        and returns the (possibly updated) access + refresh rows. On lock
+        timeout raises :class:`RefreshLockTimeoutError`.
+        """
+        access_row = await self._session.get(IdpAccessToken, access_token_id)
+        if access_row is None:
+            raise InvalidGrantError("access token not recognized")
+        refresh_row, locked_access = await self._lock_token_rows(access_row.refresh_token_id)
+        if refresh_row is None:
+            raise InvalidGrantError("access token not recognized")
+        # _lock_token_rows returns rows ordered by refresh id; use the locked
+        # access row that matches the requested id.
+        access_row = locked_access or access_row
+        if refresh_row.expires_at <= _now():
+            raise InvalidGrantError("refresh token expired")
+        await self._refresh_rows_if_needed(refresh_row, access_row)
+        return access_row, refresh_row
 
     # ------------------------------------------------------------------ #
     # OAuth client management (CRUD helpers used by the router).
@@ -539,24 +619,120 @@ class Auth2Service:
         result = await self._session.execute(select(User).where(User.email == email))
         return result.scalar_one_or_none()
 
-    async def _persist_idp_refresh(
+    async def _persist_idp_tokens(
         self,
         user_id: uuid.UUID,
         idp_tokens: dict[str, Any],
-    ) -> IdpRefreshToken:
-        """Encrypt and persist the IdP refresh token for *user_id*."""
+    ) -> tuple[IdpRefreshToken, IdpAccessToken]:
+        """Encrypt and persist the IdP refresh + access tokens for *user_id*.
+
+        Both expiries are drift-adjusted and sourced from the IdP response
+        (with config fallbacks). Returns (refresh_row, access_row).
+        """
         refresh = idp_tokens.get("refresh_token")
         if not refresh:
             raise IdpError("IdP token response missing refresh_token")
-        row = IdpRefreshToken(
+        access = idp_tokens.get("access_token")
+        if not access:
+            raise IdpError("IdP token response missing access_token")
+        drift = self._cfg.idp_expire_drift_tolerance
+        refresh_row = IdpRefreshToken(
             user_id=user_id,
             refresh_token=self._enc.encrypt_value(refresh),
-            expires_at=_idp_expiry(idp_tokens, self._cfg.idp_expire_drift_tolerance),
+            expires_at=_idp_refresh_expiry(idp_tokens, drift, self._cfg),
         )
-        self._session.add(row)
+        self._session.add(refresh_row)
         await self._session.flush()
-        await self._session.refresh(row)
-        return row
+        access_row = IdpAccessToken(
+            refresh_token_id=refresh_row.id,
+            access_token=self._enc.encrypt_value(access),
+            expires_at=_idp_access_expiry(idp_tokens, drift, self._cfg),
+        )
+        self._session.add(access_row)
+        await self._session.flush()
+        await self._session.refresh(access_row)
+        return refresh_row, access_row
+
+    async def _load_token_rows(
+        self,
+        refresh_id: uuid.UUID,
+        access_id: uuid.UUID,
+    ) -> tuple[IdpRefreshToken | None, IdpAccessToken | None]:
+        """Load the refresh + access rows by id (no lock)."""
+        refresh_row = await self._session.get(IdpRefreshToken, refresh_id)
+        access_row = await self._session.get(IdpAccessToken, access_id)
+        return refresh_row, access_row
+
+    async def _lock_token_rows(
+        self,
+        refresh_id: uuid.UUID,
+    ) -> tuple[IdpRefreshToken | None, IdpAccessToken | None]:
+        """Lock the refresh row ``FOR UPDATE`` and load its access row.
+
+        A per-transaction ``SET LOCAL lock_timeout`` bounds the wait so a
+        concurrent holder causes the waiter to abandon the refresh with
+        :class:`RefreshLockTimeoutError` instead of blocking forever. After
+        acquiring the lock the caller must re-check the row's expiry — a
+        concurrent process may have refreshed it already. Returns
+        ``(refresh_row, access_row)``; either may be ``None`` if missing.
+        """
+        timeout_ms = int(self._cfg.idp_refresh_lock_timeout_seconds * 1000)
+        await self._session.execute(text(f"SET LOCAL lock_timeout = {timeout_ms}"))
+        try:
+            result = await self._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.id == refresh_id).with_for_update(),
+            )
+        except OperationalError as exc:
+            raise RefreshLockTimeoutError("could not acquire refresh lock within timeout") from exc
+        refresh_row = result.scalar_one_or_none()
+        if refresh_row is None:
+            return None, None
+        access_result = await self._session.execute(
+            select(IdpAccessToken).where(IdpAccessToken.refresh_token_id == refresh_row.id)
+        )
+        access_row = access_result.scalar_one_or_none()
+        return refresh_row, access_row
+
+    async def _refresh_rows_if_needed(
+        self,
+        refresh_row: IdpRefreshToken,
+        access_row: IdpAccessToken,
+    ) -> None:
+        """Refresh the IdP tokens if the access token has expired.
+
+        Used by the cookie auto-refresh path: re-check after acquiring the
+        lock — if the access row's expiry is still in the future another
+        process already refreshed it, so the IdP call is skipped and the
+        existing rows are reused. Otherwise perform the IdP refresh.
+        """
+        if access_row.expires_at > _now():
+            return
+        await self._refresh_rows(refresh_row, access_row)
+
+    async def _refresh_rows(
+        self,
+        refresh_row: IdpRefreshToken,
+        access_row: IdpAccessToken,
+    ) -> None:
+        """Perform the IdP refresh and rewrite both rows in place.
+
+        Used by the explicit ``/auth2/refresh`` grant: the client requested a
+        rotation, so the IdP refresh-token grant is always performed. The
+        row lock held by the caller serializes concurrent refreshes of the
+        same IdP token so the IdP is not asked twice in parallel.
+        """
+        idp_refresh = self._enc.decrypt_value(refresh_row.refresh_token)
+        idp_tokens = await self._refresh_with_idp(idp_refresh)
+        new_idp_refresh = idp_tokens.get("refresh_token") or idp_refresh
+        new_idp_access = idp_tokens.get("access_token")
+        if not new_idp_access:
+            raise IdpError("IdP refresh response missing access_token")
+        drift = self._cfg.idp_expire_drift_tolerance
+        refresh_row.refresh_token = self._enc.encrypt_value(new_idp_refresh)
+        refresh_row.expires_at = _idp_refresh_expiry(idp_tokens, drift, self._cfg)
+        access_row.access_token = self._enc.encrypt_value(new_idp_access)
+        access_row.expires_at = _idp_access_expiry(idp_tokens, drift, self._cfg)
+        await self._session.flush()
 
     # ------------------------------------------------------------------ #
     # Internals — token minting.
@@ -565,52 +741,64 @@ class Auth2Service:
     async def _mint_token_pair(
         self,
         user_id: uuid.UUID,
-        row: IdpRefreshToken,
+        refresh_row: IdpRefreshToken,
+        access_row: IdpAccessToken,
     ) -> TokenPair:
-        """Mint an access token + refresh token pair for the user/row."""
-        access = self._mint_access_token(user_id, row.expires_at)
-        refresh = self._mint_refresh_token(user_id, row.id)
+        """Mint an access token + refresh token pair synced to the IdP rows.
+
+        The access-token JWE ``exp`` is synced to the access row's expiry; the
+        refresh-token JWE ``exp`` is synced to the refresh row's expiry.
+        """
+        access = self._mint_access_token(user_id, access_row)
+        refresh = self._mint_refresh_token(user_id, refresh_row)
         return TokenPair(
             access_token=access,
             refresh_token=refresh,
-            expires_in=self._access_ttl_seconds(),
+            expires_in=_seconds_until(access_row.expires_at),
+            refresh_expires_at=refresh_row.expires_at,
+            access_expires_at=access_row.expires_at,
         )
 
-    def _mint_access_token(self, user_id: uuid.UUID, row_expires_at: datetime) -> str:
+    def _mint_access_token(self, user_id: uuid.UUID, access_row: IdpAccessToken) -> str:
         """Mint a self-contained access token (``ttyp: access_token``).
 
-        Its expiry is the smaller of the configured access TTL and the IdP
-        refresh-token row expiry (minus drift), so an access token never
-        outlives the refresh that backs it.
+        Its ``exp`` is synced to the backing IdP access-token row's expiry so a
+        client token never outlives the federated credential backing it.
         """
-        ttl = timedelta(seconds=self._access_ttl_seconds())
-        cap = row_expires_at - _now()
-        if cap < ttl:
-            ttl = cap
+        ttl = access_row.expires_at - _now()
         if ttl.total_seconds() <= 0:
-            # The backing refresh token has expired; mint nothing usable.
             ttl = timedelta(seconds=1)
         return self._enc.create_jwe_token(
             {
                 _SUB_CLAIM: str(user_id),
                 _TYP_CLAIM: TokenType.ACCESS_TOKEN.value,
                 _JTI_CLAIM: str(uuid.uuid4()),
+                _ACCESS_ID_CLAIM: str(access_row.id),
             },
             expires_in=ttl,
         )
 
-    def _mint_refresh_token(self, user_id: uuid.UUID, row_id: uuid.UUID) -> str:
-        """Mint a refresh token (``ttyp: idp_refresh_token``) carrying the row id."""
+    def _mint_refresh_token(
+        self,
+        user_id: uuid.UUID,
+        refresh_row: IdpRefreshToken,
+    ) -> str:
+        """Mint a refresh token (``ttyp: idp_refresh_token``) carrying the row id.
+
+        Its ``exp`` is synced to the IdP refresh-token row's expiry so the JWE
+        itself reflects the federated refresh-token lifetime.
+        """
+        ttl = refresh_row.expires_at - _now()
+        if ttl.total_seconds() <= 0:
+            ttl = timedelta(seconds=1)
         return self._enc.create_jwe_token(
             {
                 _SUB_CLAIM: str(user_id),
                 _TYP_CLAIM: TokenType.IDP_REFRESH_TOKEN.value,
                 _JTI_CLAIM: str(uuid.uuid4()),
-                _ROW_ID_CLAIM: str(row_id),
+                _ROW_ID_CLAIM: str(refresh_row.id),
             },
-            # Refresh tokens are validated against the row expiry, not the JWE
-            # exp; set a long exp so the JWE itself does not pre-expire.
-            expires_in=timedelta(days=365),
+            expires_in=ttl,
         )
 
     def _mint_auth_code(
@@ -618,6 +806,7 @@ class Auth2Service:
         *,
         user_id: uuid.UUID,
         row_id: uuid.UUID,
+        access_id: uuid.UUID,
         client_id: str,
         redirect_uri: str,
         client_code_challenge: str | None,
@@ -629,6 +818,7 @@ class Auth2Service:
             _TYP_CLAIM: _AUTH_CODE_TYP,
             _JTI_CLAIM: str(uuid.uuid4()),
             _ROW_ID_CLAIM: str(row_id),
+            _ACCESS_ID_CLAIM: str(access_id),
             _CLIENT_ID_CLAIM: client_id,
             _REDIRECT_URI_CLAIM: redirect_uri,
         }
@@ -721,9 +911,6 @@ class Auth2Service:
         patterns = list(result.scalars().all())
         return any(_wildcard_match(p, redirect_uri) for p in patterns)
 
-    async def _load_refresh_row(self, row_id: uuid.UUID) -> IdpRefreshToken | None:
-        return await self._session.get(IdpRefreshToken, row_id)
-
     # ------------------------------------------------------------------ #
     # Internals — JWE helpers.
     # ------------------------------------------------------------------ #
@@ -763,9 +950,6 @@ class Auth2Service:
         if not secrets.compare_digest(expected, challenge):
             raise InvalidGrantError("PKCE verification failed")
 
-    def _access_ttl_seconds(self) -> int:
-        return self._cfg.auth2_access_token_ttl_seconds
-
 
 # A distinct token type for the short-lived authorization code. Not part of the
 # persistent TokenType enum because it is never stored or used as a bearer
@@ -782,10 +966,14 @@ class CallbackContext:
     """The result of ``/auth2/callback``: client redirect + token context.
 
     ``auth_code`` is ``None`` for the ``cookie`` response type, where the
-    session cookie (set by the router) is the sole credential.
+    session cookie (set by the router) is the sole credential. ``access_id``
+    and ``access_expires_at`` back the cookie the router mints for the cookie
+    flow; ``row_id`` is the refresh-token row id carried in the auth code.
     """
 
     __slots__ = (
+        "access_expires_at",
+        "access_id",
         "auth_code",
         "client_id",
         "client_state",
@@ -801,6 +989,8 @@ class CallbackContext:
         *,
         user_id: uuid.UUID,
         row_id: uuid.UUID,
+        access_id: uuid.UUID,
+        access_expires_at: datetime,
         client_id: str,
         redirect_uri: str,
         client_state: str | None,
@@ -810,6 +1000,8 @@ class CallbackContext:
     ) -> None:
         self.user_id = user_id
         self.row_id = row_id
+        self.access_id = access_id
+        self.access_expires_at = access_expires_at
         self.client_id = client_id
         self.redirect_uri = redirect_uri
         self.client_state = client_state
@@ -819,14 +1011,30 @@ class CallbackContext:
 
 
 class TokenPair:
-    """An access + refresh token pair with the access-token lifetime."""
+    """An access + refresh token pair with synced federated expiries."""
 
-    __slots__ = ("access_token", "expires_in", "refresh_token")
+    __slots__ = (
+        "access_expires_at",
+        "access_token",
+        "expires_in",
+        "refresh_expires_at",
+        "refresh_token",
+    )
 
-    def __init__(self, *, access_token: str, refresh_token: str, expires_in: int) -> None:
+    def __init__(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_in: int,
+        refresh_expires_at: datetime,
+        access_expires_at: datetime,
+    ) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.expires_in = expires_in
+        self.refresh_expires_at = refresh_expires_at
+        self.access_expires_at = access_expires_at
 
 
 # ---------------------------------------------------------------------- #
@@ -853,12 +1061,17 @@ def _uuid(payload: dict[str, Any], key: str) -> uuid.UUID:
         raise InvalidGrantError(f"invalid {key}") from exc
 
 
-def _idp_expiry(idp_tokens: dict[str, Any], drift_seconds: int) -> datetime:
-    """Compute the refresh-token row expiry from the IdP response.
+def _idp_access_expiry(
+    idp_tokens: dict[str, Any],
+    drift_seconds: int,
+    cfg: AppConfig,
+) -> datetime:
+    """Compute the IdP *access*-token row expiry from the IdP response.
 
-    Prefers ``expires_in`` (seconds from now) over an absolute ``expires_at``.
-    The drift tolerance is subtracted to avoid treating a token as valid past
-    its real expiry due to clock skew.
+    Prefers ``expires_in`` (seconds from now) over an absolute ``expires_at``;
+    when the IdP advertises neither, ``idp_access_token_expires_in`` is the
+    fallback. The drift tolerance is subtracted to avoid treating a token as
+    valid past its real expiry due to clock skew.
     """
     expires_in = idp_tokens.get("expires_in")
     if isinstance(expires_in, int | float) and expires_in > 0:
@@ -866,8 +1079,62 @@ def _idp_expiry(idp_tokens: dict[str, Any], drift_seconds: int) -> datetime:
     expires_at = idp_tokens.get("expires_at")
     if isinstance(expires_at, int | float) and expires_at > 0:
         return datetime.fromtimestamp(max(0, int(expires_at) - drift_seconds), tz=UTC)
-    # No expiry advertised: default to 30 days so the row is usable.
-    return _now() + timedelta(days=30)
+    return _now() + timedelta(seconds=max(1, cfg.idp_access_token_expires_in - drift_seconds))
+
+
+def _idp_refresh_expiry(
+    idp_tokens: dict[str, Any],
+    drift_seconds: int,
+    cfg: AppConfig,
+) -> datetime:
+    """Compute the IdP *refresh*-token row expiry from the IdP response.
+
+    Prefers ``refresh_expires_in`` (seconds from now) over an absolute
+    ``refresh_expires_at``; when the IdP advertises neither,
+    ``idp_refresh_token_expires_in`` is the fallback. The drift tolerance is
+    subtracted to avoid treating a token as valid past its real expiry.
+    """
+    refresh_expires_in = idp_tokens.get("refresh_expires_in")
+    if isinstance(refresh_expires_in, int | float) and refresh_expires_in > 0:
+        return _now() + timedelta(seconds=max(0, int(refresh_expires_in) - drift_seconds))
+    refresh_expires_at = idp_tokens.get("refresh_expires_at")
+    if isinstance(refresh_expires_at, int | float) and refresh_expires_at > 0:
+        return datetime.fromtimestamp(max(0, int(refresh_expires_at) - drift_seconds), tz=UTC)
+    return _now() + timedelta(seconds=max(1, cfg.idp_refresh_token_expires_in - drift_seconds))
+
+
+def _seconds_until(expires_at: datetime) -> int:
+    """Seconds from now until *expires_at*, floored at 0."""
+    delta = (expires_at - _now()).total_seconds()
+    return max(0, int(delta))
+
+
+def _mint_cookie_jwe(
+    enc: EncryptionService,
+    *,
+    user_id: uuid.UUID,
+    access_id: uuid.UUID,
+    access_expires_at: datetime,
+) -> str:
+    """Mint a session-cookie JWE synced to an IdP access-token row.
+
+    Carries ``sub`` (user_id), ``aid`` (access-token row id) and ``axp``
+    (access-token expiry, epoch seconds) so the auth dependency can detect
+    when the cookie is about to expire and trigger a server-side refresh.
+    """
+    ttl = access_expires_at - _now()
+    if ttl.total_seconds() <= 0:
+        ttl = timedelta(seconds=1)
+    return enc.create_jwe_token(
+        {
+            _SUB_CLAIM: str(user_id),
+            _TYP_CLAIM: TokenType.COOKIE.value,
+            _JTI_CLAIM: str(uuid.uuid4()),
+            _ACCESS_ID_CLAIM: str(access_id),
+            _ACCESS_EXP_CLAIM: int(access_expires_at.timestamp()),
+        },
+        expires_in=ttl,
+    )
 
 
 def _decode_id_token(id_token: str) -> dict[str, Any]:

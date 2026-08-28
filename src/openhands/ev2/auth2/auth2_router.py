@@ -21,6 +21,7 @@ OAuth client management is a REST resource at ``/auth2/clients``.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -45,9 +46,13 @@ from openhands.ev2.auth2.auth2_service import (
     InvalidClientError,
     InvalidGrantError,
     InvalidRedirectUriError,
+    RefreshLockTimeoutError,
+    TokenPair,
+    _seconds_until,
 )
 from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
+from openhands.ev2.encryption.encryption_service import get_encryption_service
 from openhands.ev2.permission.permission_dependencies import require_permission
 from openhands.ev2.permission.permission_models import Action, ResourceType
 from openhands.ev2.util.search_filter import SearchFilter
@@ -65,22 +70,37 @@ def _callback_url() -> str:
     return f"{base_url}/auth2/callback"
 
 
-def _set_session_cookie(response: RedirectResponse, user_id: uuid.UUID) -> None:
-    """Set a JWE session cookie so browser flows authenticate subsequently.
+def _set_session_cookie(
+    response: RedirectResponse,
+    *,
+    user_id: uuid.UUID,
+    access_id: uuid.UUID,
+    access_expires_at: datetime,
+) -> None:
+    """Set an auth2 session cookie synced to the IdP access-token row.
 
-    Reuses the legacy cookie token (mints without a DB session) so the existing
-    ``get_current_user_id`` dependency authenticates auth2 sessions unchanged.
-    SameSite is config-driven and defaults to ``strict`` (strongest XSRF
-    mitigation); the cookie flow is a same-site flow so strict does not break it.
+    The cookie is a JWE carrying ``user_id``, ``access_token_id`` and the
+    access-token expiry, so ``get_current_user_id`` can detect when it is about
+    to expire and trigger a server-side refresh (mirroring what a standard
+    OAuth client does at ``/auth2/refresh``). The cookie's own max-age mirrors
+    the access-token lifetime; it is re-minted on every refresh. SameSite is
+    config-driven and defaults to ``strict`` (strongest XSRF mitigation); the
+    cookie flow is a same-site flow so strict does not break it.
     """
-    from openhands.ev2.util.auth_token import create_auth_token
+    from openhands.ev2.auth2.auth2_service import _mint_cookie_jwe
 
     cfg = get_config()
-    cookie_token = create_auth_token(user_id)
+    enc = get_encryption_service()
+    cookie_token = _mint_cookie_jwe(
+        enc,
+        user_id=user_id,
+        access_id=access_id,
+        access_expires_at=access_expires_at,
+    )
     response.set_cookie(
         key=cfg.auth_cookie_name,
         value=cookie_token,
-        max_age=cfg.auth_cookie_timeout_seconds,
+        max_age=max(1, int((access_expires_at - datetime.now(UTC)).total_seconds())),
         httponly=True,
         samesite=cfg.auth_cookie_samesite,
         secure=cfg.auth_cookie_secure,
@@ -95,9 +115,25 @@ def _error_status(exc: Auth2Error) -> int:
         return status.HTTP_400_BAD_REQUEST
     if isinstance(exc, InvalidGrantError):
         return status.HTTP_400_BAD_REQUEST
+    if isinstance(exc, RefreshLockTimeoutError):
+        # Concurrent refresh in progress; client should retry.
+        return status.HTTP_409_CONFLICT
     if isinstance(exc, IdpError):
         return status.HTTP_502_BAD_GATEWAY
     return status.HTTP_400_BAD_REQUEST
+
+
+def _to_response(pair: TokenPair) -> TokenResponse:
+    """Build a TokenResponse with synced federated expiries."""
+    return TokenResponse(
+        access_token=pair.access_token,
+        refresh_token=pair.refresh_token,
+        token_type="Bearer",
+        expires_in=pair.expires_in,
+        expires_at=pair.access_expires_at,
+        refresh_token_expires_in=_seconds_until(pair.refresh_expires_at),
+        refresh_token_expires_at=pair.refresh_expires_at,
+    )
 
 
 @router.get("/authorize")
@@ -189,7 +225,12 @@ async def callback(
     # client exchanges the code at ``/auth2/token``; no cookie is minted, so a
     # confidential (token-based) client is never handed a browser session.
     if ctx.response_type == _RESPONSE_TYPE_COOKIE:
-        _set_session_cookie(response, ctx.user_id)
+        _set_session_cookie(
+            response,
+            user_id=ctx.user_id,
+            access_id=ctx.access_id,
+            access_expires_at=ctx.access_expires_at,
+        )
     return response
 
 
@@ -240,12 +281,7 @@ async def token(
     finally:
         await service.aclose()
     await session.commit()
-    return TokenResponse(
-        access_token=pair.access_token,
-        refresh_token=pair.refresh_token,
-        token_type="Bearer",
-        expires_in=pair.expires_in,
-    )
+    return _to_response(pair)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -256,7 +292,10 @@ async def refresh(
     """Rotate the access + refresh pair via the IdP (refresh grant).
 
     OAuth standard refresh-token grant (RFC 6749 §6): the existing refresh
-    token is exchanged at the IdP for a fresh access + refresh pair.
+    token is exchanged at the IdP for a fresh access + refresh pair. Both
+    expiries are synced to the IdP response. A concurrent refresh of the same
+    IdP token is gated by a row lock; on lock conflict the endpoint returns
+    409 so the client can retry.
     """
     if payload.grant_type != "refresh_token":
         raise HTTPException(
@@ -280,12 +319,7 @@ async def refresh(
     finally:
         await service.aclose()
     await session.commit()
-    return TokenResponse(
-        access_token=pair.access_token,
-        refresh_token=pair.refresh_token,
-        token_type="Bearer",
-        expires_in=pair.expires_in,
-    )
+    return _to_response(pair)
 
 
 # ---------------------------------------------------------------------- #

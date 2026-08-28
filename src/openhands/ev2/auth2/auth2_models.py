@@ -8,9 +8,14 @@ JWE access tokens and DB-backed refresh tokens for clients to use.
 Tables:
 
 * ``idp_refresh_tokens`` — the encrypted IdP refresh token plus its expiry.
-  The IdP access token is intentionally *not* persisted: it is short-lived and
-  self-contained, so a refresh (which requires only the refresh token) is all
-  the server needs to obtain a fresh access token from the IdP.
+  Expiry is the IdP refresh-token expiry (drift-adjusted); when the IdP does
+  not advertise one, ``idp_refresh_token_expires_in`` is the fallback.
+* ``idp_access_tokens`` — the encrypted IdP access token plus its expiry,
+  referencing the refresh row (1:1). Expiry is the IdP access-token expiry
+  (drift-adjusted); when the IdP does not advertise one,
+  ``idp_access_token_expires_in`` is the fallback. The local minted access
+  token (JWE handed to clients) has its ``exp`` synced to this row's expiry so
+  a client token never outlives the federated credential backing it.
 * ``oauth_clients`` — clients registered to use this project as an OAuth
   provider. Each has a client_id / client_secret (encrypted) and a set of
   permitted redirect URIs (``oauth_client_redirect_uris``), which may contain
@@ -42,7 +47,9 @@ class IdpRefreshToken(Base):
 
     The ``refresh_token`` column holds the IdP's refresh token encrypted by the
     encryption service (AGENTS.md §9 — sensitive data at rest). ``expires_at``
-    is the IdP refresh token's expiry, adjusted by ``idp_expire_drift_tolerance``.
+    is the IdP refresh token's expiry, adjusted by ``idp_expire_drift_tolerance``;
+    when the IdP advertises no refresh-token expiry, ``idp_refresh_token_expires_in``
+    is the fallback. When this row expires the user must re-authenticate.
     """
 
     __tablename__ = "idp_refresh_tokens"
@@ -58,6 +65,44 @@ class IdpRefreshToken(Base):
     )
     # Encrypted IdP refresh token (JWE ciphertext).
     refresh_token: Mapped[str] = mapped_column(String(8192))
+    expires_at: Mapped[datetime] = mapped_column(_TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class IdpAccessToken(Base):
+    """An encrypted IdP access token persisted for a local user.
+
+    References its backing :class:`IdpRefreshToken` (1:1, cascade delete).
+    ``access_token`` holds the IdP access token encrypted at rest.
+    ``expires_at`` is the IdP access-token expiry (drift-adjusted); when the
+    IdP advertises no access-token expiry, ``idp_access_token_expires_in`` is
+    the fallback. The local JWE access token handed to clients carries this
+    row's id and has its ``exp`` synced to ``expires_at``.
+    """
+
+    __tablename__ = "idp_access_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    refresh_token_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("idp_refresh_tokens.id", ondelete="CASCADE"),
+        index=True,
+    )
+    # Encrypted IdP access token (JWE ciphertext).
+    access_token: Mapped[str] = mapped_column(String(8192))
     expires_at: Mapped[datetime] = mapped_column(_TZ)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,

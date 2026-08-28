@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 
 from openhands.ev2.auth.auth_models import TokenType
 from openhands.ev2.auth2.auth2_models import (
+    IdpAccessToken,
     IdpRefreshToken,
     OAuthClient,
     OAuthClientRedirectUri,
@@ -32,9 +35,11 @@ from openhands.ev2.auth2.auth2_service import (
     _decode_id_token,
     _derive_code_challenge,
     _generate_code_verifier,
-    _idp_expiry,
+    _idp_access_expiry,
+    _idp_refresh_expiry,
     _wildcard_match,
 )
+from openhands.ev2.config import AppConfig, EncryptionKeyConfig
 from openhands.ev2.encryption.encryption_service import get_encryption_service
 from openhands.ev2.user.user_models import User
 
@@ -42,6 +47,21 @@ from openhands.ev2.user.user_models import User
 
 _IDP_BASE = "https://idp.example.com"
 _CALLBACK = "https://app.example.com/auth2/callback"
+
+
+def _test_cfg() -> AppConfig:
+    """A minimal AppConfig with the IdP + encryption fields required by the
+    pure helper tests (which read config fallbacks for token expiries)."""
+    from pydantic import SecretStr
+
+    return AppConfig(  # type: ignore[call-arg]
+        idp_url=_IDP_BASE,
+        idp_client_id="test-client",
+        idp_client_secret=SecretStr("test-secret"),
+        encryption_key=EncryptionKeyConfig(
+            id="primary", value=SecretStr("test-secret-at-least-32-bytes-long!!")
+        ),
+    )
 
 
 def _make_id_token(sub: str, email: str) -> str:
@@ -146,17 +166,32 @@ class TestHelpers:
     def test_derive_code_challenge_plain(self) -> None:
         assert _derive_code_challenge("v", "plain") == "v"
 
-    def test_idp_expiry_from_expires_in(self) -> None:
-        expiry = _idp_expiry({"expires_in": 3600}, drift_seconds=60)
+    def test_idp_access_expiry_from_expires_in(self) -> None:
+        cfg = _test_cfg()
+        expiry = _idp_access_expiry({"expires_in": 3600}, drift_seconds=60, cfg=cfg)
         assert abs((expiry - datetime.now(UTC)).total_seconds() - 3540) < 5
 
-    def test_idp_expiry_drift_floor_zero(self) -> None:
-        expiry = _idp_expiry({"expires_in": 30}, drift_seconds=60)
+    def test_idp_access_expiry_drift_floor_zero(self) -> None:
+        cfg = _test_cfg()
+        expiry = _idp_access_expiry({"expires_in": 30}, drift_seconds=60, cfg=cfg)
         # Drift subtracted but floored at 0 → expiry is ~now.
         assert abs((expiry - datetime.now(UTC)).total_seconds()) < 5
 
-    def test_idp_expiry_default_when_missing(self) -> None:
-        expiry = _idp_expiry({}, drift_seconds=60)
+    def test_idp_access_expiry_default_when_missing(self) -> None:
+        cfg = _test_cfg()
+        expiry = _idp_access_expiry({}, drift_seconds=60, cfg=cfg)
+        # Falls back to idp_access_token_expires_in (900) minus drift.
+        assert abs((expiry - datetime.now(UTC)).total_seconds() - 840) < 5
+
+    def test_idp_refresh_expiry_from_refresh_expires_in(self) -> None:
+        cfg = _test_cfg()
+        expiry = _idp_refresh_expiry({"refresh_expires_in": 86400}, drift_seconds=60, cfg=cfg)
+        assert abs((expiry - datetime.now(UTC)).total_seconds() - 86340) < 5
+
+    def test_idp_refresh_expiry_default_when_missing(self) -> None:
+        cfg = _test_cfg()
+        expiry = _idp_refresh_expiry({}, drift_seconds=60, cfg=cfg)
+        # Falls back to idp_refresh_token_expires_in (30 days) minus drift.
         assert (expiry - datetime.now(UTC)).total_seconds() > 86000
 
 
@@ -560,7 +595,12 @@ class TestCallback:
 
         # Mint a refresh token directly off the persisted row (the cookie flow
         # never produces one via /token), then exercise the refresh grant.
-        refresh_token = service._mint_refresh_token(ctx.user_id, ctx.row_id)
+        refresh_row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.id == ctx.row_id)
+            )
+        ).scalar_one()
+        refresh_token = service._mint_refresh_token(ctx.user_id, refresh_row)
         respx.post(f"{_IDP_BASE}/token").mock(
             return_value=httpx.Response(
                 200,
@@ -973,3 +1013,204 @@ class TestCleanup:
         await service._session.commit()
         deleted = await service.delete_expired_tokens()
         assert deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Cookie auto-refresh — refresh_access_token + row lock + mint_session_cookie.
+# ---------------------------------------------------------------------------
+
+
+class TestCookieAutoRefresh:
+    """Cover the cookie-flow refresh path (Auth2Service.refresh_access_token,
+    _refresh_rows_if_needed, mint_session_cookie) and the IdpAccessToken row
+    persistence introduced for the federated access-token storage."""
+
+    @respx.mock
+    async def test_persists_access_token_row_on_callback(self, service: Auth2Service) -> None:
+        """A cookie-flow callback persists both a refresh row and an access
+        row, joined by refresh_token_id."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("ct-sub", "ct@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        access_row = (
+            await service._session.execute(
+                select(IdpAccessToken).where(IdpAccessToken.id == ctx.access_id)
+            )
+        ).scalar_one()
+        assert access_row.refresh_token_id == ctx.row_id
+        enc = get_encryption_service()
+        assert enc.decrypt_value(access_row.access_token) == "idp-access-1"
+        assert access_row.expires_at > datetime.now(UTC)
+
+    @respx.mock
+    async def test_refresh_access_token_refreshes_when_expired(self, service: Auth2Service) -> None:
+        """When the access row has expired, refresh_access_token performs the
+        IdP refresh and rewrites both rows with the rotated tokens."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("ct-sub", "ct@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        # Force the access row to be expired so refresh_access_token hits the IdP.
+        access_row = (
+            await service._session.execute(
+                select(IdpAccessToken).where(IdpAccessToken.id == ctx.access_id)
+            )
+        ).scalar_one()
+        access_row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await service._session.commit()
+
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "idp-access-2",
+                    "refresh_token": "idp-refresh-2",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            )
+        )
+        new_access, new_refresh = await service.refresh_access_token(ctx.access_id)
+        assert new_access.id == ctx.access_id
+        enc = get_encryption_service()
+        assert enc.decrypt_value(new_access.access_token) == "idp-access-2"
+        assert enc.decrypt_value(new_refresh.refresh_token) == "idp-refresh-2"
+        assert new_access.expires_at > datetime.now(UTC)
+
+    @respx.mock
+    async def test_refresh_access_token_skips_when_not_expired(self, service: Auth2Service) -> None:
+        """When the access row is still valid, refresh_access_token does not
+        call the IdP (no refresh needed)."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("ct-sub", "ct@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        # The IdP token endpoint should not be called again.
+        respx.post(f"{_IDP_BASE}/token").mock(
+            side_effect=AssertionError("IdP refresh should not be called")
+        )
+        new_access, _ = await service.refresh_access_token(ctx.access_id)
+        assert new_access.id == ctx.access_id
+
+    @respx.mock
+    async def test_refresh_access_token_expired_refresh_raises(self, service: Auth2Service) -> None:
+        """When the backing refresh row has expired, refresh_access_token
+        raises InvalidGrantError (the user must re-authenticate)."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("ct-sub", "ct@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        refresh_row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.id == ctx.row_id)
+            )
+        ).scalar_one()
+        refresh_row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await service._session.commit()
+
+        with pytest.raises(InvalidGrantError):
+            await service.refresh_access_token(ctx.access_id)
+
+    async def test_refresh_access_token_unknown_id_raises(self, service: Auth2Service) -> None:
+        with pytest.raises(InvalidGrantError):
+            await service.refresh_access_token(uuid.uuid4())
+
+    @respx.mock
+    async def test_mint_session_cookie_carries_synced_expiry(self, service: Auth2Service) -> None:
+        """The cookie JWE carries the access row id + expiry so the auth
+        dependency can detect imminent expiry."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("ct-sub", "ct@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        access_row = (
+            await service._session.execute(
+                select(IdpAccessToken).where(IdpAccessToken.id == ctx.access_id)
+            )
+        ).scalar_one()
+        cookie = service.mint_session_cookie(ctx.user_id, access_row)
+        enc = get_encryption_service()
+        payload = enc.decrypt_jwe_token(cookie)
+        assert payload["aid"] == str(ctx.access_id)
+        assert int(payload["axp"]) == int(access_row.expires_at.timestamp())
