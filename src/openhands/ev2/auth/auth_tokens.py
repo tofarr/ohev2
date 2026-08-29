@@ -47,6 +47,7 @@ _TYP_CLAIM = "ttyp"
 _JTI_CLAIM = "jti"
 _IAT_CLAIM = "iat"
 _EXP_CLAIM = "exp"
+_SCOPE_CLAIM = "scp"
 # Federated-cookie / access-token claims mirroring AuthService so tokens minted
 # here are indistinguishable from those minted by the OAuth callback.
 _ACCESS_ID_CLAIM = "aid"  # idp_access_tokens row id
@@ -66,6 +67,14 @@ class InvalidTokenError(Exception):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _scopes_from_payload(payload: dict[str, object]) -> frozenset[str]:
+    """Extract the scope set from a JWE payload's ``scp`` claim."""
+    raw = payload.get(_SCOPE_CLAIM)
+    if not isinstance(raw, str):
+        return frozenset()
+    return frozenset(s for s in raw.split() if s)
 
 
 class TokenService:
@@ -222,6 +231,7 @@ class TokenService:
             enabled=enabled and user.enabled,
             expires_at=exp,
             token_type=token_type,
+            scopes=_scopes_from_payload(payload),
         )
 
     # ------------------------------------------------------------------ #

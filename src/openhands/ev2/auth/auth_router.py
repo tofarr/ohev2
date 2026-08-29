@@ -17,6 +17,10 @@ Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 * ``POST /auth/revoke``    — revoke a token (RFC 7009). Refresh-token
   revocation is immediate; access-token revocation is best-effort (the
   JWE remains usable until its own short ``exp``).
+* ``POST /auth/logout``    — cookie-focused session end. Revokes the
+  federated session backing the session cookie (deleting the IdP refresh
+  + access token rows) and clears the cookie. No client credentials
+  required: the cookie *is* the credential.
 
 OAuth client management is a REST resource at ``/auth/clients``.
 """
@@ -28,15 +32,16 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
 from openhands.ev2.auth.auth_dependencies import (
+    depends_access_token,
     depends_permissions,
     depends_permissions_or_none,
 )
-from openhands.ev2.auth.auth_models import OAuthClient
+from openhands.ev2.auth.auth_models import AuthToken, OAuthClient
 from openhands.ev2.auth.auth_schemas import (
     OAuthClientBatchWriteRequest,
     OAuthClientCreate,
@@ -45,6 +50,7 @@ from openhands.ev2.auth.auth_schemas import (
     OAuthClientUpdate,
     TokenRequest,
     TokenResponse,
+    UserInfoResponse,
 )
 from openhands.ev2.auth.auth_service import (
     _RESPONSE_TYPE_COOKIE,
@@ -136,7 +142,7 @@ def _error_status(exc: AuthError) -> int:
 
 
 def _to_response(pair: TokenPair) -> TokenResponse:
-    """Build a TokenResponse with synced federated expiries."""
+    """Build a TokenResponse with synced federated expiries + optional id_token."""
     return TokenResponse(
         access_token=pair.access_token,
         refresh_token=pair.refresh_token,
@@ -145,6 +151,7 @@ def _to_response(pair: TokenPair) -> TokenResponse:
         expires_at=pair.access_expires_at,
         refresh_token_expires_in=_seconds_until(pair.refresh_expires_at),
         refresh_token_expires_at=pair.refresh_expires_at,
+        id_token=pair.id_token,
     )
 
 
@@ -369,6 +376,89 @@ async def revoke(
         await service.aclose()
     await session.commit()
     return Response(status_code=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------- #
+# OIDC UserInfo (§5.3) — claims for the authenticated principal.
+# ---------------------------------------------------------------------- #
+
+
+@router.get("/userinfo", response_model=UserInfoResponse)
+async def userinfo(
+    session: SessionDep,
+    token: Annotated[AuthToken, Depends(depends_access_token)],
+) -> UserInfoResponse:
+    """Return OIDC UserInfo claims for the authenticated principal.
+
+    The access token (Bearer) authenticates the request; the granted scopes
+    (carried in the token's ``scp`` claim) gate which claims are returned.
+    Requires an ``openid``-scoped token; a token without ``openid`` returns
+    only ``sub`` (per OIDC Core §5.4, ``sub`` is always returned).
+    """
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="An access token is required.",
+        )
+    service = AuthService(session)
+    try:
+        claims = await service.build_userinfo_claims(token.user_id, token.scopes)
+    finally:
+        await service.aclose()
+    if claims is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or disabled.",
+        )
+    return UserInfoResponse(
+        sub=claims.get("sub", str(token.user_id)),
+        email=claims.get("email"),
+        email_verified=claims.get("email_verified"),
+        name=claims.get("name"),
+        preferred_username=claims.get("preferred_username"),
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> Response:
+    """End the browser session.
+
+    Cookie-focused counterpart to ``/auth/revoke``: revokes the federated
+    session backing the session cookie (deleting the IdP refresh + access
+    token rows, best-effort forwarding to the IdP revocation endpoint) and
+    clears the cookie. No client credentials are required — the cookie *is*
+    the credential.
+
+    Always returns 204 and clears the cookie, regardless of whether a cookie
+    was present or whether its backing session was still live. The federated
+    revocation is best-effort: a decrypt/parse failure or a missing backing
+    row is swallowed, and the cookie is still cleared so the browser is logged
+    out locally.
+    """
+    cfg = get_config()
+    cookie_token = request.cookies.get(cfg.auth_cookie_name)
+    if cookie_token is not None:
+        service = AuthService(session)
+        try:
+            await service.revoke_session(cookie_token)
+        except AuthError:
+            pass
+        finally:
+            await service.aclose()
+        await session.commit()
+    response.delete_cookie(
+        key=cfg.auth_cookie_name,
+        httponly=True,
+        samesite=cfg.auth_cookie_samesite,
+        secure=cfg.auth_cookie_secure,
+        path="/",
+    )
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 # ---------------------------------------------------------------------- #
