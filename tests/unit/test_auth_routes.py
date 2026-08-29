@@ -385,6 +385,257 @@ class TestFullOAuthFlowRoute:
             # The session cookie is set (the sole credential for this flow).
             assert cb.cookies.get("ohesession")
 
+    @respx.mock
+    async def test_revoke_refresh_token_kills_refresh(self, app) -> None:
+        """Revoking a refresh token makes the next /auth/refresh fail (400)."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "revoke-1",
+                    "client_secret": "revoke-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("rev-sub", "rev@example.com")
+                )
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "revoke-1",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "revoke-1",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            refresh_token = tok.json()["refresh_token"]
+
+            # Revoke the refresh token (form-encoded).
+            rev = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": refresh_token,
+                    "token_type_hint": "refresh_token",
+                    "client_id": "revoke-1",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            assert rev.status_code == 200, rev.text
+
+            # The next refresh must fail: the backing row is gone.
+            ref = await c.post(
+                "/auth/refresh",
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "revoke-1",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            assert ref.status_code == 400, ref.text
+
+    @respx.mock
+    async def test_revoke_wrong_client_secret_returns_401(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={"client_id": "revoke-2", "client_secret": "right", "redirect_uris": []},
+            )
+            rev = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": "anything",
+                    "client_id": "revoke-2",
+                    "client_secret": "wrong",
+                },
+            )
+            assert rev.status_code == 401
+
+    @respx.mock
+    async def test_revoke_unknown_token_returns_200(self, app) -> None:
+        """A garbage token must still yield 200 (RFC 7009 §2.2 best-effort)."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={"client_id": "revoke-3", "client_secret": "s", "redirect_uris": []},
+            )
+            rev = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": "not-a-real-jwe",
+                    "client_id": "revoke-3",
+                    "client_secret": "s",
+                },
+            )
+            assert rev.status_code == 200, rev.text
+
+    @respx.mock
+    async def test_revoke_access_token_returns_200(self, app) -> None:
+        """Revoking an access token returns 200 (best-effort, Option A)."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "revoke-4",
+                    "client_secret": "revoke-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("rev4-sub", "rev4@example.com")
+                )
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "revoke-4",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "revoke-4",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            access_token = tok.json()["access_token"]
+
+            rev = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": access_token,
+                    "token_type_hint": "access_token",
+                    "client_id": "revoke-4",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            assert rev.status_code == 200, rev.text
+
+    @respx.mock
+    async def test_revoke_idempotent_for_already_revoked(self, app) -> None:
+        """Revoking the same refresh token twice yields 200 both times."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "revoke-5",
+                    "client_secret": "revoke-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("rev5-sub", "rev5@example.com")
+                )
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "revoke-5",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "revoke-5",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            refresh_token = tok.json()["refresh_token"]
+
+            first = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": refresh_token,
+                    "client_id": "revoke-5",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            assert first.status_code == 200
+            # The refresh token JWE still decrypts; the row is gone, so the
+            # second revoke is a best-effort no-op but must still return 200.
+            second = await c.post(
+                "/auth/revoke",
+                data={
+                    "token": refresh_token,
+                    "client_id": "revoke-5",
+                    "client_secret": "revoke-secret",
+                },
+            )
+            assert second.status_code == 200, second.text
+
     async def test_token_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/auth/token",

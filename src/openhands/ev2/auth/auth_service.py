@@ -20,6 +20,9 @@ The project acts as a federated OAuth proxy:
    processes do not refresh the same IdP token simultaneously; a waiter that
    acquires the lock re-checks the row and skips the IdP call if another
    process already refreshed it.
+5. ``/auth/revoke`` (RFC 7009) best-effort-revokes a token: deleting the
+   ``idp_refresh_tokens`` row (cascading to its access row) for a refresh
+   token, or moving the access row's expiry to now for an access token.
 
 Access tokens are self-contained JWEs (``ttyp: access_token``) so the existing
 :func:`get_current_user_id` dependency authenticates them unchanged; their
@@ -363,6 +366,54 @@ class AuthService:
 
         await self._refresh_rows(refresh_row, access_row)
         return await self._mint_token_pair(user_id, refresh_row, access_row)
+
+    # ------------------------------------------------------------------ #
+    # /revoke — RFC 7009 token revocation (best-effort).
+    # ------------------------------------------------------------------ #
+
+    async def revoke_token(
+        self,
+        *,
+        token: str,
+        token_type_hint: str | None,
+        client_id: str,
+        client_secret: str,
+    ) -> None:
+        """Revoke a token (RFC 7009).
+
+        Client credentials are always validated (raising
+        :class:`InvalidClientError`); the token itself is best-effort — any
+        decrypt/parse failure is swallowed and the call returns normally, so the
+        endpoint can always answer 200 per §2.2 without leaking token validity.
+
+        Refresh tokens are revoked immediately and irrevocably: the backing
+        ``idp_refresh_tokens`` row is deleted, cascading to its
+        ``idp_access_tokens`` row, so the federated session can no longer be
+        refreshed. Access tokens are best-effort: the backing access row's
+        ``expires_at`` is moved to now so the session won't refresh, but the
+        already-minted JWE remains usable until its own short ``exp`` elapses
+        (Option A — the auth hot path does not check the row).
+        """
+        await self._authenticate_client(client_id, client_secret)
+        try:
+            payload = self._decrypt(token)
+            token_type = self._token_type(payload)
+            if token_type is TokenType.IDP_REFRESH_TOKEN:
+                row_id = _uuid(payload, _ROW_ID_CLAIM)
+                await self._session.execute(
+                    delete(IdpRefreshToken).where(IdpRefreshToken.id == row_id)
+                )
+            elif token_type is TokenType.ACCESS_TOKEN:
+                access_id = _uuid(payload, _ACCESS_ID_CLAIM)
+                access_row = await self._session.get(IdpAccessToken, access_id)
+                if access_row is not None:
+                    access_row.expires_at = _now()
+            # Other token types (cookie, api_key, legacy refresh_token) are not
+            # issued by this provider to clients, so revocation is a no-op.
+            await self._session.flush()
+        except InvalidGrantError:
+            # Unknown/garbage token: best-effort no-op per RFC 7009 §2.2.
+            return
 
     # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
