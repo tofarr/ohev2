@@ -139,25 +139,25 @@ class TestDevLogin:
     async def test_login_cookie_authenticates_subsequent_request(
         self, dev_client: AsyncClient
     ) -> None:
-        # /auth/clients requires a logged-in principal. Anonymous (no cookie)
+        # /auth-clients requires a logged-in principal. Anonymous (no cookie)
         # is rejected as 403 by depends_permissions (no roles => deny). A valid
         # session cookie is accepted by depends_access_token (no 401) and also
         # 403s on the permission guard — but a *present-but-invalid* cookie is
         # 401. So we assert the authenticated request is not 401, proving the
         # cookie was recognized as a valid credential.
-        anon = await dev_client.get("/auth/clients")
+        anon = await dev_client.get("/auth-clients")
         assert anon.status_code == 403
         resp = await dev_client.post(
             "/auth/dev/login",
             json={"username": _DEV_USER_USERNAME, "password": _DEV_USER_PASSWORD},
         )
         assert resp.status_code == 200, resp.text
-        authed = await dev_client.get("/auth/clients")
+        authed = await dev_client.get("/auth-clients")
         assert authed.status_code != 401
         # A garbage cookie in the same name must produce 401 (sanity check that
         # the != 401 above is meaningful, not a route that never 401s).
         dev_client.cookies[get_config().auth_cookie_name] = "not-a-real-cookie"
-        bad = await dev_client.get("/auth/clients")
+        bad = await dev_client.get("/auth-clients")
         assert bad.status_code == 401
 
     async def test_login_rejects_bad_password(self, dev_client: AsyncClient) -> None:

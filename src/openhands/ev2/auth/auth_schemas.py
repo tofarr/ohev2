@@ -138,7 +138,7 @@ class OAuthClientRead(BaseModel):
 
 
 class OAuthClientSearchFilter(BaseSearchFilter[OAuthClient]):
-    """Optional filter clauses for ``GET /auth/clients``."""
+    """Optional filter clauses for ``GET /auth-clients``."""
 
     name__contains: str | None = Field(default=None)
     enabled__eq: bool | None = Field(default=None)
@@ -171,7 +171,7 @@ class UserInfoResponse(BaseModel):
     preferred_username: str | None = Field(default=None)
 
 
-# Batch write: POST /auth/clients/batch applies create/update/delete atomically
+# Batch write: POST /auth-clients/batch applies create/update/delete atomically
 # (AGENTS.md §3). Operations reuse OAuthClientCreate/OAuthClientUpdate; updates
 # and deletes target a specific id.
 
@@ -205,7 +205,7 @@ OAuthClientBatchOp = Annotated[
 
 
 class OAuthClientBatchWriteRequest(BaseModel):
-    """Request body for `POST /auth/clients/batch`."""
+    """Request body for `POST /auth-clients/batch`."""
 
     operations: list[OAuthClientBatchOp] = Field(
         min_length=1,

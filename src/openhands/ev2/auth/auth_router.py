@@ -21,8 +21,6 @@ Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
   federated session backing the session cookie (deleting the IdP refresh
   + access token rows) and clears the cookie. No client credentials
   required: the cookie *is* the credential.
-
-OAuth client management is a REST resource at ``/auth/clients``.
 """
 
 from __future__ import annotations
@@ -76,6 +74,7 @@ from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+clients_router = APIRouter(prefix="/auth-clients", tags=["auth-clients"])
 
 
 def _callback_url() -> str:
@@ -462,7 +461,7 @@ async def logout(
 
 
 # ---------------------------------------------------------------------- #
-# OAuth clients — REST resource, permission-guarded.
+# OAuth clients — REST resource at /auth-clients, permission-guarded.
 # ---------------------------------------------------------------------- #
 
 
@@ -502,8 +501,8 @@ def _client_error_detail(exc: Exception) -> str:
     return str(exc)
 
 
-@router.get(
-    "/clients",
+@clients_router.get(
+    "",
     response_model=OAuthClientSearchResult,
 )
 async def search_clients(
@@ -534,8 +533,8 @@ async def search_clients(
         await service.aclose()
 
 
-@router.post(
-    "/clients",
+@clients_router.post(
+    "",
     response_model=OAuthClientRead,
     status_code=status.HTTP_201_CREATED,
 )
@@ -566,8 +565,8 @@ async def create_client(
     return read
 
 
-@router.get(
-    "/clients/batch",
+@clients_router.get(
+    "/batch",
     response_model=BatchReadResult[OAuthClientRead],
 )
 async def get_clients_batch(
@@ -594,8 +593,8 @@ async def get_clients_batch(
     return BatchReadResult(items=items)
 
 
-@router.post(
-    "/clients/batch",
+@clients_router.post(
+    "/batch",
     response_model=BatchWriteResult[OAuthClientRead],
 )
 async def write_clients_batch(
@@ -643,7 +642,7 @@ async def write_clients_batch(
     return BatchWriteResult(items=items)
 
 
-@router.get("/clients/{client_id}", response_model=OAuthClientRead)
+@clients_router.get("/{client_id}", response_model=OAuthClientRead)
 async def get_client(
     client_id: uuid.UUID,
     session: SessionDep,
@@ -667,7 +666,7 @@ async def get_client(
     return read
 
 
-@router.patch("/clients/{client_id}", response_model=OAuthClientRead)
+@clients_router.patch("/{client_id}", response_model=OAuthClientRead)
 async def update_client(
     client_id: uuid.UUID,
     payload: OAuthClientUpdate,
@@ -698,7 +697,7 @@ async def update_client(
     return read
 
 
-@router.delete("/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+@clients_router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_client(
     client_id: uuid.UUID,
     session: SessionDep,
