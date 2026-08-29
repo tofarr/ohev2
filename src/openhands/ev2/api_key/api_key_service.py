@@ -6,8 +6,9 @@ exposes a thin ``ApiKeyService`` over SQLAlchemy async sessions per AGENTS.md
 centralized permission checker) as a field, set at construction, that scopes
 the SQL to rows the principal is allowed to see/modify; :meth:`create`
 validates the incoming item against it in memory (AGENTS.md §9 — authorization
-enforced in services, not just routers). Token minting is delegated to
-:class:`TokenService` so the JWE secret and backing row stay consistent.
+enforced in services, not just routers). Key minting is delegated to
+:class:`TokenService` so the raw ``oh_...`` value and its backing row stay
+consistent.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ class ApiKeyService:
     async def create(self, payload: ApiKeyCreate, *, user_id: uuid.UUID) -> tuple[str, ApiKey]:
         """Mint an API key and persist its backing row.
 
-        Returns (token, row). *user_id* is the current principal, never read
+        Returns (raw_key, row). *user_id* is the current principal, never read
         from the payload (AGENTS.md §9). Raises
         :class:`ApiKeyPermissionScopeError` if the prospective key does not
         satisfy the service's ``perm_filter`` (the principal's create scope).
@@ -70,8 +71,11 @@ class ApiKeyService:
         # Validate scope before minting: the perm_filter is the principal's
         # create grant reduced to a row predicate. Checked in-memory so a
         # principal scoped to their own keys cannot mint one for another user.
+        # The key_hash/prefix are placeholders; the real values are minted below
+        # and the final row is re-checked against the scope.
         prospective = ApiKey(
-            jti=uuid.uuid4(),  # placeholder; the real jti is minted below
+            key_hash="placeholder",
+            prefix="placeholder",
             user_id=user_id,
             name=payload.name,
             enabled=payload.enabled,
@@ -81,7 +85,7 @@ class ApiKeyService:
             raise ApiKeyPermissionScopeError(str(user_id))
 
         token_service = TokenService(self._session)
-        token, row = await token_service.create_api_key(
+        raw_key, row = await token_service.create_api_key(
             user_id,
             name=payload.name,
             enabled=payload.enabled,
@@ -95,7 +99,7 @@ class ApiKeyService:
             await self._session.rollback()
             raise ApiKeyPermissionScopeError(str(user_id))
         await self._session.refresh(row)
-        return token, row
+        return raw_key, row
 
     async def get(self, api_key_id: uuid.UUID) -> ApiKey:
         """Retrieve an API key by id, scoped by ``perm_filter``.
@@ -169,7 +173,7 @@ class ApiKeyService:
         """Delete an API key. Raises ApiKeyNotFoundError if missing or out of scope.
 
         Deleting the row revokes the key: ``TokenService.authenticate`` rejects
-        a token whose ``jti`` has no live backing row.
+        a key whose hash has no live backing row.
         """
         api_key = await self.get(api_key_id)
         await self._session.delete(api_key)
@@ -215,9 +219,9 @@ class ApiKeyService:
         if filt is None:
             raise BatchPermissionDeniedError("create")
         # A per-operation ApiKeyService so the create's perm_filter matches the
-        # operation's action, not the batch endpoint's single action. The token
-        # is discarded: batch creates do not surface secrets.
-        _token, row = await ApiKeyService(self._session, filt).create(op.data, user_id=user_id)
+        # operation's action, not the batch endpoint's single action. The raw
+        # key is discarded: batch creates do not surface secrets.
+        _key, row = await ApiKeyService(self._session, filt).create(op.data, user_id=user_id)
         return row
 
     async def _batch_update(

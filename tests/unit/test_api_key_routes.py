@@ -28,10 +28,10 @@ class TestCreateApiKeyRoute:
         assert body["enabled"] is True
         assert body["expires_at"] is None
         assert uuid.UUID(body["id"])
-        assert uuid.UUID(body["jti"])
-        assert body["token"]
-        # The token is a JWE that authenticates as an API_KEY for the user.
-        auth = await client.get("/users", headers={"X-API-Key": body["token"]})
+        assert body["prefix"].startswith("oh_")
+        assert body["key"].startswith("oh_")
+        # The raw key authenticates as an API_KEY for the user.
+        auth = await client.get("/users", headers={"X-API-Key": body["key"]})
         assert auth.status_code == 200
 
     async def test_create_api_key_with_expiry(self, client: AsyncClient) -> None:
@@ -52,7 +52,7 @@ class TestCreateApiKeyRoute:
         body = resp.json()
         assert body["enabled"] is False
         # A disabled key does not authenticate.
-        auth = await client.get("/users", headers={"X-API-Key": body["token"]})
+        auth = await client.get("/users", headers={"X-API-Key": body["key"]})
         assert auth.status_code == 401
 
     async def test_create_api_key_empty_name_returns_422(self, client: AsyncClient) -> None:
@@ -244,14 +244,14 @@ class TestUpdateApiKeyRoute:
     async def test_update_enabled(self, client: AsyncClient) -> None:
         create = await client.post("/api-keys", json={"name": "k"})
         kid = create.json()["id"]
-        token = create.json()["token"]
+        key = create.json()["key"]
         # Key works before disabling.
-        assert (await client.get("/users", headers={"X-API-Key": token})).status_code == 200
+        assert (await client.get("/users", headers={"X-API-Key": key})).status_code == 200
         resp = await client.patch(f"/api-keys/{kid}", json={"enabled": False})
         assert resp.status_code == 200
         assert resp.json()["enabled"] is False
-        # After disabling, the token no longer authenticates.
-        assert (await client.get("/users", headers={"X-API-Key": token})).status_code == 401
+        # After disabling, the key no longer authenticates.
+        assert (await client.get("/users", headers={"X-API-Key": key})).status_code == 401
 
     async def test_update_expires_at(self, client: AsyncClient) -> None:
         create = await client.post("/api-keys", json={"name": "k"})
@@ -283,12 +283,12 @@ class TestDeleteApiKeyRoute:
     async def test_delete_api_key(self, client: AsyncClient) -> None:
         create = await client.post("/api-keys", json={"name": "del"})
         kid = create.json()["id"]
-        token = create.json()["token"]
+        key = create.json()["key"]
         resp = await client.delete(f"/api-keys/{kid}")
         assert resp.status_code == 204
         assert (await client.get(f"/api-keys/{kid}")).status_code == 404
-        # Deleting the row revokes the token.
-        assert (await client.get("/users", headers={"X-API-Key": token})).status_code == 401
+        # Deleting the row revokes the key.
+        assert (await client.get("/users", headers={"X-API-Key": key})).status_code == 401
 
     async def test_delete_missing_key_returns_404(self, client: AsyncClient) -> None:
         resp = await client.delete(f"/api-keys/{uuid.uuid4()}")
@@ -313,9 +313,9 @@ class TestBatchWriteApiKeys:
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         assert len(items) == 3
-        # Batch create returns a Read (no token field).
+        # Batch create returns a Read (no key field).
         assert items[0]["name"] == "bwr3"
-        assert "token" not in items[0]
+        assert "key" not in items[0]
         assert items[1]["id"] == rid1 and items[1]["name"] == "bwr1b"
         assert items[2] is None
         assert (await client.get(f"/api-keys/{rid2}")).status_code == 404
