@@ -53,7 +53,7 @@ from typing import Any, cast
 
 import httpx
 from sqlalchemy import delete, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.auth.auth_models import (
@@ -63,12 +63,22 @@ from openhands.ev2.auth.auth_models import (
     OAuthClientRedirectUri,
     TokenType,
 )
+from openhands.ev2.auth.auth_schemas import (
+    OAuthClientBatchCreate,
+    OAuthClientBatchDelete,
+    OAuthClientBatchOp,
+    OAuthClientBatchUpdate,
+    OAuthClientCreate,
+    OAuthClientUpdate,
+)
 from openhands.ev2.config import AppConfig, IdpConfig, get_config
 from openhands.ev2.encryption.encryption_service import (
     EncryptionService,
     get_encryption_service,
 )
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
+from openhands.ev2.util.search_filter import SearchFilter
 
 # JWT claim keys reused from the auth service for token-type tagging.
 _SUB_CLAIM = "sub"
@@ -128,6 +138,22 @@ class RefreshLockTimeoutError(AuthError):
     A concurrent refresh is in progress; the caller should retry or
     re-authenticate rather than block indefinitely.
     """
+
+
+class OAuthClientNotFoundError(Exception):
+    """Raised when an OAuth client id does not exist or is out of scope."""
+
+
+class OAuthClientConflictError(Exception):
+    """Raised when a create/update collides with an existing client_id."""
+
+
+class OAuthClientPermissionScopeError(Exception):
+    """Raised when a create payload falls outside the principal's scope."""
+
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 def _now() -> datetime:
@@ -514,7 +540,10 @@ class AuthService:
         redirect_uris: list[str],
         enabled: bool,
     ) -> OAuthClient:
-        """Create an OAuth client with an encrypted secret and redirect URIs."""
+        """Create an OAuth client with an encrypted secret and redirect URIs.
+
+        Raises :class:`OAuthClientConflictError` if the ``client_id`` is taken.
+        """
         client = OAuthClient(
             client_id=client_id,
             client_secret=self._enc.encrypt_value(client_secret),
@@ -522,7 +551,11 @@ class AuthService:
             enabled=enabled,
         )
         self._session.add(client)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise OAuthClientConflictError(client_id) from exc
         for uri in redirect_uris:
             self._session.add(OAuthClientRedirectUri(client_id=client.id, uri=uri))
         await self._session.flush()
@@ -588,6 +621,171 @@ class AuthService:
         """Delete an OAuth client (cascades to redirect URIs)."""
         await self._session.delete(client)
         await self._session.flush()
+
+    # ------------------------------------------------------------------ #
+    # Permission-scoped OAuth client CRUD (used by the REST router + batch).
+    # The methods above operate on raw rows for the auth flow (authorize/
+    # callback/token); these scope reads/writes to the principal's
+    # ``perm_filter`` so the REST surface enforces authorization in the
+    # service, not just the router (AGENTS.md §9).
+    # ------------------------------------------------------------------ #
+
+    async def create_oauth_client(
+        self,
+        payload: OAuthClientCreate,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Create an OAuth client scoped to *perm_filter*.
+
+        Raises :class:`OAuthClientPermissionScopeError` if the prospective
+        client does not satisfy *perm_filter*, and :class:`OAuthClientConflictError`
+        on a duplicate ``client_id``.
+        """
+        # Build the row to evaluate the filter before persisting; the secret is
+        # encrypted so the in-memory match runs against the stored shape.
+        client = OAuthClient(
+            client_id=payload.client_id,
+            client_secret=self._enc.encrypt_value(payload.client_secret),
+            name=payload.name,
+            enabled=payload.enabled,
+        )
+        if not perm_filter.matches(client):
+            raise OAuthClientPermissionScopeError(payload.client_id)
+        return await self.create_client(
+            client_id=payload.client_id,
+            client_secret=payload.client_secret,
+            name=payload.name,
+            redirect_uris=payload.redirect_uris,
+            enabled=payload.enabled,
+        )
+
+    async def get_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Retrieve a client by id, scoped by *perm_filter*.
+
+        Raises :class:`OAuthClientNotFoundError` if the client is missing or out
+        of scope (so callers return 404 without leaking existence).
+        """
+        stmt = perm_filter.filter_sql(select(OAuthClient).where(OAuthClient.id == client_id))
+        result = await self._session.execute(stmt)
+        client = result.scalar_one_or_none()
+        if client is None:
+            raise OAuthClientNotFoundError(str(client_id))
+        return client
+
+    async def get_many_oauth_clients(
+        self,
+        client_ids: list[uuid.UUID],
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> list[OAuthClient | None]:
+        """Retrieve clients by ids in a single query, scoped by *perm_filter*.
+
+        Returns a list positionally aligned with *client_ids*: the i-th entry is
+        the :class:`OAuthClient` for ``client_ids[i]`` or ``None`` when
+        missing/out of scope. Duplicate ids are preserved. An empty *client_ids*
+        yields an empty list without hitting the DB.
+        """
+        if not client_ids:
+            return []
+        stmt = perm_filter.filter_sql(select(OAuthClient).where(OAuthClient.id.in_(client_ids)))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, OAuthClient] = {c.id: c for c in result.scalars().all()}
+        return [by_id.get(cid) for cid in client_ids]
+
+    async def update_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        payload: OAuthClientUpdate,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Partially update a client scoped by *perm_filter*.
+
+        Raises :class:`OAuthClientNotFoundError` if missing/out of scope and
+        :class:`OAuthClientConflictError` on a duplicate ``client_id``.
+        """
+        client = await self.get_oauth_client(client_id, perm_filter)
+        if payload.name is not None:
+            client.name = payload.name
+        if payload.client_secret is not None:
+            client.client_secret = self._enc.encrypt_value(payload.client_secret)
+        if payload.redirect_uris is not None:
+            await self.replace_redirect_uris(client, payload.redirect_uris)
+        if payload.enabled is not None:
+            client.enabled = payload.enabled
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise OAuthClientConflictError(str(client_id)) from exc
+        await self._session.refresh(client)
+        return client
+
+    async def delete_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> None:
+        """Delete a client scoped by *perm_filter*. Raises if missing/out of scope."""
+        client = await self.get_oauth_client(client_id, perm_filter)
+        await self.delete_client(client)
+
+    async def apply_client_batch(
+        self,
+        operations: list[OAuthClientBatchOp],
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> list[OAuthClient | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic: a failure of
+        any operation rolls back the entire batch). Returns results aligned with
+        *operations*: the client for create/update, ``None`` for delete.
+        """
+        results: list[OAuthClient | None] = []
+        for op in operations:
+            if isinstance(op, OAuthClientBatchCreate):
+                results.append(await self._batch_create_client(op, perm_filters))
+            elif isinstance(op, OAuthClientBatchUpdate):
+                results.append(await self._batch_update_client(op, perm_filters))
+            elif isinstance(op, OAuthClientBatchDelete):
+                await self._batch_delete_client(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create_client(
+        self,
+        op: OAuthClientBatchCreate,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> OAuthClient:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        return await self.create_oauth_client(op.data, filt)
+
+    async def _batch_update_client(
+        self,
+        op: OAuthClientBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> OAuthClient:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await self.update_oauth_client(op.id, op.data, filt)
+
+    async def _batch_delete_client(
+        self,
+        op: OAuthClientBatchDelete,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await self.delete_oauth_client(op.id, filt)
 
     # ------------------------------------------------------------------ #
     # Internals — IdP HTTP.

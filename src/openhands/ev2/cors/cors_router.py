@@ -13,9 +13,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import (
+    depends_permissions,
+    depends_permissions_or_none,
+)
 from openhands.ev2.cors.cors_models import AllowedOrigin
 from openhands.ev2.cors.cors_schemas import (
+    AllowedOriginBatchWriteRequest,
     AllowedOriginCreate,
     AllowedOriginRead,
     AllowedOriginSearchResult,
@@ -23,10 +27,12 @@ from openhands.ev2.cors.cors_schemas import (
 from openhands.ev2.cors.cors_service import (
     AllowedOriginConflictError,
     AllowedOriginNotFoundError,
+    BatchPermissionDeniedError,
     CorsService,
 )
 from openhands.ev2.db import SessionDep
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/cors-origins", tags=["cors-origins"])
@@ -92,6 +98,79 @@ async def create_cors_origin(
         ) from exc
     await session.commit()
     return await _to_read(origin)
+
+
+@router.get(
+    "/batch",
+    response_model=BatchReadResult[AllowedOriginRead],
+)
+async def get_cors_origins_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(depends_permissions(AllowedOrigin, Action.READ))
+    ],
+    # Declared before `/{origin_id}` so the static `/batch` path matches ahead
+    # of the UUID path param. Default to an empty list so an omitted `ids` param
+    # is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[AllowedOriginRead]:
+    _ = perm_filter  # cors origins are global; the filter only gates access.
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = CorsService(session)
+    origins = await service.get_many(ids)
+    return BatchReadResult(
+        items=[await _to_read(o) if o is not None else None for o in origins],
+    )
+
+
+@router.post(
+    "/batch",
+    response_model=BatchWriteResult[AllowedOriginRead],
+)
+async def write_cors_origins_batch(
+    payload: AllowedOriginBatchWriteRequest,
+    session: SessionDep,
+    # Resolve a per-action filter without raising so a batch mixing create/delete
+    # does not 403 on an unused action. The service denies per operation when its
+    # action has no grant. Declared before `/{origin_id}` so the static `/batch`
+    # path matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[Any] | None, Depends(depends_permissions_or_none(AllowedOrigin, Action.CREATE))
+    ],
+    delete_filter: Annotated[
+        SearchFilter[Any] | None, Depends(depends_permissions_or_none(AllowedOrigin, Action.DELETE))
+    ],
+) -> BatchWriteResult[AllowedOriginRead]:
+    service = CorsService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(payload.operations, perm_filters)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except AllowedOriginConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Origin already registered: {exc}",
+        ) from exc
+    except AllowedOriginNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Origin not found: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[await _to_read(o) if o is not None else None for o in results],
+    )
 
 
 @router.delete("/{origin_id}", status_code=status.HTTP_204_NO_CONTENT)

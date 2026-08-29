@@ -109,6 +109,123 @@ class TestOAuthClientCrud:
         assert (await client.get(f"/auth/clients/{cid}")).status_code == 404
 
 
+class TestBatchClientsRoute:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        a = await client.post(
+            "/auth/clients", json={"client_id": "ba", "client_secret": "s", "redirect_uris": []}
+        )
+        b = await client.post(
+            "/auth/clients", json={"client_id": "bb", "client_secret": "s", "redirect_uris": []}
+        )
+        aid, bid = a.json()["id"], b.json()["id"]
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/auth/clients/batch?ids={aid}&ids={missing}&ids={bid}")
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["id"] == aid
+        assert items[1] is None
+        assert items[2]["id"] == bid
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        resp = await client.get("/auth/clients/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/auth/clients/batch?{ids}")
+        assert resp.status_code == 422
+
+
+class TestBatchWriteClients:
+    """POST /auth/clients/batch — mix of create/update/delete in one transaction."""
+
+    async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
+        r1 = await client.post(
+            "/auth/clients", json={"client_id": "bwr1", "client_secret": "s", "redirect_uris": []}
+        )
+        r2 = await client.post(
+            "/auth/clients", json={"client_id": "bwr2", "client_secret": "s", "redirect_uris": []}
+        )
+        cid1, cid2 = r1.json()["id"], r2.json()["id"]
+        resp = await client.post(
+            "/auth/clients/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"client_id": "bwr3", "client_secret": "s", "redirect_uris": []},
+                    },
+                    {"op": "update", "id": cid1, "data": {"name": "Renamed"}},
+                    {"op": "delete", "id": cid2},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["client_id"] == "bwr3"
+        assert items[1]["id"] == cid1 and items[1]["name"] == "Renamed"
+        assert items[2] is None
+        assert (await client.get(f"/auth/clients/{cid2}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/auth/clients/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {
+                            "client_id": "bwrollback",
+                            "client_secret": "s",
+                            "redirect_uris": [],
+                        },
+                    },
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        clients = (await client.get("/auth/clients?limit=100")).json()["items"]
+        ids = {c["client_id"] for c in clients}
+        assert "bwrollback" not in ids
+
+    async def test_batch_conflict_rolls_back_whole_batch(self, client: AsyncClient) -> None:
+        await client.post(
+            "/auth/clients",
+            json={"client_id": "bwconflict", "client_secret": "s", "redirect_uris": []},
+        )
+        resp = await client.post(
+            "/auth/clients/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"client_id": "bwfresh", "client_secret": "s", "redirect_uris": []},
+                    },
+                    {
+                        "op": "create",
+                        "data": {
+                            "client_id": "bwconflict",
+                            "client_secret": "s",
+                            "redirect_uris": [],
+                        },
+                    },  # 409
+                ]
+            },
+        )
+        assert resp.status_code == 409
+        clients = (await client.get("/auth/clients?limit=100")).json()["items"]
+        ids = {c["client_id"] for c in clients}
+        assert "bwfresh" not in ids
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/auth/clients/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+
 class TestAuthorizeRoute:
     async def test_authorize_redirects_to_idp(self, client: AsyncClient) -> None:
         await client.post(
