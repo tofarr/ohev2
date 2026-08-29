@@ -1609,3 +1609,103 @@ class TestCookieAutoRefresh:
         payload = enc.decrypt_jwe_token(cookie)
         assert payload["aid"] == str(ctx.access_id)
         assert int(payload["axp"]) == int(access_row.expires_at.timestamp())
+
+
+# ---------------------------------------------------------------------------
+# /auth/logout — AuthService.revoke_session (cookie-focused session end).
+# ---------------------------------------------------------------------------
+
+
+class TestRevokeSession:
+    """Cover the cookie-focused logout path (AuthService.revoke_session)."""
+
+    @respx.mock
+    async def test_revoke_session_deletes_backing_rows(self, service: AuthService) -> None:
+        """revoke_session deletes the IdP refresh + access rows backing the cookie."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="cookie",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("lo-sub", "lo@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+
+        access_row = (
+            await service._session.execute(
+                select(IdpAccessToken).where(IdpAccessToken.id == ctx.access_id)
+            )
+        ).scalar_one()
+        cookie = service.mint_session_cookie(ctx.user_id, access_row)
+
+        await service.revoke_session(cookie)
+        await service._session.commit()
+
+        # The ORM identity map still holds the now-deleted objects; expire
+        # them so the re-get actually hits the DB and returns None.
+        service._session.expire_all()
+        assert (await service._session.get(IdpAccessToken, ctx.access_id)) is None
+        assert (await service._session.get(IdpRefreshToken, ctx.row_id)) is None
+
+    async def test_revoke_session_garbage_token_is_noop(self, service: AuthService) -> None:
+        """A garbage cookie is swallowed; revoke_session returns without error."""
+        await service.revoke_session("not-a-real-jwe")
+        # No exception, no DB changes expected.
+
+    @respx.mock
+    async def test_revoke_session_plain_cookie_is_noop(self, service: AuthService) -> None:
+        """A cookie with no aid (test/bootstrap token) revokes nothing."""
+        from openhands.ev2.auth.auth_models import TokenType
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        enc = get_encryption_service()
+        plain = enc.create_jwe_token(
+            {"sub": str(uuid.uuid4()), "ttyp": TokenType.COOKIE.value, "jti": str(uuid.uuid4())},
+            expires_in=timedelta(hours=1),
+        )
+        # Must not raise and must not touch any rows.
+        await service.revoke_session(plain)
+
+    @respx.mock
+    async def test_revoke_session_non_cookie_token_is_noop(self, service: AuthService) -> None:
+        """A token of a non-COOKIE type is ignored (logout is cookie-focused)."""
+        await _create_client(service, redirect_uris=[_CALLBACK])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri=_CALLBACK,
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+            response_type="code",
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("nc-sub", "nc@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code or "",
+            redirect_uri=_CALLBACK,
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        # An access token is not a cookie; revoke_session must ignore it.
+        await service.revoke_session(pair.access_token)
+        assert (await service._session.get(IdpRefreshToken, ctx.row_id)) is not None

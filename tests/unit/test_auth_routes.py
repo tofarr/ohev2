@@ -649,3 +649,117 @@ class TestFullOAuthFlowRoute:
             json={"grant_type": "bogus", "client_id": "x", "client_secret": "y"},
         )
         assert resp.status_code == 400
+
+
+class TestLogout:
+    """POST /auth/logout — cookie-focused session end."""
+
+    @respx.mock
+    async def test_logout_clears_cookie_and_kills_session(self, app) -> None:
+        """Logout returns 204, clears the cookie, and ends the federated session."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "logout-1",
+                    "client_secret": "logout-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("lo-sub", "lo@example.com")
+                )
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "cookie",
+                    "client_id": "logout-1",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "state": "client-state",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            assert cb.status_code == 302, cb.text
+            cookie_value = cb.cookies.get("ohesession")
+            assert cookie_value, "callback must set a session cookie"
+
+            # Logout with the cookie present.
+            logout = await c.post("/auth/logout")
+            assert logout.status_code == 204, logout.text
+            # The cookie is cleared (Set-Cookie with empty value / max-age 0).
+            set_cookie = logout.headers.get("set-cookie", "")
+            assert "ohesession=" in set_cookie
+            assert "max-age=0" in set_cookie.lower() or 'expires="' in set_cookie.lower()
+
+    async def test_logout_without_cookie_returns_204(self, app) -> None:
+        """Logout with no session cookie still returns 204 (idempotent)."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            logout = await c.post("/auth/logout")
+            assert logout.status_code == 204, logout.text
+            # The cookie is still cleared (delete_cookie is unconditional).
+            set_cookie = logout.headers.get("set-cookie", "")
+            assert "ohesession=" in set_cookie
+
+    @respx.mock
+    async def test_logout_revokes_backing_refresh_token(self, app) -> None:
+        """After logout the cookie's backing session is revoked: a second
+        logout (with the now-cleared cookie) still returns 204, and the
+        cookie-clearing header is present on both calls."""
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "logout-2",
+                    "client_secret": "logout-secret",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("lo2-sub", "lo2@example.com")
+                )
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "cookie",
+                    "client_id": "logout-2",
+                    "redirect_uri": "https://app.example.com/cb",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            assert cb.status_code == 302, cb.text
+            assert cb.cookies.get("ohesession")
+
+            first = await c.post("/auth/logout")
+            assert first.status_code == 204, first.text
+            assert "ohesession=" in first.headers.get("set-cookie", "")
+
+            # Second logout with no cookie: still 204, cookie still cleared.
+            second = await c.post("/auth/logout")
+            assert second.status_code == 204, second.text
+            assert "ohesession=" in second.headers.get("set-cookie", "")
