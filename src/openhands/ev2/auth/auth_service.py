@@ -430,6 +430,47 @@ class AuthService:
             return
 
     # ------------------------------------------------------------------ #
+    # /logout — cookie-focused session end (counterpart to /revoke).
+    # ------------------------------------------------------------------ #
+
+    async def revoke_session(self, cookie_token: str) -> None:
+        """Revoke the federated session backing a session cookie.
+
+        Decrypts the cookie JWE, extracts the access-token row id (``aid``),
+        and deletes the backing ``idp_refresh_tokens`` row (cascading to its
+        access row), so the federated session can no longer refresh or
+        exchange. The IdP refresh + access credentials are forwarded to the
+        IdP revocation endpoint (best-effort) before the local row is dropped.
+
+        A cookie with no ``aid`` (test/bootstrap token) has no federated
+        backing row, so it is a no-op. Any decrypt/parse failure is swallowed
+        — logout is best-effort and the cookie is cleared on the response
+        regardless of the token's validity.
+        """
+        try:
+            payload = self._decrypt(cookie_token)
+            if self._token_type(payload) is not TokenType.COOKIE:
+                return
+            access_id_raw = payload.get(_ACCESS_ID_CLAIM)
+            if not isinstance(access_id_raw, str):
+                return
+            access_id = uuid.UUID(access_id_raw)
+        except (InvalidGrantError, ValueError):
+            return
+        access_row = await self._session.get(IdpAccessToken, access_id)
+        if access_row is None:
+            return
+        refresh_row = await self._session.get(IdpRefreshToken, access_row.refresh_token_id)
+        if refresh_row is None:
+            return
+        await self._revoke_with_idp(refresh_row.refresh_token)
+        await self._revoke_with_idp(access_row.access_token)
+        await self._session.execute(
+            delete(IdpRefreshToken).where(IdpRefreshToken.id == refresh_row.id)
+        )
+        await self._session.flush()
+
+    # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
     # ------------------------------------------------------------------ #
 
