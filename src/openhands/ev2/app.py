@@ -23,6 +23,8 @@ from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
+from openhands.ev2.secret.role_secret_router import router as role_secret_router
+from openhands.ev2.secret.secret_router import router as secret_router
 from openhands.ev2.user.user_router import router as user_router
 
 # Sentinel IdP URL that selects the built-in dev identity provider
@@ -95,6 +97,8 @@ def create_app() -> FastAPI:
     app.include_router(cors_router)
     app.include_router(role_router)
     app.include_router(user_role_router)
+    app.include_router(secret_router)
+    app.include_router(role_secret_router)
     app.include_router(user_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app

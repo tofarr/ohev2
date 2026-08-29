@@ -22,6 +22,8 @@ Tables:
 * ``allowed_origins``        — CORS allow-list.
 * ``roles``                  — named role bundling per-entity Permission policies.
 * ``user_roles``             — role-to-user assignments.
+* ``secrets``                — named secrets with encrypted values.
+* ``role_secrets``           — per-role grants of access to secrets.
 """
 
 from __future__ import annotations
@@ -344,6 +346,12 @@ def upgrade() -> None:
             comment="Permission policy for cors_origin resources; null = deny.",
         ),
         sa.Column(
+            "secret_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for secret resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -387,8 +395,82 @@ def upgrade() -> None:
     op.create_index("ix_user_roles_role_id", "user_roles", ["role_id"], unique=False)
     op.create_index("ix_user_roles_user_id", "user_roles", ["user_id"], unique=False)
 
+    # ------------------------------------------------------------------ #
+    # secrets
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "secrets",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("code", sa.String(length=255), nullable=False),
+        sa.Column("value", sa.Text(), nullable=False, comment="Encrypted value (JWE ciphertext)."),
+        sa.Column("description", sa.Text(), nullable=True),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.UniqueConstraint("code"),
+    )
+    op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
+    op.create_index("ix_secrets_user_id", "secrets", ["user_id"], unique=False)
+
+    # ------------------------------------------------------------------ #
+    # role_secrets
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "role_secrets",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column("secret_id", sa.Uuid(), nullable=False),
+        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"], ["roles.id"], ondelete="CASCADE", name="fk_role_secrets_role_id_roles"
+        ),
+        sa.ForeignKeyConstraint(
+            ["secret_id"],
+            ["secrets.id"],
+            ondelete="CASCADE",
+            name="fk_role_secrets_secret_id_secrets",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("role_id", "secret_id", name="uq_role_secrets_role_id_secret_id"),
+        comment="Per-role grants of access to secrets",
+    )
+    op.create_index("ix_role_secrets_role_id", "role_secrets", ["role_id"], unique=False)
+    op.create_index("ix_role_secrets_secret_id", "role_secrets", ["secret_id"], unique=False)
+
 
 def downgrade() -> None:
+    op.drop_index("ix_role_secrets_secret_id", table_name="role_secrets")
+    op.drop_index("ix_role_secrets_role_id", table_name="role_secrets")
+    op.drop_table("role_secrets")
+    op.drop_index("ix_secrets_user_id", table_name="secrets")
+    op.drop_index("ix_secrets_code", table_name="secrets")
+    op.drop_table("secrets")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")
     op.drop_index("ix_user_roles_role_id", table_name="user_roles")
     op.drop_table("user_roles")
