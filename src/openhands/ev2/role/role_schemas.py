@@ -50,6 +50,14 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
+    provider_connection_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for provider_connection resources; null = deny.",
+    )
+    llm_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for llm resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -90,6 +98,14 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
+    provider_connection_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for provider_connection resources; null = deny.",
+    )
+    llm_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for llm resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -115,6 +131,8 @@ class RoleRead(BaseModel):
     api_key_permission: Permission | None
     oauth_client_permission: Permission | None
     cors_origin_permission: Permission | None
+    provider_connection_permission: Permission | None
+    llm_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 
