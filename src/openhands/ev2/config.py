@@ -122,6 +122,18 @@ class IdpConfig(BaseModel):
             "Defaults to the token endpoint (RFC 6749)."
         ),
     )
+    revocation_path: str | None = Field(
+        default=None,
+        description=(
+            "Path appended to idp.url for the RFC 7009 token revocation "
+            "endpoint. When unset (the default), revocation is local-only: "
+            "the project's own tokens are revoked but the underlying IdP "
+            "credential is not. Set this (e.g. '/revoke') when the IdP "
+            "exposes a revocation endpoint so /auth/revoke also forwards the "
+            "best-effort revocation to the IdP. IdP revocation failures are "
+            "swallowed — the local revocation always succeeds."
+        ),
+    )
     # Fallback access-token lifetime (seconds) used only when the IdP token
     # response omits both ``expires_in`` and ``expires_at``. The IdP is the
     # source of truth for access control; this is a last-resort default.

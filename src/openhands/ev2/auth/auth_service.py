@@ -22,7 +22,10 @@ The project acts as a federated OAuth proxy:
    process already refreshed it.
 5. ``/auth/revoke`` (RFC 7009) best-effort-revokes a token: deleting the
    ``idp_refresh_tokens`` row (cascading to its access row) for a refresh
-   token, or moving the access row's expiry to now for an access token.
+   token, or moving the access row's expiry to now for an access token. When
+   ``idp.revocation_path`` is configured, the underlying IdP credential is
+   also forwarded to the IdP's revocation endpoint (best-effort, failures
+   swallowed) before the local row is dropped.
 
 Access tokens are self-contained JWEs (``ttyp: access_token``) so the existing
 :func:`get_current_user_id` dependency authenticates them unchanged; their
@@ -393,6 +396,13 @@ class AuthService:
         ``expires_at`` is moved to now so the session won't refresh, but the
         already-minted JWE remains usable until its own short ``exp`` elapses
         (Option A — the auth hot path does not check the row).
+
+        When ``idp.revocation_path`` is configured, the underlying IdP
+        credential is also forwarded to the IdP's revocation endpoint
+        (best-effort) before the local row is dropped, so a compromised IdP
+        refresh/access token cannot be replayed directly against the IdP. IdP
+        revocation failures are swallowed — the local revocation is
+        authoritative for the project's session and must always succeed.
         """
         await self._authenticate_client(client_id, client_secret)
         try:
@@ -400,13 +410,17 @@ class AuthService:
             token_type = self._token_type(payload)
             if token_type is TokenType.IDP_REFRESH_TOKEN:
                 row_id = _uuid(payload, _ROW_ID_CLAIM)
-                await self._session.execute(
-                    delete(IdpRefreshToken).where(IdpRefreshToken.id == row_id)
-                )
+                refresh_row = await self._session.get(IdpRefreshToken, row_id)
+                if refresh_row is not None:
+                    await self._revoke_with_idp(refresh_row.refresh_token)
+                    await self._session.execute(
+                        delete(IdpRefreshToken).where(IdpRefreshToken.id == row_id)
+                    )
             elif token_type is TokenType.ACCESS_TOKEN:
                 access_id = _uuid(payload, _ACCESS_ID_CLAIM)
                 access_row = await self._session.get(IdpAccessToken, access_id)
                 if access_row is not None:
+                    await self._revoke_with_idp(access_row.access_token)
                     access_row.expires_at = _now()
             # Other token types (cookie, api_key, legacy refresh_token) are not
             # issued by this provider to clients, so revocation is a no-op.
@@ -619,6 +633,39 @@ class AuthService:
         if "access_token" not in body:
             raise IdpError("IdP token response missing access_token")
         return body
+
+    async def _revoke_with_idp(self, encrypted_credential: str) -> None:
+        """Forward a revocation to the IdP (RFC 7009, best-effort).
+
+        *encrypted_credential* is the at-rest-encrypted IdP refresh or access
+        token from the backing row; it is decrypted here and POSTed to the IdP's
+        revocation endpoint. When ``idp.revocation_path`` is unset (the default)
+        this is a no-op — the local revocation is authoritative on its own.
+
+        Any failure (network error, non-2xx response) is swallowed: the caller's
+        local revocation must still succeed so the project's own session is
+        killed regardless of IdP availability. The IdP call is only a
+        defense-in-depth measure against direct replay of a compromised IdP
+        credential.
+        """
+        path = self._idp.revocation_path
+        if path is None:
+            return
+        credential = self._enc.decrypt_value(encrypted_credential)
+        url = _join_url(self._idp_base(), path)
+        data = {
+            "token": credential,
+            "client_id": self._idp.client_id,
+            "client_secret": self._idp.client_secret.get_secret_value(),
+        }
+        try:
+            resp = await self._http.post(url, data=data)
+        except httpx.HTTPError:
+            return
+        # RFC 7009 §2.2: the IdP returns 200 for valid, invalid, and already-
+        # revoked tokens alike. Any non-2xx is treated as best-effort failure.
+        if not resp.is_success:
+            return
 
     # ------------------------------------------------------------------ #
     # Internals — user provisioning.
