@@ -59,29 +59,30 @@ class ApiKeyService:
         self._session = session
         self._perm_filter = perm_filter
 
-    async def create(self, payload: ApiKeyCreate) -> tuple[str, ApiKey]:
+    async def create(self, payload: ApiKeyCreate, *, user_id: uuid.UUID) -> tuple[str, ApiKey]:
         """Mint an API key and persist its backing row.
 
-        Returns (token, row). Raises :class:`ApiKeyPermissionScopeError` if the
-        prospective key does not satisfy the service's ``perm_filter`` (the
-        principal's create scope).
+        Returns (token, row). *user_id* is the current principal, never read
+        from the payload (AGENTS.md §9). Raises
+        :class:`ApiKeyPermissionScopeError` if the prospective key does not
+        satisfy the service's ``perm_filter`` (the principal's create scope).
         """
         # Validate scope before minting: the perm_filter is the principal's
         # create grant reduced to a row predicate. Checked in-memory so a
         # principal scoped to their own keys cannot mint one for another user.
         prospective = ApiKey(
             jti=uuid.uuid4(),  # placeholder; the real jti is minted below
-            user_id=payload.user_id,
+            user_id=user_id,
             name=payload.name,
             enabled=payload.enabled,
             expires_at=payload.expires_at,
         )
         if not self._perm_filter.matches(prospective):
-            raise ApiKeyPermissionScopeError(str(payload.user_id))
+            raise ApiKeyPermissionScopeError(str(user_id))
 
         token_service = TokenService(self._session)
         token, row = await token_service.create_api_key(
-            payload.user_id,
+            user_id,
             name=payload.name,
             enabled=payload.enabled,
             expires_at=payload.expires_at,
@@ -92,7 +93,7 @@ class ApiKeyService:
         if not self._perm_filter.matches(row):
             # Roll back the minted row so a scoped-out create leaves nothing.
             await self._session.rollback()
-            raise ApiKeyPermissionScopeError(str(payload.user_id))
+            raise ApiKeyPermissionScopeError(str(user_id))
         await self._session.refresh(row)
         return token, row
 
@@ -178,6 +179,8 @@ class ApiKeyService:
         self,
         operations: list[ApiKeyBatchOp],
         perm_filters: dict[Action, SearchFilter[ApiKey] | None],
+        *,
+        user_id: uuid.UUID,
     ) -> list[ApiKey | None]:
         """Apply a mix of create/update/delete operations in one transaction.
 
@@ -187,11 +190,13 @@ class ApiKeyService:
         caller commits once after the whole batch succeeds (atomic). Returns
         results aligned with *operations*: the key for create/update, ``None``
         for delete. Batch creates do not return the minted JWE token.
+        *user_id* is the current principal and is used as the subject of any
+        created key (never read from the payload).
         """
         results: list[ApiKey | None] = []
         for op in operations:
             if isinstance(op, ApiKeyBatchCreate):
-                results.append(await self._batch_create(op, perm_filters))
+                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
             elif isinstance(op, ApiKeyBatchUpdate):
                 results.append(await self._batch_update(op, perm_filters))
             elif isinstance(op, ApiKeyBatchDelete):
@@ -203,6 +208,8 @@ class ApiKeyService:
         self,
         op: ApiKeyBatchCreate,
         perm_filters: dict[Action, SearchFilter[ApiKey] | None],
+        *,
+        user_id: uuid.UUID,
     ) -> ApiKey:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
@@ -210,7 +217,7 @@ class ApiKeyService:
         # A per-operation ApiKeyService so the create's perm_filter matches the
         # operation's action, not the batch endpoint's single action. The token
         # is discarded: batch creates do not surface secrets.
-        _token, row = await ApiKeyService(self._session, filt).create(op.data)
+        _token, row = await ApiKeyService(self._session, filt).create(op.data, user_id=user_id)
         return row
 
     async def _batch_update(

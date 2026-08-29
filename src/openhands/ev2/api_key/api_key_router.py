@@ -34,7 +34,11 @@ from openhands.ev2.api_key.api_key_service import (
     ApiKeyService,
     BatchPermissionDeniedError,
 )
-from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
+from openhands.ev2.auth.auth_dependencies import (
+    UserId,
+    depends_permissions,
+    depends_permissions_or_none,
+)
 from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.db import SessionDep
 from openhands.ev2.security.security_models import Action
@@ -103,13 +107,21 @@ async def count_api_keys(
 async def create_api_key(
     payload: ApiKeyCreate,
     session: SessionDep,
+    user_id: UserId,
     perm_filter: Annotated[
         SearchFilter[ApiKey], Depends(depends_permissions(ApiKey, Action.CREATE))
     ],
 ) -> ApiKeyCreated:
+    if user_id is None:
+        # The CREATE permission dependency already denies anonymous principals
+        # (no roles); this guard is defense-in-depth for the type system.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot create an API key anonymously.",
+        )
     service = ApiKeyService(session, perm_filter)
     try:
-        token, api_key = await service.create(payload)
+        token, api_key = await service.create(payload, user_id=user_id)
     except ApiKeyPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -151,6 +163,7 @@ async def get_api_keys_batch(
 async def write_api_keys_batch(
     payload: ApiKeyBatchWriteRequest,
     session: SessionDep,
+    user_id: UserId,
     # Resolve a per-action filter without raising so a CUD batch does not 403
     # on an unused action. The service denies per operation when its action
     # has no grant. Declared before `/{api_key_id}` so the static `/batch`
@@ -165,6 +178,11 @@ async def write_api_keys_batch(
         SearchFilter[ApiKey] | None, Depends(depends_permissions_or_none(ApiKey, Action.DELETE))
     ],
 ) -> BatchWriteResult[ApiKeyRead]:
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot create an API key anonymously.",
+        )
     service = ApiKeyService(session)
     perm_filters = {
         Action.CREATE: create_filter,
@@ -172,7 +190,7 @@ async def write_api_keys_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters)
+        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
