@@ -489,6 +489,9 @@ def register_resource_policy(model: type, column: str) -> None:
 
 # Register every shipped resource at import time so the mapping is populated
 # before any request runs. Column names are `<entity>_permission` on Role.
+from openhands.ev2.api_key import (  # noqa: E402,F401
+    api_key_security as _api_key_security,  # registers ApiKeyAccess in the Permission union
+)
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402

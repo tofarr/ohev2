@@ -8,8 +8,8 @@ the centralized permission checker (AGENTS.md §9); the returned
 delete SQL and create payloads are scoped to the principal.
 
 The single-item create returns :class:`ApiKeyCreated`, which carries the
-one-time JWE token secret. Batch creates return ``ApiKeyRead`` (no secret) per
-AGENTS.md §3.
+one-time raw ``oh_...`` key value. Batch creates return ``ApiKeyRead`` (no key)
+per AGENTS.md §3.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ async def create_api_key(
 ) -> ApiKeyCreated:
     service = ApiKeyService(session, perm_filter)
     try:
-        token, api_key = await service.create(payload)
+        key, api_key = await service.create(payload)
     except ApiKeyPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -117,7 +117,7 @@ async def create_api_key(
         ) from exc
     await session.commit()
     read = ApiKeyRead.model_validate(api_key)
-    return ApiKeyCreated(**read.model_dump(), token=token)
+    return ApiKeyCreated(**read.model_dump(), key=key)
 
 
 @router.get(

@@ -78,14 +78,15 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyRead(BaseModel):
     """API key representation returned by the API.
 
-    The JWE token secret is never returned here; it is surfaced only once, on
-    the single-item create response (:class:`ApiKeyCreated`).
+    The raw key value is never returned here; it is surfaced only once, on the
+    single-item create response (:class:`ApiKeyCreated`). The non-secret
+    ``prefix`` lets a client identify a key in listings without the secret.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    jti: uuid.UUID
+    prefix: str
     user_id: uuid.UUID
     name: str | None
     enabled: bool
@@ -95,14 +96,14 @@ class ApiKeyRead(BaseModel):
 
 
 class ApiKeyCreated(ApiKeyRead):
-    """Single-item create response carrying the one-time JWE secret.
+    """Single-item create response carrying the one-time raw key value.
 
-    The ``token`` is the only time the raw credential is surfaced to a client;
-    it is not stored or recoverable. Batch creates do not return tokens
-    (AGENTS.md §3 — batch write returns ``Read`` for create/update).
+    The ``key`` is the only time the raw ``oh_...`` value is surfaced to a
+    client; it is not stored and cannot be recovered. Batch creates do not
+    return keys (AGENTS.md §3 — batch write returns ``Read`` for create/update).
     """
 
-    token: str = Field(description="The JWE API-key token; shown only once.")
+    key: str = Field(description="The raw API key value (oh_...); shown only once.")
 
 
 class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
@@ -115,6 +116,9 @@ class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
 
     name__contains: str | None = Field(default=None, description="Case-insensitive name substring.")
     name__eq: str | None = Field(default=None, description="Exact name match.")
+    prefix__contains: str | None = Field(
+        default=None, description="Case-insensitive prefix substring (e.g. 'oh_abcd')."
+    )
     user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
     enabled__eq: bool | None = Field(default=None, description="Exact enabled match.")
     expires_at__gte: datetime | None = Field(
@@ -162,7 +166,7 @@ class ApiKeySearchResult(BaseModel):
 class ApiKeyBatchCreate(BaseModel):
     """Create operation within an API-key batch write.
 
-    The minted JWE token is not returned for batch creates (AGENTS.md §3 —
+    The raw key value is not returned for batch creates (AGENTS.md §3 —
     batch write returns ``Read`` for create/update). Retrieve the row id and
     mint a new key via the single-item endpoint if the secret is needed.
     """
