@@ -149,6 +149,17 @@ class FeatureFlagSearchResult(BaseModel):
     limit: int
 
 
+class EnabledFeatureFlags(BaseModel):
+    """The set of feature-flag ids enabled for the current user.
+
+    A flag is included when it is globally enabled OR when the user holds a role
+    with an override row for that flag (the override forces the flag on for that
+    role regardless of the global ``enabled`` value).
+    """
+
+    flags: list[str] = Field(description="Ids of feature flags enabled for the current user.")
+
+
 # Batch write: POST /feature-flags/batch applies create/update/delete atomically
 # (AGENTS.md §3). Operations reuse FeatureFlagCreate/FeatureFlagUpdate; updates
 # and deletes target a specific id.
@@ -296,6 +307,7 @@ class FeatureFlagRoleBatchWriteRequest(BaseModel):
 
 
 __all__ = [
+    "EnabledFeatureFlags",
     "FeatureFlag",
     "FeatureFlagBatchWriteRequest",
     "FeatureFlagCreate",

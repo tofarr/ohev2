@@ -27,10 +27,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
     depends_permissions_or_none,
+    depends_role_ids,
+    depends_user_id,
 )
 from openhands.ev2.db import SessionDep
 from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRole
 from openhands.ev2.feature_flag.feature_flag_schemas import (
+    EnabledFeatureFlags,
     FeatureFlagBatchWriteRequest,
     FeatureFlagCreate,
     FeatureFlagRead,
@@ -118,6 +121,29 @@ async def count_feature_flags(
     service = FeatureFlagService(session, perm_filter)
     total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
+
+
+@router.get("/enabled", response_model=EnabledFeatureFlags)
+async def get_enabled_feature_flags(
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
+    role_ids: Annotated[list[uuid.UUID], Depends(depends_role_ids)],
+) -> EnabledFeatureFlags:
+    """Return the feature-flag ids enabled for the current user.
+
+    Self-service endpoint: every authenticated user may see their own effective
+    flags (no ``feature_flag_permission`` required). A flag is included when it
+    is globally enabled or when the user holds a role with an override row for
+    that flag. Anonymous access (no token) is rejected with 401.
+    """
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    service = FeatureFlagService(session)
+    flag_ids = await service.enabled_for_roles(role_ids)
+    return EnabledFeatureFlags(flags=flag_ids)
 
 
 @router.post(

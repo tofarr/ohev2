@@ -121,6 +121,67 @@ class TestGetManyFeatureFlag:
         assert await service.get_many([]) == []
 
 
+class TestEnabledForRoles:
+    async def test_globally_enabled_only(
+        self, service: FeatureFlagService, session: AsyncSession
+    ) -> None:
+        await service.create(FeatureFlagCreate(id="EF_ON", enabled=True))
+        await service.create(FeatureFlagCreate(id="EF_OFF", enabled=False))
+        ids = await service.enabled_for_roles([])
+        assert "EF_ON" in ids
+        assert "EF_OFF" not in ids
+
+    async def test_override_forces_flag_on(
+        self,
+        service: FeatureFlagService,
+        override_service: FeatureFlagRoleService,
+        session: AsyncSession,
+    ) -> None:
+        flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_OVR")
+        # Flag is globally disabled; override flips it on for the role.
+        flag = (
+            await session.execute(select(FeatureFlag).where(FeatureFlag.id == flag_id))
+        ).scalar_one()
+        flag.enabled = False
+        await override_service.create(
+            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+        )
+        ids = await service.enabled_for_roles([role_id])
+        assert flag_id in ids
+
+    async def test_override_does_not_apply_to_other_role(
+        self,
+        service: FeatureFlagService,
+        override_service: FeatureFlagRoleService,
+        session: AsyncSession,
+    ) -> None:
+        flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_ISOLATE")
+        await override_service.create(
+            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+        )
+        other = Role(name="ef-other-role")
+        session.add(other)
+        await session.flush()
+        # other role has no override row -> flag is not enabled for it (flag
+        # defaults to disabled).
+        ids = await service.enabled_for_roles([other.id])
+        assert flag_id not in ids
+
+    async def test_union_of_global_and_override(
+        self,
+        service: FeatureFlagService,
+        override_service: FeatureFlagRoleService,
+        session: AsyncSession,
+    ) -> None:
+        await service.create(FeatureFlagCreate(id="EF_GLOBAL", enabled=True))
+        flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_OVR2")
+        await override_service.create(
+            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+        )
+        ids = set(await service.enabled_for_roles([role_id]))
+        assert {"EF_GLOBAL", flag_id} <= ids
+
+
 # ---------------------------------------------------------------------- #
 # Feature flag role override service
 # ---------------------------------------------------------------------- #

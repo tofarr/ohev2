@@ -196,6 +196,28 @@ class FeatureFlagService:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
+    async def enabled_for_roles(self, role_ids: list[uuid.UUID]) -> list[str]:
+        """Ids of feature flags enabled for a principal holding *role_ids*.
+
+        A flag is enabled for the principal when it is globally enabled OR when
+        the principal holds a role with an override row for that flag (the
+        override forces the flag on regardless of the global ``enabled`` value).
+        Not scoped by ``perm_filter``: every authenticated user may see which
+        flags are on for them.
+        """
+        globally_enabled = self._perm_filter.filter_sql(
+            select(FeatureFlag.id).where(FeatureFlag.enabled.is_(True))
+        )
+        if not role_ids:
+            result = await self._session.execute(globally_enabled)
+            return [row[0] for row in result.all()]
+        overridden = select(FeatureFlagRole.feature_flag_id).where(
+            FeatureFlagRole.role_id.in_(role_ids)
+        )
+        stmt = globally_enabled.union(overridden)
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.all()]
+
     async def apply_batch(
         self,
         operations: list[FeatureFlagBatchOp],

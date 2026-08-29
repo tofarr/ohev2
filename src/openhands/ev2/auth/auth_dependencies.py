@@ -369,6 +369,39 @@ async def depends_roles(
 _ROLES_MISSING: Any = object()
 
 
+async def depends_role_ids(
+    request: Request,
+    session: SessionDep,
+    token: Annotated[AuthToken | None, Depends(depends_access_token)],
+) -> list[uuid.UUID]:
+    """The ids of the roles assigned to the current principal.
+
+    Non-generator counterpart to :func:`depends_roles` for routes that need the
+    role ids as a concrete list (FastAPI wraps generator dependencies as
+    context managers expecting a single yield, so ``depends_roles`` cannot be
+    injected directly). Anonymous principals (no token) get an empty list.
+    Reuses the per-request role cache populated by ``_iter_roles``.
+    """
+    if token is None:
+        return []
+    return [role.id for role in await _materialized_roles(request, session, token.user_id)]
+
+
+async def _materialized_roles(
+    request: Request,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+) -> list[Role]:
+    """Return the principal's roles as a list, serving from the request cache."""
+    cached = getattr(request.state, _ROLES_KEY, _ROLES_MISSING)
+    if cached is not _ROLES_MISSING:
+        return list(cached)
+    roles = await _load_roles(session, user_id)
+    if len(roles) < _ROLES_CACHE_THRESHOLD:
+        setattr(request.state, _ROLES_KEY, roles)
+    return roles
+
+
 async def _iter_roles(
     request: Request,
     session: AsyncSession,

@@ -516,3 +516,105 @@ class TestPermissionEnforcement:
         token = create_auth_token(principal.id)
         resp = await client.get("/feature-flag-roles", headers={"X-API-Key": token})
         assert resp.status_code == 200
+
+
+class TestGetEnabledFeatureFlags:
+    """``GET /feature-flags/enabled`` returns the flags enabled for the current
+    user (globally enabled OR overridden on via a role the user holds)."""
+
+    async def test_anonymous_denied_401(self, app) -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/feature-flags/enabled")
+        assert resp.status_code == 401
+
+    async def test_returns_globally_enabled_flags(self, client: AsyncClient, session) -> None:
+        principal = await _make_principal(session, email="ge@example.com", username="ge")
+        await session.commit()
+        token = create_auth_token(principal.id)
+
+        # Seed flags via the admin client: two enabled, one disabled.
+        await client.post("/feature-flags", json={"id": "ON_A", "enabled": True})
+        await client.post("/feature-flags", json={"id": "ON_B", "enabled": True})
+        await client.post("/feature-flags", json={"id": "OFF_C", "enabled": False})
+
+        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+        flags = set(resp.json()["flags"])
+        assert flags == {"ON_A", "ON_B"}
+
+    async def test_override_enables_flag_for_role_holder(
+        self, client: AsyncClient, session
+    ) -> None:
+        principal = await _make_principal(session, email="ov@example.com", username="ov")
+        # Grant a role whose override will flip a globally-disabled flag on.
+        role = await _assign_role(
+            session,
+            principal.id,
+            {"feature_flag_permission": ReadOnly()},
+            role_name="ov-role",
+        )
+        await session.commit()
+
+        # Globally disabled flag + override row attaching the user's role.
+        await client.post("/feature-flags", json={"id": "OVERRIDE_ME", "enabled": False})
+        await client.post(
+            "/feature-flag-roles",
+            json={"feature_flag_id": "OVERRIDE_ME", "role_id": str(role.id)},
+        )
+        # A globally-enabled flag is also present.
+        await client.post("/feature-flags", json={"id": "GLOBAL_ON", "enabled": True})
+
+        token = create_auth_token(principal.id)
+        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+        flags = set(resp.json()["flags"])
+        # Override flips the disabled flag on; the global one stays on too.
+        assert "OVERRIDE_ME" in flags
+        assert "GLOBAL_ON" in flags
+
+    async def test_override_does_not_leak_to_user_without_role(
+        self, client: AsyncClient, session
+    ) -> None:
+        # User A holds the role; user B does not.
+        principal_a = await _make_principal(session, email="a@example.com", username="a")
+        principal_b = await _make_principal(session, email="b@example.com", username="b")
+        role = await _assign_role(
+            session,
+            principal_a.id,
+            {"feature_flag_permission": ReadOnly()},
+            role_name="a-role",
+        )
+        await session.commit()
+
+        await client.post("/feature-flags", json={"id": "ONLY_FOR_A", "enabled": False})
+        await client.post(
+            "/feature-flag-roles",
+            json={"feature_flag_id": "ONLY_FOR_A", "role_id": str(role.id)},
+        )
+
+        token_b = create_auth_token(principal_b.id)
+        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token_b})
+        assert resp.status_code == 200
+        assert "ONLY_FOR_A" not in resp.json()["flags"]
+
+    async def test_no_flags_returns_empty_list(self, client: AsyncClient, session) -> None:
+        principal = await _make_principal(session, email="nf@example.com", username="nf")
+        await session.commit()
+        token = create_auth_token(principal.id)
+
+        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        assert resp.status_code == 200
+        assert resp.json()["flags"] == []
+
+    async def test_enabled_path_not_shadowed_by_flag_id(self, client: AsyncClient) -> None:
+        """A flag literally named ``ENABLED`` must not shadow the ``/enabled``
+        route (static path must match before the ``/{flag_id}`` param)."""
+        await client.post("/feature-flags", json={"id": "ENABLED", "enabled": True})
+        resp = await client.get("/feature-flags/enabled")
+        # The route handler runs, returning the EnabledFeatureFlags shape — not
+        # the single FeatureFlagRead for the "ENABLED" flag.
+        assert resp.status_code == 200
+        assert "flags" in resp.json()
