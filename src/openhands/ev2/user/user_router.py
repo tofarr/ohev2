@@ -34,7 +34,7 @@ from openhands.ev2.user.user_service import (
     UserService,
     UserUsernameConflictError,
 )
-from openhands.ev2.util.schemas import CountResult
+from openhands.ev2.util.schemas import BatchReadResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -126,6 +126,30 @@ async def create_user(
         ) from exc
     await session.commit()
     return UserRead.model_validate(user)
+
+
+@router.get(
+    "/batch",
+    response_model=BatchReadResult[UserRead],
+)
+async def get_users_batch(
+    session: SessionDep,
+    perm_filter: Annotated[SearchFilter[User], Depends(depends_permissions(User, Action.READ))],
+    # Declared before `/{user_id}` so the static `/batch` path matches ahead of
+    # the UUID path param. Default to an empty list so an omitted `ids` param
+    # is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[UserRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = UserService(session, perm_filter)
+    users = await service.get_many(ids)
+    return BatchReadResult(
+        items=[UserRead.model_validate(u) if u is not None else None for u in users],
+    )
 
 
 @router.get(

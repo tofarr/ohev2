@@ -32,7 +32,7 @@ from openhands.ev2.role.role_service import (
     RoleService,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.schemas import CountResult
+from openhands.ev2.util.schemas import BatchReadResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -102,6 +102,30 @@ async def create_role(
         ) from exc
     await session.commit()
     return RoleRead.model_validate(role)
+
+
+@router.get(
+    "/batch",
+    response_model=BatchReadResult[RoleRead],
+)
+async def get_roles_batch(
+    session: SessionDep,
+    perm_filter: Annotated[SearchFilter[Role], Depends(depends_permissions(Role, Action.READ))],
+    # Declared before `/{role_id}` so the static `/batch` path matches ahead of
+    # the UUID path param. Default to an empty list so an omitted `ids` param
+    # is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[RoleRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = RoleService(session, perm_filter)
+    roles = await service.get_many(ids)
+    return BatchReadResult(
+        items=[RoleRead.model_validate(r) if r is not None else None for r in roles],
+    )
 
 
 @router.get("/{role_id}", response_model=RoleRead)

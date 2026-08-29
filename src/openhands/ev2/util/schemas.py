@@ -17,3 +17,17 @@ class CountResult(BaseModel):
     """
 
     count: int = Field(ge=0, description="Number of matching rows in scope.")
+
+
+class BatchReadResult[T](BaseModel):
+    """Generic response for `GET /{resource}/batch?ids=...` endpoints.
+
+    ``items`` is positionally aligned with the requested ``ids`` list: the i-th
+    entry is the resource for ``ids[i]`` or ``None`` when that id is missing or
+    outside the principal's scope. Duplicates in ``ids`` are preserved (the same
+    resource appears at each corresponding position).
+    """
+
+    items: list[T | None] = Field(
+        description="Resources aligned to the requested ids; null where missing."
+    )

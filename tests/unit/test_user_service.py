@@ -66,6 +66,42 @@ class TestGetUser:
             await service.get(uuid.uuid4())
 
 
+class TestGetManyUsers:
+    async def test_get_many_aligned_with_nulls(self, service: UserService) -> None:
+        a = await service.create(UserCreate(email="a@example.com", username="a"))
+        b = await service.create(UserCreate(email="b@example.com", username="b"))
+        missing = uuid.uuid4()
+        result = await service.get_many([a.id, missing, b.id])
+        assert len(result) == 3
+        assert result[0] is not None and result[0].id == a.id
+        assert result[1] is None
+        assert result[2] is not None and result[2].id == b.id
+
+    async def test_get_many_empty_list_no_db_hit(self, service: UserService) -> None:
+        assert await service.get_many([]) == []
+
+    async def test_get_many_preserves_duplicates(self, service: UserService) -> None:
+        a = await service.create(UserCreate(email="dup@example.com", username="dup"))
+        result = await service.get_many([a.id, a.id])
+        assert len(result) == 2
+        assert result[0] is not None and result[0].id == a.id
+        assert result[1] is not None and result[1].id == a.id
+
+    async def test_get_many_all_missing(self, service: UserService) -> None:
+        result = await service.get_many([uuid.uuid4(), uuid.uuid4()])
+        assert result == [None, None]
+
+    async def test_get_many_respects_perm_filter(self, session: AsyncSession) -> None:
+        from openhands.ev2.util.search_filter import NoneSearchFilter
+
+        a = await UserService(session, _ALL).create(
+            UserCreate(email="scoped@example.com", username="scoped")
+        )
+        denied = UserService(session, NoneSearchFilter[User]())
+        result = await denied.get_many([a.id])
+        assert result == [None]
+
+
 class TestListUsers:
     async def test_search_empty(self, service: UserService) -> None:
         users, next_cursor = await service.search_users()

@@ -176,6 +176,52 @@ class TestCountUsersRoute:
         assert resp.json()["count"] == 2
 
 
+class TestBatchUsersRoute:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        a = await client.post("/users", json={"email": "a@example.com", "username": "a"})
+        b = await client.post("/users", json={"email": "b@example.com", "username": "b"})
+        aid, bid = a.json()["id"], b.json()["id"]
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/users/batch?ids={aid}&ids={missing}&ids={bid}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["id"] == aid
+        assert items[1] is None
+        assert items[2]["id"] == bid
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        # No ids query param -> FastAPI yields []; service short-circuits.
+        resp = await client.get("/users/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
+        a = await client.post("/users", json={"email": "dup@example.com", "username": "dup"})
+        aid = a.json()["id"]
+        resp = await client.get(f"/users/batch?ids={aid}&ids={aid}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == aid
+        assert items[1]["id"] == aid
+
+    async def test_batch_all_missing_returns_all_nulls(self, client: AsyncClient) -> None:
+        m1, m2 = str(uuid.uuid4()), str(uuid.uuid4())
+        resp = await client.get(f"/users/batch?ids={m1}&ids={m2}")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == [None, None]
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/users/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_batch_invalid_uuid_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.get("/users/batch?ids=not-a-uuid")
+        assert resp.status_code == 422
+
+
 class TestUpdateUserRoute:
     async def test_update_email(self, client: AsyncClient) -> None:
         create = await client.post("/users", json={"email": "old@example.com", "username": "old"})
