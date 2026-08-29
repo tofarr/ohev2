@@ -22,6 +22,7 @@ from openhands.ev2.auth.auth_dependencies import depends_permissions
 from openhands.ev2.db import SessionDep
 from openhands.ev2.role.role_models import Role
 from openhands.ev2.role.user_role_schemas import (
+    UserRoleBatchWriteRequest,
     UserRoleCreate,
     UserRoleRead,
     UserRoleSearchFilter,
@@ -34,7 +35,7 @@ from openhands.ev2.role.user_role_service import (
     UserRoleService,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.schemas import BatchReadResult, CountResult
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/user-roles", tags=["user-roles"])
@@ -140,6 +141,43 @@ async def get_user_roles_batch(
     links = await service.get_many(ids)
     return BatchReadResult(
         items=[await _to_read(link) if link is not None else None for link in links],
+    )
+
+
+@router.post(
+    "/batch",
+    response_model=BatchWriteResult[UserRoleRead],
+)
+async def write_user_roles_batch(
+    payload: UserRoleBatchWriteRequest,
+    session: SessionDep,
+    # Managing assignments requires UPDATE on the role resource, mirroring the
+    # single-item create/delete endpoints. Declared before `/{user_role_id}` so
+    # the static `/batch` path matches ahead of the UUID path param.
+    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
+) -> BatchWriteResult[UserRoleRead]:
+    _ = perm_filter
+    service = UserRoleService(session)
+    try:
+        results = await service.apply_batch(payload.operations)
+    except UserRoleConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Assignment already exists: {exc}",
+        ) from exc
+    except UserRoleOrphanError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Referenced role or user not found: {exc}",
+        ) from exc
+    except UserRoleNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assignment not found: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[await _to_read(link) if link is not None else None for link in results],
     )
 
 

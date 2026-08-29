@@ -19,6 +19,7 @@ module rest {
     | KNested
     | KCount
     | KBatch
+    | KBatchWrite
 
   // A route is a kind plus the resource path segments that identify it.
   type Route = {
@@ -41,6 +42,7 @@ module rest {
       | KNested => Get
       | KCount => Get
       | KBatch => Get
+      | KBatchWrite => Post
     }
 
   // A route is standard iff its kind is one of the known kinds.
@@ -55,6 +57,7 @@ module rest {
       | KNested => true
       | KCount => true
       | KBatch => true
+      | KBatchWrite => true
     }
 
   // Helpers to construct routes concisely.
@@ -72,6 +75,9 @@ module rest {
 
   pure def batchRoute(resource: str): Route =
     { kind: KBatch, resource: resource, id: "", actionName: "", child: "" }
+
+  pure def batchWriteRoute(resource: str): Route =
+    { kind: KBatchWrite, resource: resource, id: "", actionName: "", child: "" }
 
   // Tests
 
@@ -91,6 +97,10 @@ module rest {
     assert(verbFor(batchRoute("users")) == Get)
   }
 
+  run batchWriteIsPost = {
+    assert(verbFor(batchWriteRoute("users")) == Post)
+  }
+
   run standardRoutes = all {
     assert(isStandard(collection("users"))),
     assert(isStandard(createRoute("users"))),
@@ -102,5 +112,8 @@ module rest {
     assert(isStandard(batchRoute("users"))),
     assert(isStandard(batchRoute("roles"))),
     assert(isStandard(batchRoute("user-roles"))),
+    assert(isStandard(batchWriteRoute("users"))),
+    assert(isStandard(batchWriteRoute("roles"))),
+    assert(isStandard(batchWriteRoute("user-roles"))),
   }
 }

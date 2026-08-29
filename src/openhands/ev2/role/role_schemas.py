@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -153,9 +154,53 @@ class RoleSearchResult(BaseModel):
     limit: int
 
 
+# Batch write: POST /roles/batch applies create/update/delete atomically
+# (AGENTS.md §3). Operations reuse RoleCreate/RoleUpdate; updates and deletes
+# target a specific id.
+
+
+class RoleBatchCreate(BaseModel):
+    """Create operation within a role batch write."""
+
+    op: Literal["create"] = "create"
+    data: RoleCreate
+
+
+class RoleBatchUpdate(BaseModel):
+    """Update operation within a role batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: RoleUpdate
+
+
+class RoleBatchDelete(BaseModel):
+    """Delete operation within a role batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+RoleBatchOp = Annotated[
+    RoleBatchCreate | RoleBatchUpdate | RoleBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class RoleBatchWriteRequest(BaseModel):
+    """Request body for `POST /roles/batch`."""
+
+    operations: list[RoleBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/update/delete mixed.",
+    )
+
+
 __all__ = [
     "ROLE_ENTITY_COLUMNS",
     "Role",
+    "RoleBatchWriteRequest",
     "RoleCreate",
     "RoleRead",
     "RoleSearchFilter",

@@ -502,26 +502,8 @@ def depends_permissions(
         session: SessionDep,
         token: Annotated[AuthToken | None, Depends(depends_access_token)],
     ) -> SearchFilter[Any]:
-        user_id = token.user_id if token is not None else None
-        column = _policy_attr_for(model_type)
-        if column is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Permission denied: no policy registered for "
-                    f"{model_type.__name__} action={action.value}"
-                ),
-            )
-
-        filters: list[SearchFilter[Any]] = []
-        async for role in depends_roles(request, session, token):
-            policy = _role_policy_for(role, column)
-            if policy is None:
-                continue
-            filters.append(policy.to_search_filter(user_id, action))
-
-        effective = _combine(filters)
-        if effective is None or isinstance(effective, NoneSearchFilter):
+        effective = await resolve_permission_filter(model_type, action, request, session, token)
+        if effective is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(f"Permission denied: action={action.value} resource={model_type.__name__}"),
@@ -529,6 +511,61 @@ def depends_permissions(
         return effective
 
     return _guard
+
+
+def depends_permissions_or_none(
+    model_type: type,
+    action: Action,
+) -> Callable[..., Coroutine[Any, Any, SearchFilter[Any] | None]]:
+    """Like :func:`depends_permissions` but returns ``None`` instead of 403.
+
+    Used by batch-write endpoints, which mix create/update/delete in one
+    request: the handler resolves a filter per action without pre-failing on an
+    action the batch does not use, then the service denies (raises) per
+    operation when its action has no grant. A ``None`` return means "no grant
+    for this action" — callers must reject operations of that action.
+    """
+
+    async def _resolve(
+        request: Request,
+        session: SessionDep,
+        token: Annotated[AuthToken | None, Depends(depends_access_token)],
+    ) -> SearchFilter[Any] | None:
+        return await resolve_permission_filter(model_type, action, request, session, token)
+
+    return _resolve
+
+
+async def resolve_permission_filter(
+    model_type: type,
+    action: Action,
+    request: Request,
+    session: AsyncSession,
+    token: AuthToken | None,
+) -> SearchFilter[Any] | None:
+    """Reduce the principal's role policies to one filter, or ``None`` if denied.
+
+    Shared by :func:`depends_permissions` (which raises 403 on ``None``) and
+    :func:`depends_permissions_or_none` (which returns the ``None``). Returns
+    ``None`` when no policy is registered for *model_type* or when every policy
+    reduces to a deny for ``(user_id, action)``.
+    """
+    user_id = token.user_id if token is not None else None
+    column = _policy_attr_for(model_type)
+    if column is None:
+        return None
+
+    filters: list[SearchFilter[Any]] = []
+    async for role in depends_roles(request, session, token):
+        policy = _role_policy_for(role, column)
+        if policy is None:
+            continue
+        filters.append(policy.to_search_filter(user_id, action))
+
+    effective = _combine(filters)
+    if effective is None or isinstance(effective, NoneSearchFilter):
+        return None
+    return effective
 
 
 def _policy_attr_for(model_type: type) -> str | None:
@@ -577,7 +614,9 @@ __all__ = [
     "UserId",
     "depends_access_token",
     "depends_permissions",
+    "depends_permissions_or_none",
     "depends_roles",
     "depends_user_id",
     "register_resource_policy",
+    "resolve_permission_filter",
 ]

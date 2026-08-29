@@ -304,3 +304,72 @@ class TestPermissionEnforcement:
         assert resp.status_code == 200
         resp = await client.post("/roles", json={"name": "new"}, headers={"X-API-Key": token})
         assert resp.status_code == 403
+
+
+class TestBatchWriteRoles:
+    """POST /roles/batch — mix of create/update/delete in one transaction."""
+
+    async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
+        r1 = await client.post("/roles", json={"name": "bwr1"})
+        r2 = await client.post("/roles", json={"name": "bwr2"})
+        rid1, rid2 = r1.json()["id"], r2.json()["id"]
+        resp = await client.post(
+            "/roles/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": {"name": "bwr3"}},
+                    {"op": "update", "id": rid1, "data": {"name": "bwr1b"}},
+                    {"op": "delete", "id": rid2},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["name"] == "bwr3"
+        assert items[1]["id"] == rid1 and items[1]["name"] == "bwr1b"
+        assert items[2] is None
+        assert (await client.get(f"/roles/{rid2}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        keep = await client.post("/roles", json={"name": "bwkeep"})
+        resp = await client.post(
+            "/roles/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": {"name": "bwrollback"}},
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        # keep role untouched, rollback role not created
+        assert (await client.get(f"/roles/{keep.json()['id']}")).status_code == 200
+        roles = (await client.get("/roles?limit=100")).json()["items"]
+        names = {r["name"] for r in roles}
+        assert "bwrollback" not in names
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/roles/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
+        ops = [{"op": "create", "data": {"name": f"bx{i}"}} for i in range(101)]
+        resp = await client.post("/roles/batch", json={"operations": ops})
+        assert resp.status_code == 422
+
+    async def test_batch_name_conflict_rolls_back_whole_batch(self, client: AsyncClient) -> None:
+        await client.post("/roles", json={"name": "bwnameconflict"})
+        before = len((await client.get("/roles?limit=100")).json()["items"])
+        resp = await client.post(
+            "/roles/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": {"name": "bwfresh"}},
+                    {"op": "create", "data": {"name": "bwnameconflict"}},  # 409
+                ]
+            },
+        )
+        assert resp.status_code == 409
+        after = len((await client.get("/roles?limit=100")).json()["items"])
+        assert after == before  # bwfresh not persisted

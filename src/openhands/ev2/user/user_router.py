@@ -16,11 +16,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
 from openhands.ev2.db import SessionDep
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import (
+    UserBatchWriteRequest,
     UserCreate,
     UserRead,
     UserSearchFilter,
@@ -28,13 +29,14 @@ from openhands.ev2.user.user_schemas import (
     UserUpdate,
 )
 from openhands.ev2.user.user_service import (
+    BatchPermissionDeniedError,
     UserEmailConflictError,
     UserNotFoundError,
     UserPermissionScopeError,
     UserService,
     UserUsernameConflictError,
 )
-from openhands.ev2.util.schemas import BatchReadResult, CountResult
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -149,6 +151,66 @@ async def get_users_batch(
     users = await service.get_many(ids)
     return BatchReadResult(
         items=[UserRead.model_validate(u) if u is not None else None for u in users],
+    )
+
+
+@router.post(
+    "/batch",
+    response_model=BatchWriteResult[UserRead],
+)
+async def write_users_batch(
+    payload: UserBatchWriteRequest,
+    session: SessionDep,
+    # Resolve a per-action filter without raising: a batch mixing CUD must not
+    # 403 on an unused action. The service denies per operation when its action
+    # has no grant. Declared before `/{user_id}` so the static `/batch` path
+    # matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[User] | None, Depends(depends_permissions_or_none(User, Action.CREATE))
+    ],
+    update_filter: Annotated[
+        SearchFilter[User] | None, Depends(depends_permissions_or_none(User, Action.UPDATE))
+    ],
+    delete_filter: Annotated[
+        SearchFilter[User] | None, Depends(depends_permissions_or_none(User, Action.DELETE))
+    ],
+) -> BatchWriteResult[UserRead]:
+    service = UserService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(payload.operations, perm_filters)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except UserPermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User falls outside your create scope: {exc}",
+        ) from exc
+    except UserNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User not found: {exc}",
+        ) from exc
+    except UserEmailConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"User with email already exists: {exc}",
+        ) from exc
+    except UserUsernameConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"User with username already exists: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[UserRead.model_validate(u) if u is not None else None for u in results],
     )
 
 
