@@ -24,6 +24,8 @@ Tables:
 * ``user_roles``             — role-to-user assignments.
 * ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
 * ``llms``                   — stored LLM profiles referencing a provider connection.
+* ``feature_flags``          — named feature flags keyed by a string id.
+* ``feature_flag_roles``     — per-role overrides of feature flags.
 """
 
 from __future__ import annotations
@@ -358,6 +360,18 @@ def upgrade() -> None:
             comment="Permission policy for llm resources; null = deny.",
         ),
         sa.Column(
+            "feature_flag_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for feature_flag resources; null = deny.",
+        ),
+        sa.Column(
+            "feature_flag_role_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for feature_flag_role resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -488,8 +502,78 @@ def upgrade() -> None:
         "ix_llms_provider_connection_id", "llms", ["provider_connection_id"], unique=False
     )
 
+    # ------------------------------------------------------------------ #
+    # feature_flags
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "feature_flags",
+        sa.Column("id", sa.String(length=128), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("description", sa.String(length=2048), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Named feature flags keyed by a string id",
+    )
+
+    # ------------------------------------------------------------------ #
+    # feature_flag_roles
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "feature_flag_roles",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("feature_flag_id", sa.String(length=128), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["feature_flag_id"],
+            ["feature_flags.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_roles_feature_flag_id_feature_flags",
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_roles_role_id_roles",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "feature_flag_id", "role_id", name="uq_feature_flag_roles_flag_id_role_id"
+        ),
+        comment="Per-role overrides of feature flags",
+    )
+    op.create_index(
+        "ix_feature_flag_roles_feature_flag_id",
+        "feature_flag_roles",
+        ["feature_flag_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_feature_flag_roles_role_id", "feature_flag_roles", ["role_id"], unique=False
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_feature_flag_roles_role_id", table_name="feature_flag_roles")
+    op.drop_index("ix_feature_flag_roles_feature_flag_id", table_name="feature_flag_roles")
+    op.drop_table("feature_flag_roles")
+    op.drop_table("feature_flags")
     op.drop_index("ix_llms_provider_connection_id", table_name="llms")
     op.drop_index("ix_llms_user_id", table_name="llms")
     op.drop_table("llms")

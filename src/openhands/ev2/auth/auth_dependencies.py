@@ -459,6 +459,12 @@ def register_resource_policy(model: type, column: str) -> None:
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
+from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
+    FeatureFlag as _FeatureFlag,
+)
+from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
+    FeatureFlagRole as _FeatureFlagRole,
+)
 from openhands.ev2.llm.llm_models import StoredLLM as _StoredLLM  # noqa: E402
 from openhands.ev2.llm.llm_models import (  # noqa: E402
     StoredProviderConnection as _StoredProviderConnection,
@@ -475,6 +481,8 @@ register_resource_policy(_OAuthClient, "oauth_client_permission")
 register_resource_policy(_AllowedOrigin, "cors_origin_permission")
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
+register_resource_policy(_FeatureFlag, "feature_flag_permission")
+register_resource_policy(_FeatureFlagRole, "feature_flag_role_permission")
 
 
 def depends_permissions(

@@ -22,6 +22,10 @@ from openhands.ev2.auth.auth_models import (  # noqa: F401
     RefreshToken,
 )
 from openhands.ev2.db import Base
+from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
+    FeatureFlag,
+    FeatureFlagRole,
+)
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 config = context.config
