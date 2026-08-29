@@ -18,6 +18,8 @@ module rest {
     | KAction
     | KNested
     | KCount
+    | KBatch
+    | KBatchWrite
 
   // A route is a kind plus the resource path segments that identify it.
   type Route = {
@@ -39,6 +41,8 @@ module rest {
       | KAction => Post
       | KNested => Get
       | KCount => Get
+      | KBatch => Get
+      | KBatchWrite => Post
     }
 
   // A route is standard iff its kind is one of the known kinds.
@@ -52,6 +56,8 @@ module rest {
       | KAction => true
       | KNested => true
       | KCount => true
+      | KBatch => true
+      | KBatchWrite => true
     }
 
   // Helpers to construct routes concisely.
@@ -67,6 +73,12 @@ module rest {
   pure def countRoute(resource: str): Route =
     { kind: KCount, resource: resource, id: "", actionName: "", child: "" }
 
+  pure def batchRoute(resource: str): Route =
+    { kind: KBatch, resource: resource, id: "", actionName: "", child: "" }
+
+  pure def batchWriteRoute(resource: str): Route =
+    { kind: KBatchWrite, resource: resource, id: "", actionName: "", child: "" }
+
   // Tests
 
   run listIsGet = {
@@ -81,6 +93,14 @@ module rest {
     assert(verbFor(countRoute("users")) == Get)
   }
 
+  run batchIsGet = {
+    assert(verbFor(batchRoute("users")) == Get)
+  }
+
+  run batchWriteIsPost = {
+    assert(verbFor(batchWriteRoute("users")) == Post)
+  }
+
   run standardRoutes = all {
     assert(isStandard(collection("users"))),
     assert(isStandard(createRoute("users"))),
@@ -89,5 +109,11 @@ module rest {
     assert(isStandard(actionRoute("sandboxes", "sb1", "stop"))),
     assert(isStandard(countRoute("users"))),
     assert(isStandard(countRoute("permissions"))),
+    assert(isStandard(batchRoute("users"))),
+    assert(isStandard(batchRoute("roles"))),
+    assert(isStandard(batchRoute("user-roles"))),
+    assert(isStandard(batchWriteRoute("users"))),
+    assert(isStandard(batchWriteRoute("roles"))),
+    assert(isStandard(batchWriteRoute("user-roles"))),
   }
 }

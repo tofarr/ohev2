@@ -18,7 +18,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import UserRole
-from openhands.ev2.role.user_role_schemas import UserRoleSearchFilter
+from openhands.ev2.role.user_role_schemas import (
+    UserRoleBatchCreate,
+    UserRoleBatchDelete,
+    UserRoleBatchOp,
+    UserRoleSearchFilter,
+)
 
 
 class UserRoleNotFoundError(Exception):
@@ -59,6 +64,24 @@ class UserRoleService:
             raise UserRoleNotFoundError(str(user_role_id))
         return link
 
+    async def get_many(
+        self,
+        user_role_ids: list[uuid.UUID],
+    ) -> list[UserRole | None]:
+        """Retrieve assignments by ids in a single query.
+
+        Returns a list positionally aligned with *user_role_ids*: the i-th entry
+        is the :class:`UserRole` for ``user_role_ids[i]`` or ``None`` when
+        missing. Duplicate ids are preserved. An empty *user_role_ids* yields an
+        empty list without hitting the DB.
+        """
+        if not user_role_ids:
+            return []
+        stmt = select(UserRole).where(UserRole.id.in_(user_role_ids))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, UserRole] = {link.id: link for link in result.scalars().all()}
+        return [by_id.get(lid) for lid in user_role_ids]
+
     async def search_user_roles(
         self,
         *,
@@ -97,6 +120,29 @@ class UserRoleService:
         link = await self.get(user_role_id)
         await self._session.delete(link)
         await self._session.flush()
+
+    async def apply_batch(
+        self,
+        operations: list[UserRoleBatchOp],
+    ) -> list[UserRole | None]:
+        """Apply a mix of create/delete operations in one transaction.
+
+        Authorization is enforced at the router (the principal must have
+        ``UPDATE`` on the ``role`` resource to manage assignments, mirroring
+        single-item create/delete). No commit is performed — the caller commits
+        once after the whole batch succeeds (atomic: a failure of any operation
+        rolls back the entire batch). Returns results aligned with *operations*:
+        the created :class:`UserRole` for create ops, ``None`` for delete ops.
+        """
+        results: list[UserRole | None] = []
+        for op in operations:
+            if isinstance(op, UserRoleBatchCreate):
+                link = await self.create(op.data.role_id, op.data.user_id)
+                results.append(link)
+            elif isinstance(op, UserRoleBatchDelete):
+                await self.delete(op.id)
+                results.append(None)
+        return results
 
 
 def _classify_integrity_error(

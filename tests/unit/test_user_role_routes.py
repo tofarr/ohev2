@@ -152,6 +152,51 @@ class TestCountAssignmentsRoute:
         assert resp.json()["count"] >= 2
 
 
+class TestBatchAssignmentsRoute:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        role_id, user_id = await _seed_role_and_user(client)
+        a = await client.post("/user-roles", json={"role_id": role_id, "user_id": user_id})
+        aid = a.json()["id"]
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/user-roles/batch?ids={aid}&ids={missing}")
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == aid
+        assert items[1] is None
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        resp = await client.get("/user-roles/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
+        role_id, user_id = await _seed_role_and_user(client)
+        a = await client.post("/user-roles", json={"role_id": role_id, "user_id": user_id})
+        aid = a.json()["id"]
+        resp = await client.get(f"/user-roles/batch?ids={aid}&ids={aid}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == aid
+        assert items[1]["id"] == aid
+
+    async def test_batch_all_missing_returns_all_nulls(self, client: AsyncClient) -> None:
+        m1, m2 = str(uuid.uuid4()), str(uuid.uuid4())
+        resp = await client.get(f"/user-roles/batch?ids={m1}&ids={m2}")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == [None, None]
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/user-roles/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_batch_invalid_uuid_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.get("/user-roles/batch?ids=not-a-uuid")
+        assert resp.status_code == 422
+
+
 class TestDeleteAssignmentRoute:
     async def test_delete_assignment(self, client: AsyncClient) -> None:
         role_id, user_id = await _seed_role_and_user(client)
@@ -213,3 +258,96 @@ class TestPermissionEnforcement:
         token = create_auth_token(principal.id)
         resp = await client.get("/user-roles", headers={"X-API-Key": token})
         assert resp.status_code == 200
+
+
+class TestBatchWriteUserRoles:
+    """POST /user-roles/batch — mix of create/delete (no update) in one transaction."""
+
+    async def test_batch_mix_cd_returns_positional_results(self, client: AsyncClient) -> None:
+        role = await client.post("/roles", json={"name": "bwlinkrole"})
+        u1 = await client.post("/users", json={"email": "bwl1@example.com", "username": "bwl1"})
+        u3 = await client.post("/users", json={"email": "bwl3@example.com", "username": "bwl3"})
+        rid = role.json()["id"]
+        a1 = await client.post("/user-roles", json={"role_id": rid, "user_id": u1.json()["id"]})
+        resp = await client.post(
+            "/user-roles/batch",
+            json={
+                "operations": [
+                    {"op": "delete", "id": a1.json()["id"]},
+                    {"op": "create", "data": {"role_id": rid, "user_id": u3.json()["id"]}},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0] is None
+        assert items[1]["user_id"] == u3.json()["id"]
+        assert (await client.get(f"/user-roles/{a1.json()['id']}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        role = await client.post("/roles", json={"name": "bwrbrole"})
+        u = await client.post("/users", json={"email": "bwrbu@example.com", "username": "bwrbu"})
+        resp = await client.post(
+            "/user-roles/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"role_id": role.json()["id"], "user_id": u.json()["id"]},
+                    },
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        # create rolled back: no assignment linking role+u
+        links = (await client.get("/user-roles?limit=100")).json()["items"]
+        assert not any(link["user_id"] == u.json()["id"] for link in links)
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/user-roles/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
+        ops = [{"op": "delete", "id": str(uuid.uuid4())} for _ in range(101)]
+        resp = await client.post("/user-roles/batch", json={"operations": ops})
+        assert resp.status_code == 422
+
+    async def test_batch_update_op_rejected(self, client: AsyncClient) -> None:
+        # user-roles are immutable; update op must be rejected by the discriminated union.
+        resp = await client.post(
+            "/user-roles/batch",
+            json={"operations": [{"op": "update", "id": str(uuid.uuid4()), "data": {}}]},
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_duplicate_assignment_conflict_rolls_back(
+        self, client: AsyncClient
+    ) -> None:
+        role = await client.post("/roles", json={"name": "bwduprole"})
+        u = await client.post("/users", json={"email": "bwdup@example.com", "username": "bwdup"})
+        await client.post(
+            "/user-roles", json={"role_id": role.json()["id"], "user_id": u.json()["id"]}
+        )
+        # second create of the same pair -> 409; a fresh create in the same batch must roll back.
+        u2 = await client.post("/users", json={"email": "bwdup2@example.com", "username": "bwdup2"})
+        before = len((await client.get("/user-roles?limit=100")).json()["items"])
+        resp = await client.post(
+            "/user-roles/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"role_id": role.json()["id"], "user_id": u2.json()["id"]},
+                    },
+                    {
+                        "op": "create",
+                        "data": {"role_id": role.json()["id"], "user_id": u.json()["id"]},
+                    },  # 409
+                ]
+            },
+        )
+        assert resp.status_code == 409
+        after = len((await client.get("/user-roles?limit=100")).json()["items"])
+        assert after == before  # u2 assignment rolled back

@@ -9,14 +9,22 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.role.role_schemas import RoleCreate, RoleSearchFilter, RoleUpdate
+from openhands.ev2.role.role_schemas import (
+    RoleBatchCreate,
+    RoleBatchDelete,
+    RoleBatchUpdate,
+    RoleCreate,
+    RoleSearchFilter,
+    RoleUpdate,
+)
 from openhands.ev2.role.role_service import (
+    BatchPermissionDeniedError,
     RoleNameConflictError,
     RoleNotFoundError,
     RolePermissionScopeError,
     RoleService,
 )
-from openhands.ev2.security.security_models import Denied, Permitted, ReadOnly
+from openhands.ev2.security.security_models import Action, Denied, Permitted, ReadOnly
 from openhands.ev2.util.search_filter import AllSearchFilter, NoneSearchFilter
 
 _ALL = AllSearchFilter[Role]()
@@ -223,3 +231,41 @@ class TestCount:
         await service.create(RoleCreate(name="admin"))
         await service.create(RoleCreate(name="viewer"))
         assert await service.count(search_filter=RoleSearchFilter(name__contains="admin")) == 1
+
+
+class TestApplyBatch:
+    """RoleService.apply_batch — per-op permission gating + atomic application."""
+
+    async def test_batch_applies_mix_when_all_actions_permitted(
+        self, session: AsyncSession
+    ) -> None:
+        svc = RoleService(session)
+        existing = await RoleService(session, _ALL).create(RoleCreate(name="keep"))
+        ops = [
+            RoleBatchCreate(data=RoleCreate(name="new")),
+            RoleBatchUpdate(id=existing.id, data=RoleUpdate(name="keepb")),
+            RoleBatchDelete(id=existing.id),
+        ]
+        filters = {Action.CREATE: _ALL, Action.UPDATE: _ALL, Action.DELETE: _ALL}
+        results = await svc.apply_batch(ops, filters)
+        assert results[0] is not None and results[0].name == "new"
+        # update then delete on same id: update returns the role, delete returns None
+        assert results[1] is not None and results[1].name == "keepb"
+        assert results[2] is None
+
+    async def test_batch_raises_when_action_filter_is_none(self, session: AsyncSession) -> None:
+        svc = RoleService(session)
+        ops = [RoleBatchCreate(data=RoleCreate(name="denied"))]
+        # CREATE filter is None -> denied
+        filters = {Action.CREATE: None, Action.UPDATE: _ALL, Action.DELETE: _ALL}
+        with pytest.raises(BatchPermissionDeniedError):
+            await svc.apply_batch(ops, filters)
+
+    async def test_batch_skips_unused_actions_without_raising(self, session: AsyncSession) -> None:
+        # A create-only batch with update/delete filters set to None should succeed:
+        # unused actions don't need grants (depends_permissions_or_none semantics).
+        svc = RoleService(session)
+        ops = [RoleBatchCreate(data=RoleCreate(name="only-create"))]
+        filters = {Action.CREATE: _ALL, Action.UPDATE: None, Action.DELETE: None}
+        results = await svc.apply_batch(ops, filters)
+        assert results[0] is not None and results[0].name == "only-create"

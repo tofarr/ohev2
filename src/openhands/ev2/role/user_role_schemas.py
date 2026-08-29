@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -70,3 +71,38 @@ class UserRoleSearchResult(BaseModel):
         description="Opaque cursor for the next page; null when no more results.",
     )
     limit: int
+
+
+# Batch write: POST /user-roles/batch applies create/delete atomically
+# (AGENTS.md §3). Assignments are immutable, so there is no update op; to
+# change an assignment, delete and re-create within the same batch.
+
+
+class UserRoleBatchCreate(BaseModel):
+    """Create operation within a user-role batch write."""
+
+    op: Literal["create"] = "create"
+    data: UserRoleCreate
+
+
+class UserRoleBatchDelete(BaseModel):
+    """Delete operation within a user-role batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+UserRoleBatchOp = Annotated[
+    UserRoleBatchCreate | UserRoleBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class UserRoleBatchWriteRequest(BaseModel):
+    """Request body for `POST /user-roles/batch`."""
+
+    operations: list[UserRoleBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/delete mixed (no update).",
+    )

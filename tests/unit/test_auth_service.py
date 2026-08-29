@@ -852,8 +852,401 @@ class TestTokenExchange:
 
 
 # ---------------------------------------------------------------------------
-# PKCE
+# Revocation (RFC 7009)
 # ---------------------------------------------------------------------------
+
+
+class TestRevocation:
+    @respx.mock
+    async def test_revoke_refresh_token_deletes_row(self, service: AuthService) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("rev-sub", "rev@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        await service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint="refresh_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        # The refresh row and its cascaded access row are gone.
+        refresh_row = await service._session.get(IdpRefreshToken, ctx.row_id)
+        assert refresh_row is None
+        access_row = await service._session.get(IdpAccessToken, ctx.access_id)
+        assert access_row is None
+
+        # A subsequent refresh must fail.
+        with pytest.raises(InvalidGrantError):
+            await service.exchange_refresh_token(
+                refresh_token=pair.refresh_token,
+                client_id="client-1",
+                client_secret="secret-1",
+            )
+
+    async def test_revoke_wrong_client_secret_rejected(self, service: AuthService) -> None:
+        await _create_client(service, client_id="c1", client_secret="right")
+        with pytest.raises(InvalidClientError):
+            await service.revoke_token(
+                token="anything",
+                token_type_hint=None,
+                client_id="c1",
+                client_secret="wrong",
+            )
+
+    async def test_revoke_garbage_token_is_noop(self, service: AuthService) -> None:
+        """A token that fails to decrypt/parse is a best-effort no-op (no raise)."""
+        await _create_client(service, client_id="c1", client_secret="s")
+        # Should not raise.
+        await service.revoke_token(
+            token="not-a-real-jwe",
+            token_type_hint=None,
+            client_id="c1",
+            client_secret="s",
+        )
+
+    @respx.mock
+    async def test_revoke_access_token_moves_expiry_to_now(self, service: AuthService) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("rev2-sub", "rev2@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        before = await service._session.get(IdpAccessToken, ctx.access_id)
+        assert before is not None
+        assert before.expires_at > datetime.now(UTC)
+
+        await service.revoke_token(
+            token=pair.access_token,
+            token_type_hint="access_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        after = await service._session.get(IdpAccessToken, ctx.access_id)
+        assert after is not None
+        assert after.expires_at <= datetime.now(UTC)
+
+    @respx.mock
+    async def test_revoke_idempotent(self, service: AuthService) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("rev3-sub", "rev3@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        # First revoke deletes the row.
+        await service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint=None,
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+        # Second revoke: the JWE still decrypts but the row is gone; the DELETE
+        # is a no-op and the call returns without raising.
+        await service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint=None,
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+
+def _service_with_revocation(
+    service: AuthService,
+) -> AuthService:
+    """Return an AuthService sharing the session/http client but with
+    idp.revocation_path set, so revocation forwards to the IdP."""
+    from copy import copy
+
+    cfg = copy(service._cfg)
+    # IdpConfig is nested; replace with a copy carrying revocation_path.
+    idp = copy(cfg.idp)
+    idp.revocation_path = "/revoke"
+    cfg.idp = idp
+    return AuthService(
+        service._session,
+        http_client=service._http,
+        encryption_service=service._enc,
+        config=cfg,
+    )
+
+
+class TestRevocationIdpForwarding:
+    """When idp.revocation_path is configured, revocation is forwarded to the
+    IdP (best-effort) before the local row is dropped."""
+
+    @respx.mock
+    async def test_revoke_refresh_forwards_to_idp(self, service: AuthService) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(200, json=_idp_token_response("fwd-sub", "fwd@example.com"))
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        revocation_mock = respx.post(f"{_IDP_BASE}/revoke").mock(return_value=httpx.Response(200))
+        fwd_service = _service_with_revocation(service)
+        await fwd_service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint="refresh_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        # The IdP revocation endpoint was called with the decrypted IdP refresh
+        # token and the project's IdP client credentials.
+        assert revocation_mock.called
+        sent = parse_qs(revocation_mock.calls.last.request.content.decode())
+        refresh_row = (
+            await service._session.execute(
+                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+            )
+        ).scalar_one_or_none()
+        # The row is now deleted, but the IdP received the original IdP refresh
+        # token value (decrypted from the now-deleted row). We assert the call
+        # shape rather than the exact token, since the row is gone post-revoke.
+        assert sent["client_id"] == ["test-client"]
+        assert sent["token"] == ["idp-refresh-1"]
+        assert refresh_row is None
+
+    @respx.mock
+    async def test_revoke_access_forwards_to_idp(self, service: AuthService) -> None:
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("fwd2-sub", "fwd2@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        revocation_mock = respx.post(f"{_IDP_BASE}/revoke").mock(return_value=httpx.Response(200))
+        fwd_service = _service_with_revocation(service)
+        await fwd_service.revoke_token(
+            token=pair.access_token,
+            token_type_hint="access_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        # The IdP revocation endpoint received the decrypted IdP access token.
+        assert revocation_mock.called
+        sent = parse_qs(revocation_mock.calls.last.request.content.decode())
+        assert sent["token"] == ["idp-access-1"]
+        assert sent["client_id"] == ["test-client"]
+
+    @respx.mock
+    async def test_idp_revocation_failure_does_not_block_local_revoke(
+        self, service: AuthService
+    ) -> None:
+        """If the IdP revocation endpoint errors, the local row is still deleted."""
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("fwd3-sub", "fwd3@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        # IdP revocation endpoint returns 500; must not block local revocation.
+        respx.post(f"{_IDP_BASE}/revoke").mock(return_value=httpx.Response(500))
+        fwd_service = _service_with_revocation(service)
+        await fwd_service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint="refresh_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        # Local row is gone despite the IdP error.
+        refresh_row = await service._session.get(IdpRefreshToken, ctx.row_id)
+        assert refresh_row is None
+
+    @respx.mock
+    async def test_idp_revocation_network_error_does_not_block_local_revoke(
+        self, service: AuthService
+    ) -> None:
+        """A network error reaching the IdP revocation endpoint is swallowed."""
+        await _create_client(service, redirect_uris=["https://app.example.com/cb"])
+        url = await service.build_authorize_redirect(
+            client_id="client-1",
+            redirect_uri="https://app.example.com/cb",
+            state=None,
+            scope=None,
+            code_challenge=None,
+            code_challenge_method=None,
+            callback_url=_CALLBACK,
+        )
+        from urllib.parse import parse_qs, urlparse
+
+        state = parse_qs(urlparse(url).query)["state"][0]
+        respx.post(f"{_IDP_BASE}/token").mock(
+            return_value=httpx.Response(
+                200, json=_idp_token_response("fwd4-sub", "fwd4@example.com")
+            )
+        )
+        ctx = await service.handle_callback(code="idp-code", state=state, callback_url=_CALLBACK)
+        await service._session.commit()
+        pair = await service.exchange_authorization_code(
+            code=ctx.auth_code,
+            redirect_uri="https://app.example.com/cb",
+            client_id="client-1",
+            client_secret="secret-1",
+            code_verifier=None,
+        )
+        await service._session.commit()
+
+        respx.post(f"{_IDP_BASE}/revoke").mock(side_effect=httpx.ConnectError("boom"))
+        fwd_service = _service_with_revocation(service)
+        await fwd_service.revoke_token(
+            token=pair.refresh_token,
+            token_type_hint="refresh_token",
+            client_id="client-1",
+            client_secret="secret-1",
+        )
+        await service._session.commit()
+
+        refresh_row = await service._session.get(IdpRefreshToken, ctx.row_id)
+        assert refresh_row is None
 
 
 class TestPkce:

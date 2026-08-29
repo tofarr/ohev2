@@ -63,6 +63,7 @@ jobs:
           quint test specs/encryption.qnt --main=encryption
           quint test specs/user.qnt --main=user
           quint test specs/auth.qnt --main=auth
+          quint test specs/batch.qnt --main=batch
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100
@@ -72,6 +73,7 @@ jobs:
           quint run specs/auth.qnt --main=auth --invariant=codeConsumedOnceInvariant --max-steps=100
           quint run specs/auth.qnt --main=auth --invariant=cleanupOnlyExpiredInvariant --max-steps=100
           quint run specs/auth.qnt --main=auth --invariant=cookieFlowNeverCodedInvariant --max-steps=100
+          quint run specs/batch.qnt --main=batch --invariant=batchAtomicity --max-steps=100
 
   e2e:
     runs-on: ubuntu-latest
