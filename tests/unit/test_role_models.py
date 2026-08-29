@@ -48,6 +48,7 @@ class TestRoleModel:
             "api_key_permission",
             "oauth_client_permission",
             "cors_origin_permission",
+            "secret_permission",
         ):
             assert getattr(role, column) is None
 

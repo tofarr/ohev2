@@ -65,6 +65,7 @@ __all__ = [
     "NoneSearchFilter",
     "OrSearchFilter",
     "SearchFilter",
+    "T",
 ]
 
 T = TypeVar("T")

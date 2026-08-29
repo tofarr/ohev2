@@ -40,6 +40,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "api_key_permission",
     "oauth_client_permission",
     "cors_origin_permission",
+    "secret_permission",
     "provider_connection_permission",
     "llm_permission",
     "feature_flag_permission",
@@ -94,6 +95,11 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for cors_origin resources; null = deny.",
+    )
+    secret_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for secret resources; null = deny.",
     )
     provider_connection_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,

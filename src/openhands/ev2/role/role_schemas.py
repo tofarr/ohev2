@@ -50,6 +50,10 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
+    secret_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for secret resources; null = deny.",
+    )
     provider_connection_permission: Permission | None = Field(
         default=None,
         description="Permission policy for provider_connection resources; null = deny.",
@@ -106,6 +110,10 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
+    secret_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for secret resources; null = deny.",
+    )
     provider_connection_permission: Permission | None = Field(
         default=None,
         description="Permission policy for provider_connection resources; null = deny.",
@@ -147,6 +155,7 @@ class RoleRead(BaseModel):
     api_key_permission: Permission | None
     oauth_client_permission: Permission | None
     cors_origin_permission: Permission | None
+    secret_permission: Permission | None
     provider_connection_permission: Permission | None
     llm_permission: Permission | None
     feature_flag_permission: Permission | None

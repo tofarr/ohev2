@@ -76,6 +76,7 @@ class RoleService:
             api_key_permission=payload.api_key_permission,
             oauth_client_permission=payload.oauth_client_permission,
             cors_origin_permission=payload.cors_origin_permission,
+            secret_permission=payload.secret_permission,
             provider_connection_permission=payload.provider_connection_permission,
             llm_permission=payload.llm_permission,
             feature_flag_permission=payload.feature_flag_permission,
@@ -164,6 +165,8 @@ class RoleService:
             role.oauth_client_permission = payload.oauth_client_permission
         if payload.cors_origin_permission is not None:
             role.cors_origin_permission = payload.cors_origin_permission
+        if payload.secret_permission is not None:
+            role.secret_permission = payload.secret_permission
         if payload.provider_connection_permission is not None:
             role.provider_connection_permission = payload.provider_connection_permission
         if payload.llm_permission is not None:
