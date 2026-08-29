@@ -89,6 +89,31 @@ async def _seed_user(session, user_id: uuid.UUID, username: str = "role-user") -
     await session.flush()
 
 
+async def _seed_idp_rows(session, user_id: uuid.UUID) -> None:
+    """Persist a federated IdP refresh + access row so minting can sync to it."""
+    from datetime import UTC, datetime, timedelta
+
+    from openhands.ev2.auth.auth_models import IdpAccessToken, IdpRefreshToken
+    from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+    enc = get_encryption_service()
+    refresh_row = IdpRefreshToken(
+        user_id=user_id,
+        refresh_token=enc.encrypt_value("idp-refresh"),
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    session.add(refresh_row)
+    await session.flush()
+    session.add(
+        IdpAccessToken(
+            refresh_token_id=refresh_row.id,
+            access_token=enc.encrypt_value("idp-access"),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    await session.flush()
+
+
 async def _assign_role(
     session,
     *,
@@ -125,8 +150,9 @@ async def test_depends_access_token_anonymous_caches_sentinel(session, user_id):
 async def test_depends_access_token_bearer_resolves_and_caches(session, user_id):
     """A valid bearer access token resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "bearer-user")
+    await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    access = service.create_access_token(user_id)
+    access = await service.create_access_token(user_id)
     request = _make_request()
 
     from fastapi.security import HTTPAuthorizationCredentials
@@ -389,8 +415,9 @@ async def test_register_resource_policy_adds_mapping(session, user_id):
 async def test_depends_access_token_x_api_key_resolves_and_caches(session, user_id):
     """A valid X-API-Key header token resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "apikey-user")
+    await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    access = service.create_access_token(user_id)
+    access = await service.create_access_token(user_id)
     request = _make_request()
 
     token = await depends_access_token(
@@ -418,8 +445,9 @@ async def test_depends_access_token_invalid_x_api_key_raises_401(session, user_i
 async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session, user_id):
     """When both X-API-Key and Bearer are present, X-API-Key wins."""
     await _seed_user(session, user_id, "prio-user")
+    await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    api_key_token = service.create_access_token(user_id)
+    api_key_token = await service.create_access_token(user_id)
 
     request = _make_request()
     token = await depends_access_token(

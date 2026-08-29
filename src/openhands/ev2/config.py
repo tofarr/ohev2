@@ -187,36 +187,12 @@ class AppConfig(BaseModel):
         default_factory=DbConfig,
         description="Structured database connection configuration (host/port/db/credentials).",
     )
-    # Access-token lifetime (OAuth2 flow). Short-lived; replaced via refresh.
-    auth_access_token_ttl_seconds: int = Field(
-        default=900,
-        ge=1,
-        description="Lifetime (seconds) of OAuth2 access tokens (JWE).",
-    )
-    # Refresh-token lifetimes (OAuth2 flow). The sliding window is added to
-    # the current time on each newly minted refresh token; the absolute TTL
-    # caps how far repeated refreshes can extend a session.
-    auth_refresh_token_ttl_seconds: int = Field(
-        default=2_592_000,
-        ge=1,
-        description="Absolute cap (seconds) on the total refresh window.",
-    )
-    auth_refresh_token_sliding_seconds: int = Field(
-        default=86_400,
-        ge=1,
-        description=("Sliding window (seconds) added to now when minting a refresh token."),
-    )
-    # Cookie timeout for the password/cookie flow. Each authenticated request
-    # re-mints the cookie with a fresh expiry of now + this timeout (sliding
-    # session), so an active browser session never expires while idle ones do.
-    auth_cookie_timeout_seconds: int = Field(
-        default=1800,
-        ge=1,
-        description=(
-            "Sliding timeout (seconds) applied to the session cookie on every "
-            "authenticated request."
-        ),
-    )
+    # Minted-token lifetimes are NOT configurable here: they are always synced
+    # to the expiries advertised by the IdP (with idp.* fallbacks when the IdP
+    # omits one). See IdpConfig.access_token_expires_in /
+    # refresh_token_expires_in and AuthService._mint_access_token /
+    # _mint_refresh_token / _mint_cookie_jwe. The app server never grants
+    # access beyond what the IdP sanctions.
     auth_cookie_name: str = Field(
         default="ohesession",
         description="Name of the auth cookie set by the login endpoint.",
