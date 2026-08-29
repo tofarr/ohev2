@@ -23,17 +23,23 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_user_id
+from openhands.ev2.auth.auth_dependencies import (
+    depends_permissions,
+    depends_permissions_or_none,
+    depends_user_id,
+)
 from openhands.ev2.db import SessionDep
 from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection
 from openhands.ev2.llm.llm_schemas import (
     CompletionRequest,
     CompletionResponse,
+    LLMBatchWriteRequest,
     LLMCreate,
     LLMRead,
     LLMSearchFilter,
     LLMSearchResult,
     LLMUpdate,
+    ProviderConnectionBatchWriteRequest,
     ProviderConnectionCreate,
     ProviderConnectionRead,
     ProviderConnectionSearchFilter,
@@ -41,6 +47,7 @@ from openhands.ev2.llm.llm_schemas import (
     ProviderConnectionUpdate,
 )
 from openhands.ev2.llm.llm_service import (
+    BatchPermissionDeniedError,
     LLMConfigError,
     LLMNotFoundError,
     LLMPermissionScopeError,
@@ -50,7 +57,7 @@ from openhands.ev2.llm.llm_service import (
     ProviderConnectionService,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.schemas import CountResult
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -144,6 +151,92 @@ async def create_provider_connection(
         ) from exc
     await session.commit()
     return ProviderConnectionRead.model_validate(conn)
+
+
+@router.get(
+    "/provider-connections/batch",
+    response_model=BatchReadResult[ProviderConnectionRead],
+)
+async def get_provider_connections_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[StoredProviderConnection],
+        Depends(depends_permissions(StoredProviderConnection, Action.READ)),
+    ],
+    # Declared before `/{connection_id}` so the static `/batch` path matches
+    # ahead of the UUID path param. Default to an empty list so an omitted
+    # `ids` param is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[ProviderConnectionRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = ProviderConnectionService(session, perm_filter)
+    conns = await service.get_many(ids)
+    return BatchReadResult(
+        items=[ProviderConnectionRead.model_validate(c) if c is not None else None for c in conns],
+    )
+
+
+@router.post(
+    "/provider-connections/batch",
+    response_model=BatchWriteResult[ProviderConnectionRead],
+)
+async def write_provider_connections_batch(
+    payload: ProviderConnectionBatchWriteRequest,
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID, Depends(depends_user_id)],
+    # Resolve a per-action filter without raising so a CUD batch does not 403
+    # on an unused action. Declared before `/{connection_id}` so the static
+    # `/batch` path matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[StoredProviderConnection] | None,
+        Depends(depends_permissions_or_none(StoredProviderConnection, Action.CREATE)),
+    ],
+    update_filter: Annotated[
+        SearchFilter[StoredProviderConnection] | None,
+        Depends(depends_permissions_or_none(StoredProviderConnection, Action.UPDATE)),
+    ],
+    delete_filter: Annotated[
+        SearchFilter[StoredProviderConnection] | None,
+        Depends(depends_permissions_or_none(StoredProviderConnection, Action.DELETE)),
+    ],
+) -> BatchWriteResult[ProviderConnectionRead]:
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
+        )
+    service = ProviderConnectionService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except ProviderConnectionPermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Provider connection falls outside your create scope: {exc}",
+        ) from exc
+    except ProviderConnectionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Provider connection not found: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[
+            ProviderConnectionRead.model_validate(c) if c is not None else None for c in results
+        ],
+    )
 
 
 @router.get(
@@ -287,6 +380,94 @@ async def create_llm(
         ) from exc
     await session.commit()
     return LLMRead.model_validate(llm)
+
+
+@router.get(
+    "/llms/batch",
+    response_model=BatchReadResult[LLMRead],
+)
+async def get_llms_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[StoredLLM], Depends(depends_permissions(StoredLLM, Action.READ))
+    ],
+    # Declared before `/{llm_id}` so the static `/batch` path matches ahead of
+    # the UUID path param. Default to an empty list so an omitted `ids` param
+    # is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[LLMRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = LLMService(session, perm_filter)
+    llms = await service.get_many(ids)
+    return BatchReadResult(
+        items=[LLMRead.model_validate(llm) if llm is not None else None for llm in llms],
+    )
+
+
+@router.post(
+    "/llms/batch",
+    response_model=BatchWriteResult[LLMRead],
+)
+async def write_llms_batch(
+    payload: LLMBatchWriteRequest,
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID, Depends(depends_user_id)],
+    # Resolve a per-action filter without raising so a CUD batch does not 403
+    # on an unused action. Declared before `/{llm_id}` so the static `/batch`
+    # path matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[StoredLLM] | None,
+        Depends(depends_permissions_or_none(StoredLLM, Action.CREATE)),
+    ],
+    update_filter: Annotated[
+        SearchFilter[StoredLLM] | None,
+        Depends(depends_permissions_or_none(StoredLLM, Action.UPDATE)),
+    ],
+    delete_filter: Annotated[
+        SearchFilter[StoredLLM] | None,
+        Depends(depends_permissions_or_none(StoredLLM, Action.DELETE)),
+    ],
+) -> BatchWriteResult[LLMRead]:
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
+        )
+    service = LLMService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except LLMPermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"LLM falls outside your create scope: {exc}",
+        ) from exc
+    except LLMNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"LLM not found: {exc}",
+        ) from exc
+    except LLMConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid LLM config: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[LLMRead.model_validate(llm) if llm is not None else None for llm in results],
+    )
 
 
 @router.get("/llms/{llm_id}", response_model=LLMRead)

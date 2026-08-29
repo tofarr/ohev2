@@ -25,13 +25,22 @@ from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
 from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection
 from openhands.ev2.llm.llm_schemas import (
+    LLMBatchCreate,
+    LLMBatchDelete,
+    LLMBatchOp,
+    LLMBatchUpdate,
     LLMCreate,
     LLMSearchFilter,
     LLMUpdate,
+    ProviderConnectionBatchCreate,
+    ProviderConnectionBatchDelete,
+    ProviderConnectionBatchOp,
+    ProviderConnectionBatchUpdate,
     ProviderConnectionCreate,
     ProviderConnectionSearchFilter,
     ProviderConnectionUpdate,
 )
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 if TYPE_CHECKING:
@@ -60,6 +69,10 @@ class LLMPermissionScopeError(Exception):
 
 class LLMConfigError(Exception):
     """Raised when a stored LLM config blob cannot materialize an SDK LLM."""
+
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 # ---------------------------------------------------------------------- #
@@ -187,6 +200,90 @@ class ProviderConnectionService:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
+
+    async def get_many(
+        self, connection_ids: list[uuid.UUID]
+    ) -> list[StoredProviderConnection | None]:
+        """Retrieve provider connections by ids in a single query, scoped by ``perm_filter``.
+
+        Returns a list positionally aligned with *connection_ids*: the i-th entry
+        is the connection for ``connection_ids[i]`` or ``None`` when missing/out
+        of scope. Duplicates are preserved. An empty list yields an empty result
+        without hitting the DB.
+        """
+        if not connection_ids:
+            return []
+        stmt = self._perm_filter.filter_sql(
+            select(StoredProviderConnection).where(StoredProviderConnection.id.in_(connection_ids))
+        )
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, StoredProviderConnection] = {c.id: c for c in result.scalars().all()}
+        return [by_id.get(cid) for cid in connection_ids]
+
+    async def apply_batch(
+        self,
+        operations: list[ProviderConnectionBatchOp],
+        perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
+        *,
+        user_id: uuid.UUID,
+    ) -> list[StoredProviderConnection | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic). Returns
+        results aligned with *operations*: the connection for create/update,
+        ``None`` for delete.
+        """
+        results: list[StoredProviderConnection | None] = []
+        for op in operations:
+            if isinstance(op, ProviderConnectionBatchCreate):
+                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+            elif isinstance(op, ProviderConnectionBatchUpdate):
+                results.append(await self._batch_update(op, perm_filters))
+            elif isinstance(op, ProviderConnectionBatchDelete):
+                await self._batch_delete(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create(
+        self,
+        op: ProviderConnectionBatchCreate,
+        perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
+        *,
+        user_id: uuid.UUID,
+    ) -> StoredProviderConnection:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        return await ProviderConnectionService(
+            self._session, filt, encryption_service=self._enc
+        ).create(op.data, user_id=user_id)
+
+    async def _batch_update(
+        self,
+        op: ProviderConnectionBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
+    ) -> StoredProviderConnection:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await ProviderConnectionService(
+            self._session, filt, encryption_service=self._enc
+        ).update(op.id, op.data)
+
+    async def _batch_delete(
+        self,
+        op: ProviderConnectionBatchDelete,
+        perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await ProviderConnectionService(self._session, filt, encryption_service=self._enc).delete(
+            op.id
+        )
 
 
 # ---------------------------------------------------------------------- #
@@ -318,6 +415,85 @@ class LLMService:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
+    async def get_many(self, llm_ids: list[uuid.UUID]) -> list[StoredLLM | None]:
+        """Retrieve stored LLMs by ids in a single query, scoped by ``perm_filter``.
+
+        Returns a list positionally aligned with *llm_ids*: the i-th entry is the
+        LLM for ``llm_ids[i]`` or ``None`` when missing/out of scope. Duplicates
+        are preserved. An empty list yields an empty result without hitting the DB.
+        """
+        if not llm_ids:
+            return []
+        stmt = self._perm_filter.filter_sql(select(StoredLLM).where(StoredLLM.id.in_(llm_ids)))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, StoredLLM] = {row.id: row for row in result.scalars().all()}
+        return [by_id.get(lid) for lid in llm_ids]
+
+    async def apply_batch(
+        self,
+        operations: list[LLMBatchOp],
+        perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
+        *,
+        user_id: uuid.UUID,
+    ) -> list[StoredLLM | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic). Returns
+        results aligned with *operations*: the LLM for create/update, ``None``
+        for delete.
+        """
+        results: list[StoredLLM | None] = []
+        for op in operations:
+            if isinstance(op, LLMBatchCreate):
+                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+            elif isinstance(op, LLMBatchUpdate):
+                results.append(await self._batch_update(op, perm_filters))
+            elif isinstance(op, LLMBatchDelete):
+                await self._batch_delete(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create(
+        self,
+        op: LLMBatchCreate,
+        perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
+        *,
+        user_id: uuid.UUID,
+    ) -> StoredLLM:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        return await LLMService(
+            self._session, filt, encryption_service=self._enc, config=self._cfg
+        ).create(op.data, user_id=user_id)
+
+    async def _batch_update(
+        self,
+        op: LLMBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
+    ) -> StoredLLM:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await LLMService(
+            self._session, filt, encryption_service=self._enc, config=self._cfg
+        ).update(op.id, op.data)
+
+    async def _batch_delete(
+        self,
+        op: LLMBatchDelete,
+        perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await LLMService(
+            self._session, filt, encryption_service=self._enc, config=self._cfg
+        ).delete(op.id)
+
     async def first_for_connection(
         self,
         connection_id: uuid.UUID,
@@ -359,6 +535,7 @@ class LLMService:
 
 
 __all__ = [
+    "BatchPermissionDeniedError",
     "LLMConfigError",
     "LLMNotFoundError",
     "LLMPermissionScopeError",

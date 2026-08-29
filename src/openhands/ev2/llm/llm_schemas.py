@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -117,6 +117,49 @@ class ProviderConnectionSearchResult(BaseModel):
         description="Opaque cursor for the next page; null when no more results.",
     )
     limit: int
+
+
+# Batch write: POST /provider-connections/batch applies create/update/delete
+# atomically (AGENTS.md §3). Operations reuse the single-item payloads; updates
+# and deletes target a specific id.
+
+
+class ProviderConnectionBatchCreate(BaseModel):
+    """Create operation within a provider-connection batch write."""
+
+    op: Literal["create"] = "create"
+    data: ProviderConnectionCreate
+
+
+class ProviderConnectionBatchUpdate(BaseModel):
+    """Update operation within a provider-connection batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: ProviderConnectionUpdate
+
+
+class ProviderConnectionBatchDelete(BaseModel):
+    """Delete operation within a provider-connection batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+ProviderConnectionBatchOp = Annotated[
+    ProviderConnectionBatchCreate | ProviderConnectionBatchUpdate | ProviderConnectionBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class ProviderConnectionBatchWriteRequest(BaseModel):
+    """Request body for `POST /provider-connections/batch`."""
+
+    operations: list[ProviderConnectionBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/update/delete mixed.",
+    )
 
 
 # ---------------------------------------------------------------------- #
@@ -221,6 +264,49 @@ class LLMSearchResult(BaseModel):
     limit: int
 
 
+# Batch write: POST /llms/batch applies create/update/delete atomically
+# (AGENTS.md §3). Operations reuse the single-item payloads; updates and
+# deletes target a specific id.
+
+
+class LLMBatchCreate(BaseModel):
+    """Create operation within an LLM batch write."""
+
+    op: Literal["create"] = "create"
+    data: LLMCreate
+
+
+class LLMBatchUpdate(BaseModel):
+    """Update operation within an LLM batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: LLMUpdate
+
+
+class LLMBatchDelete(BaseModel):
+    """Delete operation within an LLM batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+LLMBatchOp = Annotated[
+    LLMBatchCreate | LLMBatchUpdate | LLMBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class LLMBatchWriteRequest(BaseModel):
+    """Request body for `POST /llms/batch`."""
+
+    operations: list[LLMBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/update/delete mixed.",
+    )
+
+
 # ---------------------------------------------------------------------- #
 # Completion action
 # ---------------------------------------------------------------------- #
@@ -270,11 +356,21 @@ class CompletionResponse(BaseModel):
 __all__ = [
     "CompletionRequest",
     "CompletionResponse",
+    "LLMBatchCreate",
+    "LLMBatchDelete",
+    "LLMBatchOp",
+    "LLMBatchUpdate",
+    "LLMBatchWriteRequest",
     "LLMCreate",
     "LLMRead",
     "LLMSearchFilter",
     "LLMSearchResult",
     "LLMUpdate",
+    "ProviderConnectionBatchCreate",
+    "ProviderConnectionBatchDelete",
+    "ProviderConnectionBatchOp",
+    "ProviderConnectionBatchUpdate",
+    "ProviderConnectionBatchWriteRequest",
     "ProviderConnectionCreate",
     "ProviderConnectionRead",
     "ProviderConnectionSearchFilter",

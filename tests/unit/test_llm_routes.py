@@ -207,3 +207,217 @@ class TestCompletion:
         body = resp.json()
         assert body["id"] == "resp-123"
         fake_message.model_dump.assert_called_once()
+
+
+# ====================================================================== #
+# Batch read
+# ====================================================================== #
+
+
+class TestBatchReadProviderConnections:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        a = await _create_connection(client, display_name="a")
+        b = await _create_connection(client, display_name="b")
+        missing = str(uuid.uuid4())
+        resp = await client.get(
+            f"/llm/provider-connections/batch?ids={a['id']}&ids={missing}&ids={b['id']}"
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["id"] == a["id"]
+        assert items[1] is None
+        assert items[2]["id"] == b["id"]
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        resp = await client.get("/llm/provider-connections/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client, display_name="dup")
+        resp = await client.get(
+            f"/llm/provider-connections/batch?ids={conn['id']}&ids={conn['id']}"
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == conn["id"]
+        assert items[1]["id"] == conn["id"]
+
+    async def test_batch_all_missing_returns_all_nulls(self, client: AsyncClient) -> None:
+        m1, m2 = str(uuid.uuid4()), str(uuid.uuid4())
+        resp = await client.get(f"/llm/provider-connections/batch?ids={m1}&ids={m2}")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == [None, None]
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/llm/provider-connections/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_batch_invalid_uuid_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.get("/llm/provider-connections/batch?ids=not-a-uuid")
+        assert resp.status_code == 422
+
+
+class TestBatchReadLlms:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        a = await _create_llm(client, conn["id"], display_name="a")
+        b = await _create_llm(client, conn["id"], display_name="b")
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/llm/llms/batch?ids={a['id']}&ids={missing}&ids={b['id']}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["id"] == a["id"]
+        assert items[1] is None
+        assert items[2]["id"] == b["id"]
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        resp = await client.get("/llm/llms/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        llm = await _create_llm(client, conn["id"], display_name="dup")
+        resp = await client.get(f"/llm/llms/batch?ids={llm['id']}&ids={llm['id']}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == llm["id"]
+        assert items[1]["id"] == llm["id"]
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/llm/llms/batch?{ids}")
+        assert resp.status_code == 422
+
+
+# ====================================================================== #
+# Batch write
+# ====================================================================== #
+
+
+class TestBatchWriteProviderConnections:
+    async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
+        c1 = await _create_connection(client, display_name="bwc1")
+        c2 = await _create_connection(client, display_name="bwc2")
+        resp = await client.post(
+            "/llm/provider-connections/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _conn_payload(display_name="bwc3")},
+                    {"op": "update", "id": c1["id"], "data": {"display_name": "updated"}},
+                    {"op": "delete", "id": c2["id"]},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["display_name"] == "bwc3"
+        assert items[1]["id"] == c1["id"] and items[1]["display_name"] == "updated"
+        assert items[2] is None
+        # delete persisted
+        assert (await client.get(f"/llm/provider-connections/{c2['id']}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        keep = await _create_connection(client, display_name="keep")
+        before = (await client.get("/llm/provider-connections/count")).json()["count"]
+        resp = await client.post(
+            "/llm/provider-connections/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _conn_payload(display_name="rollback")},
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        after = (await client.get("/llm/provider-connections/count")).json()["count"]
+        assert after == before
+        assert (await client.get(f"/llm/provider-connections/{keep['id']}")).status_code == 200
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/llm/provider-connections/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
+        ops = [{"op": "create", "data": _conn_payload(display_name=f"bx{i}")} for i in range(101)]
+        resp = await client.post("/llm/provider-connections/batch", json={"operations": ops})
+        assert resp.status_code == 422
+
+    async def test_batch_unknown_op_discriminator_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/llm/provider-connections/batch",
+            json={"operations": [{"op": "upsert", "data": _conn_payload(display_name="z")}]},
+        )
+        assert resp.status_code == 422
+
+
+class TestBatchWriteLlms:
+    async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        l1 = await _create_llm(client, conn["id"], display_name="bwl1")
+        l2 = await _create_llm(client, conn["id"], display_name="bwl2")
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _llm_payload(conn["id"], display_name="bwl3")},
+                    {"op": "update", "id": l1["id"], "data": {"display_name": "updated"}},
+                    {"op": "delete", "id": l2["id"]},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["display_name"] == "bwl3"
+        assert items[1]["id"] == l1["id"] and items[1]["display_name"] == "updated"
+        assert items[2] is None
+        assert (await client.get(f"/llm/llms/{l2['id']}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        keep = await _create_llm(client, conn["id"], display_name="keep")
+        before = (await client.get("/llm/llms/count")).json()["count"]
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _llm_payload(conn["id"], display_name="rollback")},
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        after = (await client.get("/llm/llms/count")).json()["count"]
+        assert after == before
+        assert (await client.get(f"/llm/llms/{keep['id']}")).status_code == 200
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/llm/llms/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        ops = [
+            {"op": "create", "data": _llm_payload(conn["id"], display_name=f"bx{i}")}
+            for i in range(101)
+        ]
+        resp = await client.post("/llm/llms/batch", json={"operations": ops})
+        assert resp.status_code == 422
+
+    async def test_batch_unknown_op_discriminator_rejected(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [{"op": "upsert", "data": _llm_payload(conn["id"], display_name="z")}]
+            },
+        )
+        assert resp.status_code == 422
