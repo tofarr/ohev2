@@ -21,11 +21,13 @@ def openapi_spec(app: FastAPI) -> dict[str, object]:
 
 _PUBLIC_PATHS = {
     "/health",
-    # auth OAuth entry points — public by design (they mint credentials).
+    # auth OAuth entry points — public by design (they mint or revoke
+    # credentials, authenticating via client credentials in the body).
     "/auth/authorize",
     "/auth/callback",
     "/auth/token",
     "/auth/refresh",
+    "/auth/revoke",
 }
 
 
@@ -84,3 +86,4 @@ def test_health_and_auth_token_endpoints_are_public(openapi_spec: dict[str, obje
     assert not paths["/auth/callback"]["get"].get("security")  # type: ignore[index]
     assert not paths["/auth/token"]["post"].get("security")  # type: ignore[index]
     assert not paths["/auth/refresh"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/revoke"]["post"].get("security")  # type: ignore[index]

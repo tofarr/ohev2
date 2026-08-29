@@ -10,6 +10,8 @@
 //              or (cookie flow) the callback granted access directly via the
 //              session cookie with no code ever minted.
 //   EXPIRED  — the IdP refresh-token row expired; refresh is rejected.
+//   REVOKED  — the refresh token was explicitly revoked (/auth/revoke);
+//              the federated session can no longer refresh or exchange.
 //   CLEANED  — the expired row was deleted by the background sweep.
 //
 // Two response types are supported at /authorize (carried through the
@@ -29,9 +31,10 @@
 //   - A refresh requires a live (unexpired) IdP refresh-token row.
 //   - The cleanup sweep only removes rows already EXPIRED past the age window.
 //   - A disabled OAuth client cannot start a new flow.
+//   - A revoked flow can never refresh: refresh is rejected from REVOKED.
 
 module auth {
-  type FlowState = Pending | Coded | Granted | Expired | Cleaned
+  type FlowState = Pending | Coded | Granted | Expired | Revoked | Cleaned
   type ResponseType = Code | Cookie
   type FlowId = str
 
@@ -114,6 +117,21 @@ module auth {
     flows' = flows.map(g => extendRow(g, id, now)),
   }
 
+  // revoke: explicit client revocation (/auth/revoke, RFC 7009). A GRANTED
+  // flow transitions to REVOKED — a terminal-ish state from which refresh is
+  // rejected (refresh requires Granted). The row is deleted so the federated
+  // session can no longer be refreshed or exchanged.
+  pure def toRevoked(g: Flow, id: FlowId): Flow =
+    if (g.id == id)
+      { id: g.id, state: Revoked, clientEnabled: g.clientEnabled,
+        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType }
+    else g
+
+  action revoke(id: FlowId): bool = all {
+    flows.exists(f => f.id == id and f.state == Granted),
+    flows' = flows.map(g => toRevoked(g, id)),
+  }
+
   // expire: the IdP refresh-token row's expiry passes.
   pure def toExpired(g: Flow, id: FlowId): Flow =
     if (g.id == id)
@@ -156,6 +174,12 @@ module auth {
   def cookieFlowNeverCodedInvariant: bool =
     flows.forall(f => f.responseType == Cookie implies f.state != Coded)
 
+  // A revoked flow can never refresh: refresh requires Granted, and revoke
+  // moves the flow out of Granted. No transition returns a REVOKED flow to
+  // Granted, so the federated session is permanently dead.
+  def revokedCannotRefreshInvariant: bool =
+    flows.forall(f => f.state == Revoked implies f.state != Granted)
+
   // ------------------------------------------------------------------ #
   // Tests
   // ------------------------------------------------------------------ #
@@ -195,6 +219,42 @@ module auth {
       .then(exchangeCode("f1"))
       .then(expire("f1", 5000))
       .then(refresh("f1", 5001))
+      .fail()
+  }
+
+  // Revocation kills the federated session: after revoke the flow is REVOKED
+  // and a subsequent refresh is rejected (refresh requires Granted).
+  run revokeKillsRefresh = {
+    init
+      .then(authorize("f1", true, 100, Code))
+      .then(callback("f1"))
+      .then(exchangeCode("f1"))
+      .then(revoke("f1"))
+      .then(all {
+        assert(flows.exists(f => f.id == "f1" and f.state == Revoked)),
+        flows' = flows,
+      })
+      .then(refresh("f1", 200))
+      .fail()
+  }
+
+  // Revoking a non-granted flow (e.g. still PENDING) is rejected.
+  run revokeRequiresGranted = {
+    init
+      .then(authorize("f1", true, 100, Code))
+      .then(revoke("f1"))
+      .fail()
+  }
+
+  // Revoking twice: the second revoke finds the flow no longer Granted and
+  // fails (idempotent at the DB level — the row is already gone).
+  run revokeTwiceSecondFails = {
+    init
+      .then(authorize("f1", true, 100, Code))
+      .then(callback("f1"))
+      .then(exchangeCode("f1"))
+      .then(revoke("f1"))
+      .then(revoke("f1"))
       .fail()
   }
 
