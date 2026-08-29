@@ -28,6 +28,10 @@ _PUBLIC_PATHS = {
     "/auth/callback",
     "/auth/token",
     "/auth/refresh",
+    # OIDC Discovery (RFC 8414 / OIDC Discovery §3) — public metadata document,
+    # intentionally unauthenticated so clients can auto-configure.
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-authorization-server",
     "/auth/revoke",
     "/auth/logout",
 }
@@ -88,5 +92,8 @@ def test_health_and_auth_token_endpoints_are_public(openapi_spec: dict[str, obje
     assert not paths["/auth/callback"]["get"].get("security")  # type: ignore[index]
     assert not paths["/auth/token"]["post"].get("security")  # type: ignore[index]
     assert not paths["/auth/refresh"]["post"].get("security")  # type: ignore[index]
+    # OIDC Discovery endpoints are public (unauthenticated metadata).
+    assert not paths["/.well-known/openid-configuration"]["get"].get("security")  # type: ignore[index]
+    assert not paths["/.well-known/oauth-authorization-server"]["get"].get("security")  # type: ignore[index]
     assert not paths["/auth/revoke"]["post"].get("security")  # type: ignore[index]
     assert not paths["/auth/logout"]["post"].get("security")  # type: ignore[index]

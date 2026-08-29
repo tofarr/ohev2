@@ -34,6 +34,13 @@ def _idp_token_response(sub: str, email: str, refresh: str = "idp-refresh-1") ->
     }
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode a JWT payload without verifying (the id_token is HS256-signed by us)."""
+    payload_b64 = token.split(".")[1]
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded))
+
+
 class TestOAuthClientCrud:
     async def test_create_and_get_client(self, client: AsyncClient) -> None:
         resp = await client.post(
@@ -649,6 +656,301 @@ class TestFullOAuthFlowRoute:
             json={"grant_type": "bogus", "client_id": "x", "client_secret": "y"},
         )
         assert resp.status_code == 400
+
+
+class TestOidcDiscovery:
+    async def test_openid_configuration(self, client: AsyncClient) -> None:
+        resp = await client.get("/.well-known/openid-configuration")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["issuer"] == "http://test"
+        assert body["authorization_endpoint"] == "http://test/auth/authorize"
+        assert body["token_endpoint"] == "http://test/auth/token"
+        assert body["userinfo_endpoint"] == "http://test/auth/userinfo"
+        assert body["id_token_signing_alg_values_supported"] == ["HS256"]
+        assert "openid" in body["scopes_supported"]
+        assert body["response_types_supported"] == ["code"]
+        assert "authorization_code" in body["grant_types_supported"]
+        assert "refresh_token" in body["grant_types_supported"]
+        # jwks_uri is intentionally omitted (HS256, symmetric key).
+        assert "jwks_uri" not in body
+
+    async def test_oauth_authorization_server_alias(self, client: AsyncClient) -> None:
+        resp = await client.get("/.well-known/oauth-authorization-server")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["issuer"] == "http://test"
+        assert body["authorization_endpoint"] == "http://test/auth/authorize"
+
+    async def test_discovery_endpoints_are_public(self, client: AsyncClient) -> None:
+        # Discovery must not require auth — use a bare client (no X-API-Key).
+        app = client._transport.app  # type: ignore[attr-defined]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as bare:
+            resp = await bare.get("/.well-known/openid-configuration")
+            assert resp.status_code == 200
+
+
+class TestIdTokenIssuance:
+    """OIDC id_token is issued at /token and /refresh iff ``openid`` requested."""
+
+    @respx.mock
+    async def test_id_token_issued_when_openid_requested(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "oidc-1",
+                    "client_secret": "s",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "oidc-1",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "scope": "openid email profile",
+                    "state": "st",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("oidc-sub-1", "oidc@example.com")
+                )
+            )
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "oidc-1",
+                    "client_secret": "s",
+                },
+            )
+            assert tok.status_code == 200, tok.text
+            tokens = tok.json()
+            assert tokens["id_token"] is not None
+            claims = _decode_jwt_payload(tokens["id_token"])
+            assert claims["iss"] == "http://test"
+            assert claims["aud"] == "oidc-1"
+            assert claims["email"] == "oidc@example.com"
+            assert claims["preferred_username"] is not None
+            assert "exp" in claims and "iat" in claims
+
+    @respx.mock
+    async def test_id_token_not_issued_without_openid(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "oidc-2",
+                    "client_secret": "s",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "oidc-2",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "scope": "email",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("oidc-sub-2", "o2@example.com")
+                )
+            )
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "oidc-2",
+                    "client_secret": "s",
+                },
+            )
+            assert tok.status_code == 200
+            assert tok.json()["id_token"] is None
+
+    @respx.mock
+    async def test_id_token_reissued_on_refresh(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "oidc-3",
+                    "client_secret": "s",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "oidc-3",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "scope": "openid profile",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("oidc-sub-3", "o3@example.com")
+                )
+            )
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "oidc-3",
+                    "client_secret": "s",
+                },
+            )
+            first_id_token = tok.json()["id_token"]
+            assert first_id_token is not None
+
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "access_token": "idp-access-2",
+                        "refresh_token": "idp-refresh-2",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    },
+                )
+            )
+            ref = await c.post(
+                "/auth/refresh",
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": tok.json()["refresh_token"],
+                    "client_id": "oidc-3",
+                    "client_secret": "s",
+                },
+            )
+            assert ref.status_code == 200, ref.text
+            assert ref.json()["id_token"] is not None
+            # The id_token is re-issued on refresh with the same claims shape.
+            new_claims = _decode_jwt_payload(ref.json()["id_token"])
+            assert new_claims["iss"] == "http://test"
+            assert new_claims["aud"] == "oidc-3"
+
+
+class TestUserInfo:
+    async def test_userinfo_requires_auth(self, client: AsyncClient) -> None:
+        app = client._transport.app  # type: ignore[attr-defined]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as bare:
+            resp = await bare.get("/auth/userinfo")
+            assert resp.status_code == 401
+
+    @respx.mock
+    async def test_userinfo_with_openid_token(self, app) -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            from openhands.ev2.util.auth_token import create_auth_token
+
+            c.headers["X-API-Key"] = create_auth_token(
+                uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+            )
+            await c.post(
+                "/auth/clients",
+                json={
+                    "client_id": "ui-1",
+                    "client_secret": "s",
+                    "redirect_uris": ["https://app.example.com/cb"],
+                },
+            )
+            auth = await c.get(
+                "/auth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": "ui-1",
+                    "redirect_uri": "https://app.example.com/cb",
+                    "scope": "openid email profile",
+                },
+                follow_redirects=False,
+            )
+            idp_state = parse_qs(urlparse(auth.headers["location"]).query)["state"][0]
+            respx.post(f"{_IDP_BASE}/token").mock(
+                return_value=httpx.Response(
+                    200, json=_idp_token_response("ui-sub-1", "ui@example.com")
+                )
+            )
+            cb = await c.get(
+                "/auth/callback",
+                params={"code": "idp-code", "state": idp_state},
+                follow_redirects=False,
+            )
+            our_code = parse_qs(urlparse(cb.headers["location"]).query)["code"][0]
+            tok = await c.post(
+                "/auth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "code": our_code,
+                    "redirect_uri": "https://app.example.com/cb",
+                    "client_id": "ui-1",
+                    "client_secret": "s",
+                },
+            )
+            access_token = tok.json()["access_token"]
+            # Use a bare client (no X-API-Key) with the OAuth access token as Bearer.
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as bare:
+                resp = await bare.get(
+                    "/auth/userinfo",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                assert resp.status_code == 200, resp.text
+                body = resp.json()
+                assert body["sub"] is not None
+                assert body["email"] == "ui@example.com"
+                assert body["preferred_username"] is not None
 
 
 class TestLogout:

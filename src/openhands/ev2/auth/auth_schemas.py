@@ -152,3 +152,20 @@ class OAuthClientSearchResult(BaseModel):
     items: list[OAuthClientRead]
     next_cursor: str | None = Field(default=None)
     limit: int
+
+
+class UserInfoResponse(BaseModel):
+    """OIDC UserInfo response (OIDC Core §5.3).
+
+    Claims are scope-gated: ``sub`` is always present; ``email`` /
+    ``email_verified`` require the ``email`` scope; ``name`` /
+    ``preferred_username`` require the ``profile`` scope. The response is a
+    plain JSON object (not a JWT) per the UserInfo endpoint's default
+    ``application/json`` encoding.
+    """
+
+    sub: str
+    email: str | None = Field(default=None)
+    email_verified: bool | None = Field(default=None)
+    name: str | None = Field(default=None)
+    preferred_username: str | None = Field(default=None)
