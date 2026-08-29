@@ -15,7 +15,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.cors.cors_models import AllowedOrigin
+from openhands.ev2.cors.cors_schemas import (
+    AllowedOriginBatchCreate,
+    AllowedOriginBatchDelete,
+    AllowedOriginBatchOp,
+)
 from openhands.ev2.db import get_session_factory
+from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.search_filter import SearchFilter
 
 
 class CorsError(Exception):
@@ -28,6 +35,10 @@ class AllowedOriginConflictError(CorsError):
 
 class AllowedOriginNotFoundError(CorsError):
     """The origin id does not exist."""
+
+
+class BatchPermissionDeniedError(CorsError):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 # In-memory cache of the allowed-origin set. The middleware reads this on the
@@ -101,11 +112,63 @@ class CorsService:
         reset_cors_cache()
         return row
 
-    async def delete_allowed_origin(self, origin_id: uuid.UUID) -> None:
-        """Remove a permitted origin by id. Raises if not found."""
+    async def get_allowed_origin(self, origin_id: uuid.UUID) -> AllowedOrigin:
+        """Retrieve a permitted origin by id. Raises if not found."""
         row = await self._session.get(AllowedOrigin, origin_id)
         if row is None:
             raise AllowedOriginNotFoundError(str(origin_id))
+        return row
+
+    async def get_many(
+        self,
+        origin_ids: list[uuid.UUID],
+    ) -> list[AllowedOrigin | None]:
+        """Retrieve permitted origins by ids in a single query.
+
+        Returns a list positionally aligned with *origin_ids*: the i-th entry is
+        the :class:`AllowedOrigin` for ``origin_ids[i]`` or ``None`` when
+        missing. Duplicate ids are preserved. An empty *origin_ids* yields an
+        empty list without hitting the DB.
+        """
+        if not origin_ids:
+            return []
+        result = await self._session.execute(
+            select(AllowedOrigin).where(AllowedOrigin.id.in_(origin_ids))
+        )
+        by_id: dict[uuid.UUID, AllowedOrigin] = {o.id: o for o in result.scalars().all()}
+        return [by_id.get(oid) for oid in origin_ids]
+
+    async def delete_allowed_origin(self, origin_id: uuid.UUID) -> None:
+        """Remove a permitted origin by id. Raises if not found."""
+        row = await self.get_allowed_origin(origin_id)
         await self._session.delete(row)
         await self._session.flush()
         reset_cors_cache()
+
+    async def apply_batch(
+        self,
+        operations: list[AllowedOriginBatchOp],
+        perm_filters: dict[Action, SearchFilter[AllowedOrigin] | None],
+    ) -> list[AllowedOrigin | None]:
+        """Apply a mix of create/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter is denied
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic: a failure of
+        any operation rolls back the entire batch). Returns results aligned with
+        *operations*: the created :class:`AllowedOrigin` for create ops, ``None``
+        for delete ops.
+        """
+        results: list[AllowedOrigin | None] = []
+        for op in operations:
+            if isinstance(op, AllowedOriginBatchCreate):
+                if perm_filters.get(Action.CREATE) is None:
+                    raise BatchPermissionDeniedError("create")
+                results.append(await self.create_allowed_origin(op.data.origin))
+            elif isinstance(op, AllowedOriginBatchDelete):
+                if perm_filters.get(Action.DELETE) is None:
+                    raise BatchPermissionDeniedError("delete")
+                await self.delete_allowed_origin(op.id)
+                results.append(None)
+        return results

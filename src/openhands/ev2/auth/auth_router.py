@@ -36,9 +36,14 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, sta
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
-from openhands.ev2.auth.auth_dependencies import depends_access_token, depends_permissions
+from openhands.ev2.auth.auth_dependencies import (
+    depends_access_token,
+    depends_permissions,
+    depends_permissions_or_none,
+)
 from openhands.ev2.auth.auth_models import AuthToken, OAuthClient
 from openhands.ev2.auth.auth_schemas import (
+    OAuthClientBatchWriteRequest,
     OAuthClientCreate,
     OAuthClientRead,
     OAuthClientSearchResult,
@@ -51,10 +56,14 @@ from openhands.ev2.auth.auth_service import (
     _RESPONSE_TYPE_COOKIE,
     AuthError,
     AuthService,
+    BatchPermissionDeniedError,
     IdpError,
     InvalidClientError,
     InvalidGrantError,
     InvalidRedirectUriError,
+    OAuthClientConflictError,
+    OAuthClientNotFoundError,
+    OAuthClientPermissionScopeError,
     RefreshLockTimeoutError,
     TokenPair,
     _seconds_until,
@@ -63,6 +72,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.encryption.encryption_service import get_encryption_service
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -468,6 +478,30 @@ async def _to_read(service: AuthService, client: OAuthClient) -> OAuthClientRead
     )
 
 
+def _client_error_status(exc: Exception) -> int:
+    if isinstance(exc, OAuthClientPermissionScopeError):
+        return status.HTTP_403_FORBIDDEN
+    if isinstance(exc, OAuthClientNotFoundError):
+        return status.HTTP_404_NOT_FOUND
+    if isinstance(exc, OAuthClientConflictError):
+        return status.HTTP_409_CONFLICT
+    if isinstance(exc, BatchPermissionDeniedError):
+        return status.HTTP_403_FORBIDDEN
+    return status.HTTP_400_BAD_REQUEST
+
+
+def _client_error_detail(exc: Exception) -> str:
+    if isinstance(exc, OAuthClientPermissionScopeError):
+        return f"OAuth client falls outside your create scope: {exc}"
+    if isinstance(exc, OAuthClientNotFoundError):
+        return f"OAuth client not found: {exc}"
+    if isinstance(exc, OAuthClientConflictError):
+        return f"OAuth client with client_id already exists: {exc}"
+    if isinstance(exc, BatchPermissionDeniedError):
+        return f"Batch operation denied: {exc}"
+    return str(exc)
+
+
 @router.get(
     "/clients",
     response_model=OAuthClientSearchResult,
@@ -515,18 +549,98 @@ async def create_client(
     """Register an OAuth client with an encrypted secret + redirect URIs."""
     service = AuthService(session)
     try:
-        client = await service.create_client(
-            client_id=payload.client_id,
-            client_secret=payload.client_secret,
-            name=payload.name,
-            redirect_uris=payload.redirect_uris,
-            enabled=payload.enabled,
-        )
+        try:
+            client = await service.create_oauth_client(payload, perm_filter)
+        except (
+            OAuthClientPermissionScopeError,
+            OAuthClientConflictError,
+        ) as exc:
+            raise HTTPException(
+                status_code=_client_error_status(exc),
+                detail=_client_error_detail(exc),
+            ) from exc
+        read = await _to_read(service, client)
     finally:
         await service.aclose()
     await session.commit()
-    await session.refresh(client)
-    return await _to_read(AuthService(session), client)
+    return read
+
+
+@router.get(
+    "/clients/batch",
+    response_model=BatchReadResult[OAuthClientRead],
+)
+async def get_clients_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Any], Depends(depends_permissions(OAuthClient, Action.READ))
+    ],
+    # Declared before `/{client_id}` so the static `/batch` path matches ahead
+    # of the UUID path param. Default to an empty list so an omitted `ids` param
+    # is valid (returns an empty result) rather than a 422.
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[OAuthClientRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = AuthService(session)
+    try:
+        clients = await service.get_many_oauth_clients(ids, perm_filter)
+        items = [await _to_read(service, c) if c is not None else None for c in clients]
+    finally:
+        await service.aclose()
+    return BatchReadResult(items=items)
+
+
+@router.post(
+    "/clients/batch",
+    response_model=BatchWriteResult[OAuthClientRead],
+)
+async def write_clients_batch(
+    payload: OAuthClientBatchWriteRequest,
+    session: SessionDep,
+    # Resolve a per-action filter without raising so a CUD batch does not 403
+    # on an unused action. Declared before `/{client_id}` so the static `/batch`
+    # path matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[Any] | None,
+        Depends(depends_permissions_or_none(OAuthClient, Action.CREATE)),
+    ],
+    update_filter: Annotated[
+        SearchFilter[Any] | None,
+        Depends(depends_permissions_or_none(OAuthClient, Action.UPDATE)),
+    ],
+    delete_filter: Annotated[
+        SearchFilter[Any] | None,
+        Depends(depends_permissions_or_none(OAuthClient, Action.DELETE)),
+    ],
+) -> BatchWriteResult[OAuthClientRead]:
+    service = AuthService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        try:
+            results = await service.apply_client_batch(payload.operations, perm_filters)
+        except (
+            BatchPermissionDeniedError,
+            OAuthClientPermissionScopeError,
+            OAuthClientNotFoundError,
+            OAuthClientConflictError,
+        ) as exc:
+            raise HTTPException(
+                status_code=_client_error_status(exc),
+                detail=_client_error_detail(exc),
+            ) from exc
+        items = [await _to_read(service, c) if c is not None else None for c in results]
+    finally:
+        await service.aclose()
+    await session.commit()
+    return BatchWriteResult(items=items)
 
 
 @router.get("/clients/{client_id}", response_model=OAuthClientRead)
@@ -540,15 +654,17 @@ async def get_client(
     """Retrieve an OAuth client by id, scoped to the principal."""
     service = AuthService(session)
     try:
-        client = await service.get_client(client_id)
-        if client is None or not perm_filter.matches(client):
+        try:
+            client = await service.get_oauth_client(client_id, perm_filter)
+        except OAuthClientNotFoundError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth client not found: {client_id}",
-            )
-        return await _to_read(service, client)
+                detail=f"OAuth client not found: {exc}",
+            ) from exc
+        read = await _to_read(service, client)
     finally:
         await service.aclose()
+    return read
 
 
 @router.patch("/clients/{client_id}", response_model=OAuthClientRead)
@@ -563,22 +679,18 @@ async def update_client(
     """Partially update an OAuth client (rename, re-secret, re-uris, disable)."""
     service = AuthService(session)
     try:
-        client = await service.get_client(client_id)
-        if client is None or not perm_filter.matches(client):
+        try:
+            client = await service.update_oauth_client(client_id, payload, perm_filter)
+        except OAuthClientNotFoundError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth client not found: {client_id}",
-            )
-        if payload.name is not None:
-            client.name = payload.name
-        if payload.client_secret is not None:
-            client.client_secret = service._enc.encrypt_value(payload.client_secret)
-        if payload.redirect_uris is not None:
-            await service.replace_redirect_uris(client, payload.redirect_uris)
-        if payload.enabled is not None:
-            client.enabled = payload.enabled
-        await session.flush()
-        await session.refresh(client)
+                detail=f"OAuth client not found: {exc}",
+            ) from exc
+        except OAuthClientConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"OAuth client with client_id already exists: {exc}",
+            ) from exc
         read = await _to_read(service, client)
     finally:
         await service.aclose()
@@ -597,13 +709,13 @@ async def delete_client(
     """Delete an OAuth client by id, scoped to the principal."""
     service = AuthService(session)
     try:
-        client = await service.get_client(client_id)
-        if client is None or not perm_filter.matches(client):
+        try:
+            await service.delete_oauth_client(client_id, perm_filter)
+        except OAuthClientNotFoundError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth client not found: {client_id}",
-            )
-        await service.delete_client(client)
+                detail=f"OAuth client not found: {exc}",
+            ) from exc
     finally:
         await service.aclose()
     await session.commit()
