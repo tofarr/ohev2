@@ -58,6 +58,14 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for llm resources; null = deny.",
     )
+    feature_flag_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for feature_flag resources; null = deny.",
+    )
+    feature_flag_role_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for feature_flag_role resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -106,6 +114,14 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for llm resources; null = deny.",
     )
+    feature_flag_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for feature_flag resources; null = deny.",
+    )
+    feature_flag_role_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for feature_flag_role resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -133,6 +149,8 @@ class RoleRead(BaseModel):
     cors_origin_permission: Permission | None
     provider_connection_permission: Permission | None
     llm_permission: Permission | None
+    feature_flag_permission: Permission | None
+    feature_flag_role_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 
