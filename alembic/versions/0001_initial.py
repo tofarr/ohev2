@@ -24,6 +24,10 @@ Tables:
 * ``user_roles``             — role-to-user assignments.
 * ``secrets``                — named secrets with encrypted values.
 * ``role_secrets``           — per-role grants of access to secrets.
+* ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
+* ``llms``                   — stored LLM profiles referencing a provider connection.
+* ``feature_flags``          — named feature flags keyed by a string id.
+* ``feature_flag_roles``     — per-role overrides of feature flags.
 """
 
 from __future__ import annotations
@@ -352,6 +356,30 @@ def upgrade() -> None:
             comment="Permission policy for secret resources; null = deny.",
         ),
         sa.Column(
+            "provider_connection_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for provider_connection resources; null = deny.",
+        ),
+        sa.Column(
+            "llm_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for llm resources; null = deny.",
+        ),
+        sa.Column(
+            "feature_flag_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for feature_flag resources; null = deny.",
+        ),
+        sa.Column(
+            "feature_flag_role_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for feature_flag_role resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -463,8 +491,170 @@ def upgrade() -> None:
     op.create_index("ix_role_secrets_role_id", "role_secrets", ["role_id"], unique=False)
     op.create_index("ix_role_secrets_secret_id", "role_secrets", ["secret_id"], unique=False)
 
+    # ------------------------------------------------------------------ #
+    # provider_connections
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "provider_connections",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("display_name", sa.String(length=128), nullable=False),
+        sa.Column("provider", sa.String(length=128), nullable=False),
+        sa.Column(
+            "api_key",
+            sa.String(length=8192),
+            nullable=True,
+            comment="Encrypted API key (JWE ciphertext); null when unset.",
+        ),
+        sa.Column("base_url", sa.String(length=2048), nullable=True),
+        sa.Column("enable_proxy", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_provider_connections_user_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Shared LLM provider credential bundles (encrypted api_key)",
+    )
+    op.create_index(
+        "ix_provider_connections_user_id", "provider_connections", ["user_id"], unique=False
+    )
+
+    # ------------------------------------------------------------------ #
+    # llms
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "llms",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("provider_connection_id", sa.Uuid(), nullable=False),
+        sa.Column("model", sa.String(length=255), nullable=False),
+        sa.Column("display_name", sa.String(length=128), nullable=False),
+        sa.Column(
+            "config",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            comment="Serialized SDK LLM config (all fields except model/provider/api_key/base_url).",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_llms_user_id_users"
+        ),
+        sa.ForeignKeyConstraint(
+            ["provider_connection_id"],
+            ["provider_connections.id"],
+            ondelete="CASCADE",
+            name="fk_llms_provider_connection_id_provider_connections",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Stored LLM profiles referencing a provider connection",
+    )
+    op.create_index("ix_llms_user_id", "llms", ["user_id"], unique=False)
+    op.create_index(
+        "ix_llms_provider_connection_id", "llms", ["provider_connection_id"], unique=False
+    )
+
+    # ------------------------------------------------------------------ #
+    # feature_flags
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "feature_flags",
+        sa.Column("id", sa.String(length=128), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("description", sa.String(length=2048), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Named feature flags keyed by a string id",
+    )
+
+    # ------------------------------------------------------------------ #
+    # feature_flag_roles
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "feature_flag_roles",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("feature_flag_id", sa.String(length=128), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["feature_flag_id"],
+            ["feature_flags.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_roles_feature_flag_id_feature_flags",
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_roles_role_id_roles",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "feature_flag_id", "role_id", name="uq_feature_flag_roles_flag_id_role_id"
+        ),
+        comment="Per-role overrides of feature flags",
+    )
+    op.create_index(
+        "ix_feature_flag_roles_feature_flag_id",
+        "feature_flag_roles",
+        ["feature_flag_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_feature_flag_roles_role_id", "feature_flag_roles", ["role_id"], unique=False
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_feature_flag_roles_role_id", table_name="feature_flag_roles")
+    op.drop_index("ix_feature_flag_roles_feature_flag_id", table_name="feature_flag_roles")
+    op.drop_table("feature_flag_roles")
+    op.drop_table("feature_flags")
+    op.drop_index("ix_llms_provider_connection_id", table_name="llms")
+    op.drop_index("ix_llms_user_id", table_name="llms")
+    op.drop_table("llms")
+    op.drop_index("ix_provider_connections_user_id", table_name="provider_connections")
+    op.drop_table("provider_connections")
     op.drop_index("ix_role_secrets_secret_id", table_name="role_secrets")
     op.drop_index("ix_role_secrets_role_id", table_name="role_secrets")
     op.drop_table("role_secrets")

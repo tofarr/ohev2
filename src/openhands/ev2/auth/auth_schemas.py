@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -152,3 +152,63 @@ class OAuthClientSearchResult(BaseModel):
     items: list[OAuthClientRead]
     next_cursor: str | None = Field(default=None)
     limit: int
+
+
+class UserInfoResponse(BaseModel):
+    """OIDC UserInfo response (OIDC Core §5.3).
+
+    Claims are scope-gated: ``sub`` is always present; ``email`` /
+    ``email_verified`` require the ``email`` scope; ``name`` /
+    ``preferred_username`` require the ``profile`` scope. The response is a
+    plain JSON object (not a JWT) per the UserInfo endpoint's default
+    ``application/json`` encoding.
+    """
+
+    sub: str
+    email: str | None = Field(default=None)
+    email_verified: bool | None = Field(default=None)
+    name: str | None = Field(default=None)
+    preferred_username: str | None = Field(default=None)
+
+
+# Batch write: POST /auth/clients/batch applies create/update/delete atomically
+# (AGENTS.md §3). Operations reuse OAuthClientCreate/OAuthClientUpdate; updates
+# and deletes target a specific id.
+
+
+class OAuthClientBatchCreate(BaseModel):
+    """Create operation within an OAuth client batch write."""
+
+    op: Literal["create"] = "create"
+    data: OAuthClientCreate
+
+
+class OAuthClientBatchUpdate(BaseModel):
+    """Update operation within an OAuth client batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: OAuthClientUpdate
+
+
+class OAuthClientBatchDelete(BaseModel):
+    """Delete operation within an OAuth client batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+OAuthClientBatchOp = Annotated[
+    OAuthClientBatchCreate | OAuthClientBatchUpdate | OAuthClientBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class OAuthClientBatchWriteRequest(BaseModel):
+    """Request body for `POST /auth/clients/batch`."""
+
+    operations: list[OAuthClientBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/update/delete mixed.",
+    )

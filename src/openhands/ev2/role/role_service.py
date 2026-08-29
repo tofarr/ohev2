@@ -77,6 +77,10 @@ class RoleService:
             oauth_client_permission=payload.oauth_client_permission,
             cors_origin_permission=payload.cors_origin_permission,
             secret_permission=payload.secret_permission,
+            provider_connection_permission=payload.provider_connection_permission,
+            llm_permission=payload.llm_permission,
+            feature_flag_permission=payload.feature_flag_permission,
+            feature_flag_role_permission=payload.feature_flag_role_permission,
         )
         if not self._perm_filter.matches(role):
             raise RolePermissionScopeError(str(payload.name))
@@ -163,6 +167,14 @@ class RoleService:
             role.cors_origin_permission = payload.cors_origin_permission
         if payload.secret_permission is not None:
             role.secret_permission = payload.secret_permission
+        if payload.provider_connection_permission is not None:
+            role.provider_connection_permission = payload.provider_connection_permission
+        if payload.llm_permission is not None:
+            role.llm_permission = payload.llm_permission
+        if payload.feature_flag_permission is not None:
+            role.feature_flag_permission = payload.feature_flag_permission
+        if payload.feature_flag_role_permission is not None:
+            role.feature_flag_role_permission = payload.feature_flag_role_permission
         try:
             await self._session.flush()
         except IntegrityError as exc:

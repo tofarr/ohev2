@@ -53,7 +53,7 @@ from typing import Any, cast
 
 import httpx
 from sqlalchemy import delete, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.auth.auth_models import (
@@ -63,12 +63,22 @@ from openhands.ev2.auth.auth_models import (
     OAuthClientRedirectUri,
     TokenType,
 )
+from openhands.ev2.auth.auth_schemas import (
+    OAuthClientBatchCreate,
+    OAuthClientBatchDelete,
+    OAuthClientBatchOp,
+    OAuthClientBatchUpdate,
+    OAuthClientCreate,
+    OAuthClientUpdate,
+)
 from openhands.ev2.config import AppConfig, IdpConfig, get_config
 from openhands.ev2.encryption.encryption_service import (
     EncryptionService,
     get_encryption_service,
 )
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
+from openhands.ev2.util.search_filter import SearchFilter
 
 # JWT claim keys reused from the auth service for token-type tagging.
 _SUB_CLAIM = "sub"
@@ -76,6 +86,14 @@ _TYP_CLAIM = "ttyp"
 _JTI_CLAIM = "jti"
 _EXP_CLAIM = "exp"
 _IAT_CLAIM = "iat"
+
+# OIDC id_token claim keys (OIDC Core §2.1).
+_ISS_CLAIM = "iss"
+_AUD_CLAIM = "aud"
+_EMAIL_CLAIM = "email"
+_EMAIL_VERIFIED_CLAIM = "email_verified"
+_NAME_CLAIM = "name"
+_PREFERRED_USERNAME_CLAIM = "preferred_username"
 
 # Custom claims carried in the pending-auth and authorization-code JWEs.
 _CLIENT_ID_CLAIM = "cid"
@@ -87,6 +105,7 @@ _ROW_ID_CLAIM = "rid"  # idp_refresh_tokens row id
 _ACCESS_ID_CLAIM = "aid"  # idp_access_tokens row id
 _ACCESS_EXP_CLAIM = "axp"  # access-token expiry (epoch seconds), for cookie sync
 _RESPONSE_TYPE_CLAIM = "rtyp"
+_SCOPE_CLAIM = "scp"
 
 # Supported response_type values for the provider-facing authorize request.
 # The IdP flow is always a code flow (the project is the OAuth client to the
@@ -100,6 +119,18 @@ _RESPONSE_TYPES = (_RESPONSE_TYPE_CODE, _RESPONSE_TYPE_COOKIE)
 _AUTH_CODE_TTL = timedelta(minutes=10)
 # Lifetime of the pending-auth JWE carried as IdP state (10 minutes).
 _PENDING_AUTH_TTL = timedelta(minutes=10)
+
+# OIDC scopes the project recognizes for id_token / userinfo claim selection.
+_OPENID_SCOPE = "openid"
+_EMAIL_SCOPE = "email"
+_PROFILE_SCOPE = "profile"
+_OIDC_SCOPES = frozenset({_OPENID_SCOPE, _EMAIL_SCOPE, _PROFILE_SCOPE})
+
+# id_token lifetime (seconds). Mirrors the access-token row expiry so an
+# id_token never outlives the federated credential backing it; clients that
+# need fresh claims call /auth/refresh (which re-issues the id_token) or
+# /auth/userinfo.
+_ID_TOKEN_TTL = timedelta(seconds=900)
 
 
 class AuthError(Exception):
@@ -128,6 +159,22 @@ class RefreshLockTimeoutError(AuthError):
     A concurrent refresh is in progress; the caller should retry or
     re-authenticate rather than block indefinitely.
     """
+
+
+class OAuthClientNotFoundError(Exception):
+    """Raised when an OAuth client id does not exist or is out of scope."""
+
+
+class OAuthClientConflictError(Exception):
+    """Raised when a create/update collides with an existing client_id."""
+
+
+class OAuthClientPermissionScopeError(Exception):
+    """Raised when a create payload falls outside the principal's scope."""
+
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 def _now() -> datetime:
@@ -207,6 +254,7 @@ class AuthService:
         if not await self._redirect_uri_allowed(client, redirect_uri):
             raise InvalidRedirectUriError(redirect_uri)
 
+        scopes = _normalize_scopes(scope)
         # PKCE verifier the project uses against the IdP. The client's own
         # challenge (if any) is recorded in the pending-auth state so /token
         # can verify it.
@@ -216,7 +264,7 @@ class AuthService:
             client_id=client_id,
             redirect_uri=redirect_uri,
             client_state=state,
-            scope=scope,
+            scopes=scopes,
             client_code_challenge=code_challenge,
             client_code_method=code_challenge_method,
             idp_verifier=verifier,
@@ -263,6 +311,7 @@ class AuthService:
         refresh_row, access_row = await self._persist_idp_tokens(user.id, idp_tokens)
 
         response_type = pending["response_type"]
+        scopes = pending["scopes"]
         auth_code: str | None = None
         if response_type == _RESPONSE_TYPE_CODE:
             auth_code = self._mint_auth_code(
@@ -271,6 +320,7 @@ class AuthService:
                 access_id=access_row.id,
                 client_id=pending["client_id"],
                 redirect_uri=pending["redirect_uri"],
+                scopes=scopes,
                 client_code_challenge=pending["client_code_challenge"],
                 client_code_method=pending["client_code_method"],
             )
@@ -283,6 +333,7 @@ class AuthService:
             redirect_uri=pending["redirect_uri"],
             client_state=pending["client_state"],
             response_type=response_type,
+            scopes=scopes,
             auth_code=auth_code,
             expires_in=_seconds_until(access_row.expires_at),
         )
@@ -320,12 +371,15 @@ class AuthService:
         user_id = _uuid(payload, _SUB_CLAIM)
         row_id = _uuid(payload, _ROW_ID_CLAIM)
         access_id = _uuid(payload, _ACCESS_ID_CLAIM)
+        scopes = _scopes_from_payload(payload)
         refresh_row, access_row = await self._load_token_rows(row_id, access_id)
         if refresh_row is None or refresh_row.user_id != user_id:
             raise InvalidGrantError("stale authorization code")
         if access_row is None or access_row.refresh_token_id != refresh_row.id:
             raise InvalidGrantError("stale authorization code")
-        return await self._mint_token_pair(user_id, refresh_row, access_row)
+        return await self._mint_token_pair(
+            user_id, refresh_row, access_row, client_id=client_id, scopes=scopes
+        )
 
     # ------------------------------------------------------------------ #
     # /refresh — rotate the access + refresh pair via the IdP.
@@ -359,6 +413,7 @@ class AuthService:
             raise InvalidGrantError("not a refresh token")
         row_id = _uuid(payload, _ROW_ID_CLAIM)
         user_id = _uuid(payload, _SUB_CLAIM)
+        scopes = _scopes_from_payload(payload)
         refresh_row, access_row = await self._lock_token_rows(row_id)
         if refresh_row is None or refresh_row.user_id != user_id:
             raise InvalidGrantError("refresh token not recognized")
@@ -368,7 +423,9 @@ class AuthService:
             raise InvalidGrantError("refresh token not recognized")
 
         await self._refresh_rows(refresh_row, access_row)
-        return await self._mint_token_pair(user_id, refresh_row, access_row)
+        return await self._mint_token_pair(
+            user_id, refresh_row, access_row, client_id=client_id, scopes=scopes
+        )
 
     # ------------------------------------------------------------------ #
     # /revoke — RFC 7009 token revocation (best-effort).
@@ -428,6 +485,47 @@ class AuthService:
         except InvalidGrantError:
             # Unknown/garbage token: best-effort no-op per RFC 7009 §2.2.
             return
+
+    # ------------------------------------------------------------------ #
+    # /logout — cookie-focused session end (counterpart to /revoke).
+    # ------------------------------------------------------------------ #
+
+    async def revoke_session(self, cookie_token: str) -> None:
+        """Revoke the federated session backing a session cookie.
+
+        Decrypts the cookie JWE, extracts the access-token row id (``aid``),
+        and deletes the backing ``idp_refresh_tokens`` row (cascading to its
+        access row), so the federated session can no longer refresh or
+        exchange. The IdP refresh + access credentials are forwarded to the
+        IdP revocation endpoint (best-effort) before the local row is dropped.
+
+        A cookie with no ``aid`` (test/bootstrap token) has no federated
+        backing row, so it is a no-op. Any decrypt/parse failure is swallowed
+        — logout is best-effort and the cookie is cleared on the response
+        regardless of the token's validity.
+        """
+        try:
+            payload = self._decrypt(cookie_token)
+            if self._token_type(payload) is not TokenType.COOKIE:
+                return
+            access_id_raw = payload.get(_ACCESS_ID_CLAIM)
+            if not isinstance(access_id_raw, str):
+                return
+            access_id = uuid.UUID(access_id_raw)
+        except (InvalidGrantError, ValueError):
+            return
+        access_row = await self._session.get(IdpAccessToken, access_id)
+        if access_row is None:
+            return
+        refresh_row = await self._session.get(IdpRefreshToken, access_row.refresh_token_id)
+        if refresh_row is None:
+            return
+        await self._revoke_with_idp(refresh_row.refresh_token)
+        await self._revoke_with_idp(access_row.access_token)
+        await self._session.execute(
+            delete(IdpRefreshToken).where(IdpRefreshToken.id == refresh_row.id)
+        )
+        await self._session.flush()
 
     # ------------------------------------------------------------------ #
     # Background cleanup of expired IdP refresh tokens.
@@ -502,6 +600,78 @@ class AuthService:
         return access_row, refresh_row
 
     # ------------------------------------------------------------------ #
+    # OIDC Discovery (RFC 8414 / OIDC Discovery §3) — the metadata document.
+    # ------------------------------------------------------------------ #
+
+    def build_discovery_document(self) -> dict[str, Any]:
+        """Build the OIDC discovery metadata document.
+
+        Advertises the provider's endpoints and capabilities so OIDC clients
+        can auto-configure. The ``issuer`` is the config-driven ``base_url``
+        (the doc is served at ``{issuer}/.well-known/openid-configuration``).
+
+        ``jwks_uri`` is intentionally omitted: id_tokens are signed HS256 with
+        the symmetric key shared with first-party confidential clients, so
+        there is no public key to publish. ``response_types_supported``
+        advertises only the standard ``code`` flow; the custom ``cookie``
+        response type is a same-site browser extension not meant for generic
+        OIDC clients.
+        """
+        issuer = self._issuer()
+        return {
+            "issuer": issuer,
+            "authorization_endpoint": f"{issuer}/auth/authorize",
+            "token_endpoint": f"{issuer}/auth/token",
+            "userinfo_endpoint": f"{issuer}/auth/userinfo",
+            "refresh_endpoint": f"{issuer}/auth/refresh",
+            "scopes_supported": sorted(_OIDC_SCOPES),
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "id_token_signing_alg_values_supported": ["HS256"],
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "claims_supported": [
+                "sub",
+                "iss",
+                "aud",
+                "exp",
+                "iat",
+                "email",
+                "email_verified",
+                "name",
+                "preferred_username",
+            ],
+        }
+
+    # ------------------------------------------------------------------ #
+    # OIDC UserInfo (§5.3) — claims for the authenticated principal.
+    # ------------------------------------------------------------------ #
+
+    async def build_userinfo_claims(
+        self,
+        user_id: uuid.UUID,
+        scopes: frozenset[str],
+    ) -> dict[str, Any] | None:
+        """Build OIDC UserInfo claims for *user_id* under *scopes*.
+
+        Returns ``None`` when the user does not exist or is disabled. The
+        ``sub`` claim is always present; ``email`` / ``profile`` claims are
+        included only when the corresponding scope was granted (OIDC Core
+        §5.4). This is the server-side equivalent of the id_token claims,
+        minus ``iss`` / ``aud`` / ``exp`` (those are id_token-only).
+        """
+        user = await self._session.get(User, user_id)
+        if user is None or not user.enabled:
+            return None
+        claims: dict[str, Any] = {_SUB_CLAIM: str(user.id)}
+        if _EMAIL_SCOPE in scopes:
+            claims[_EMAIL_CLAIM] = user.email
+            claims[_EMAIL_VERIFIED_CLAIM] = False
+        if _PROFILE_SCOPE in scopes:
+            claims[_NAME_CLAIM] = user.username
+            claims[_PREFERRED_USERNAME_CLAIM] = user.username
+        return claims
+
+    # ------------------------------------------------------------------ #
     # OAuth client management (CRUD helpers used by the router).
     # ------------------------------------------------------------------ #
 
@@ -514,7 +684,10 @@ class AuthService:
         redirect_uris: list[str],
         enabled: bool,
     ) -> OAuthClient:
-        """Create an OAuth client with an encrypted secret and redirect URIs."""
+        """Create an OAuth client with an encrypted secret and redirect URIs.
+
+        Raises :class:`OAuthClientConflictError` if the ``client_id`` is taken.
+        """
         client = OAuthClient(
             client_id=client_id,
             client_secret=self._enc.encrypt_value(client_secret),
@@ -522,7 +695,11 @@ class AuthService:
             enabled=enabled,
         )
         self._session.add(client)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise OAuthClientConflictError(client_id) from exc
         for uri in redirect_uris:
             self._session.add(OAuthClientRedirectUri(client_id=client.id, uri=uri))
         await self._session.flush()
@@ -588,6 +765,171 @@ class AuthService:
         """Delete an OAuth client (cascades to redirect URIs)."""
         await self._session.delete(client)
         await self._session.flush()
+
+    # ------------------------------------------------------------------ #
+    # Permission-scoped OAuth client CRUD (used by the REST router + batch).
+    # The methods above operate on raw rows for the auth flow (authorize/
+    # callback/token); these scope reads/writes to the principal's
+    # ``perm_filter`` so the REST surface enforces authorization in the
+    # service, not just the router (AGENTS.md §9).
+    # ------------------------------------------------------------------ #
+
+    async def create_oauth_client(
+        self,
+        payload: OAuthClientCreate,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Create an OAuth client scoped to *perm_filter*.
+
+        Raises :class:`OAuthClientPermissionScopeError` if the prospective
+        client does not satisfy *perm_filter*, and :class:`OAuthClientConflictError`
+        on a duplicate ``client_id``.
+        """
+        # Build the row to evaluate the filter before persisting; the secret is
+        # encrypted so the in-memory match runs against the stored shape.
+        client = OAuthClient(
+            client_id=payload.client_id,
+            client_secret=self._enc.encrypt_value(payload.client_secret),
+            name=payload.name,
+            enabled=payload.enabled,
+        )
+        if not perm_filter.matches(client):
+            raise OAuthClientPermissionScopeError(payload.client_id)
+        return await self.create_client(
+            client_id=payload.client_id,
+            client_secret=payload.client_secret,
+            name=payload.name,
+            redirect_uris=payload.redirect_uris,
+            enabled=payload.enabled,
+        )
+
+    async def get_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Retrieve a client by id, scoped by *perm_filter*.
+
+        Raises :class:`OAuthClientNotFoundError` if the client is missing or out
+        of scope (so callers return 404 without leaking existence).
+        """
+        stmt = perm_filter.filter_sql(select(OAuthClient).where(OAuthClient.id == client_id))
+        result = await self._session.execute(stmt)
+        client = result.scalar_one_or_none()
+        if client is None:
+            raise OAuthClientNotFoundError(str(client_id))
+        return client
+
+    async def get_many_oauth_clients(
+        self,
+        client_ids: list[uuid.UUID],
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> list[OAuthClient | None]:
+        """Retrieve clients by ids in a single query, scoped by *perm_filter*.
+
+        Returns a list positionally aligned with *client_ids*: the i-th entry is
+        the :class:`OAuthClient` for ``client_ids[i]`` or ``None`` when
+        missing/out of scope. Duplicate ids are preserved. An empty *client_ids*
+        yields an empty list without hitting the DB.
+        """
+        if not client_ids:
+            return []
+        stmt = perm_filter.filter_sql(select(OAuthClient).where(OAuthClient.id.in_(client_ids)))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, OAuthClient] = {c.id: c for c in result.scalars().all()}
+        return [by_id.get(cid) for cid in client_ids]
+
+    async def update_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        payload: OAuthClientUpdate,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> OAuthClient:
+        """Partially update a client scoped by *perm_filter*.
+
+        Raises :class:`OAuthClientNotFoundError` if missing/out of scope and
+        :class:`OAuthClientConflictError` on a duplicate ``client_id``.
+        """
+        client = await self.get_oauth_client(client_id, perm_filter)
+        if payload.name is not None:
+            client.name = payload.name
+        if payload.client_secret is not None:
+            client.client_secret = self._enc.encrypt_value(payload.client_secret)
+        if payload.redirect_uris is not None:
+            await self.replace_redirect_uris(client, payload.redirect_uris)
+        if payload.enabled is not None:
+            client.enabled = payload.enabled
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise OAuthClientConflictError(str(client_id)) from exc
+        await self._session.refresh(client)
+        return client
+
+    async def delete_oauth_client(
+        self,
+        client_id: uuid.UUID,
+        perm_filter: SearchFilter[OAuthClient],
+    ) -> None:
+        """Delete a client scoped by *perm_filter*. Raises if missing/out of scope."""
+        client = await self.get_oauth_client(client_id, perm_filter)
+        await self.delete_client(client)
+
+    async def apply_client_batch(
+        self,
+        operations: list[OAuthClientBatchOp],
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> list[OAuthClient | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic: a failure of
+        any operation rolls back the entire batch). Returns results aligned with
+        *operations*: the client for create/update, ``None`` for delete.
+        """
+        results: list[OAuthClient | None] = []
+        for op in operations:
+            if isinstance(op, OAuthClientBatchCreate):
+                results.append(await self._batch_create_client(op, perm_filters))
+            elif isinstance(op, OAuthClientBatchUpdate):
+                results.append(await self._batch_update_client(op, perm_filters))
+            elif isinstance(op, OAuthClientBatchDelete):
+                await self._batch_delete_client(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create_client(
+        self,
+        op: OAuthClientBatchCreate,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> OAuthClient:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        return await self.create_oauth_client(op.data, filt)
+
+    async def _batch_update_client(
+        self,
+        op: OAuthClientBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> OAuthClient:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await self.update_oauth_client(op.id, op.data, filt)
+
+    async def _batch_delete_client(
+        self,
+        op: OAuthClientBatchDelete,
+        perm_filters: dict[Action, SearchFilter[OAuthClient] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await self.delete_oauth_client(op.id, filt)
 
     # ------------------------------------------------------------------ #
     # Internals — IdP HTTP.
@@ -870,63 +1212,130 @@ class AuthService:
         user_id: uuid.UUID,
         refresh_row: IdpRefreshToken,
         access_row: IdpAccessToken,
+        *,
+        client_id: str,
+        scopes: frozenset[str],
     ) -> TokenPair:
         """Mint an access token + refresh token pair synced to the IdP rows.
 
         The access-token JWE ``exp`` is synced to the access row's expiry; the
-        refresh-token JWE ``exp`` is synced to the refresh row's expiry.
+        refresh-token JWE ``exp`` is synced to the refresh row's expiry. When
+        the ``openid`` scope was requested, an OIDC ``id_token`` (HS256 JWT)
+        is minted and attached so ``/auth/token`` and ``/auth/refresh`` return
+        it per OIDC Core §3.1.3.3 / §12.2.
         """
-        access = self._mint_access_token(user_id, access_row)
-        refresh = self._mint_refresh_token(user_id, refresh_row)
+        access = self._mint_access_token(user_id, access_row, scopes)
+        refresh = self._mint_refresh_token(user_id, refresh_row, scopes)
+        id_token: str | None = None
+        if _OPENID_SCOPE in scopes:
+            user = await self._session.get(User, user_id)
+            if user is not None:
+                id_token = self._mint_id_token(
+                    user=user,
+                    client_id=client_id,
+                    scopes=scopes,
+                    access_expires_at=access_row.expires_at,
+                )
         return TokenPair(
             access_token=access,
             refresh_token=refresh,
             expires_in=_seconds_until(access_row.expires_at),
             refresh_expires_at=refresh_row.expires_at,
             access_expires_at=access_row.expires_at,
+            id_token=id_token,
         )
 
-    def _mint_access_token(self, user_id: uuid.UUID, access_row: IdpAccessToken) -> str:
+    def _mint_access_token(
+        self,
+        user_id: uuid.UUID,
+        access_row: IdpAccessToken,
+        scopes: frozenset[str],
+    ) -> str:
         """Mint a self-contained access token (``ttyp: access_token``).
 
         Its ``exp`` is synced to the backing IdP access-token row's expiry so a
-        client token never outlives the federated credential backing it.
+        client token never outlives the federated credential backing it. The
+        granted scopes are embedded so the UserInfo endpoint can gate claims
+        without a separate store.
         """
         ttl = access_row.expires_at - _now()
         if ttl.total_seconds() <= 0:
             ttl = timedelta(seconds=1)
-        return self._enc.create_jwe_token(
-            {
-                _SUB_CLAIM: str(user_id),
-                _TYP_CLAIM: TokenType.ACCESS_TOKEN.value,
-                _JTI_CLAIM: str(uuid.uuid4()),
-                _ACCESS_ID_CLAIM: str(access_row.id),
-            },
-            expires_in=ttl,
-        )
+        payload: dict[str, Any] = {
+            _SUB_CLAIM: str(user_id),
+            _TYP_CLAIM: TokenType.ACCESS_TOKEN.value,
+            _JTI_CLAIM: str(uuid.uuid4()),
+            _ACCESS_ID_CLAIM: str(access_row.id),
+        }
+        if scopes:
+            payload[_SCOPE_CLAIM] = " ".join(sorted(scopes))
+        return self._enc.create_jwe_token(payload, expires_in=ttl)
 
     def _mint_refresh_token(
         self,
         user_id: uuid.UUID,
         refresh_row: IdpRefreshToken,
+        scopes: frozenset[str],
     ) -> str:
         """Mint a refresh token (``ttyp: idp_refresh_token``) carrying the row id.
 
         Its ``exp`` is synced to the IdP refresh-token row's expiry so the JWE
-        itself reflects the federated refresh-token lifetime.
+        itself reflects the federated refresh-token lifetime. The requested
+        scopes are embedded so ``/auth/refresh`` can re-issue the id_token
+        without a separate store.
         """
         ttl = refresh_row.expires_at - _now()
         if ttl.total_seconds() <= 0:
             ttl = timedelta(seconds=1)
-        return self._enc.create_jwe_token(
-            {
-                _SUB_CLAIM: str(user_id),
-                _TYP_CLAIM: TokenType.IDP_REFRESH_TOKEN.value,
-                _JTI_CLAIM: str(uuid.uuid4()),
-                _ROW_ID_CLAIM: str(refresh_row.id),
-            },
-            expires_in=ttl,
-        )
+        payload: dict[str, Any] = {
+            _SUB_CLAIM: str(user_id),
+            _TYP_CLAIM: TokenType.IDP_REFRESH_TOKEN.value,
+            _JTI_CLAIM: str(uuid.uuid4()),
+            _ROW_ID_CLAIM: str(refresh_row.id),
+        }
+        if scopes:
+            payload[_SCOPE_CLAIM] = " ".join(sorted(scopes))
+        return self._enc.create_jwe_token(payload, expires_in=ttl)
+
+    def _mint_id_token(
+        self,
+        *,
+        user: User,
+        client_id: str,
+        scopes: frozenset[str],
+        access_expires_at: datetime,
+    ) -> str:
+        """Mint an OIDC id_token (HS256 JWT, OIDC Core §2.1).
+
+        Required claims: ``iss`` (issuer = base_url), ``sub`` (local user id),
+        ``aud`` (the OAuth client_id), ``exp``, ``iat``. Scope-gated claims:
+        ``email`` scope → ``email`` + ``email_verified``; ``profile`` scope →
+        ``name`` + ``preferred_username``. Signed with the symmetric key shared
+        with first-party confidential clients (HS256); no JWKS endpoint is
+        advertised because there is no public key to publish.
+        """
+        now = _now()
+        ttl = min(_ID_TOKEN_TTL, access_expires_at - now)
+        if ttl.total_seconds() <= 0:
+            ttl = timedelta(seconds=1)
+        claims: dict[str, Any] = {
+            _ISS_CLAIM: self._issuer(),
+            _SUB_CLAIM: str(user.id),
+            _AUD_CLAIM: client_id,
+            _IAT_CLAIM: int(now.timestamp()),
+            _EXP_CLAIM: int((now + ttl).timestamp()),
+        }
+        if _EMAIL_SCOPE in scopes:
+            claims[_EMAIL_CLAIM] = user.email
+            claims[_EMAIL_VERIFIED_CLAIM] = False
+        if _PROFILE_SCOPE in scopes:
+            claims[_NAME_CLAIM] = user.username
+            claims[_PREFERRED_USERNAME_CLAIM] = user.username
+        return self._enc.create_jws_token(claims, expires_in=ttl)
+
+    def _issuer(self) -> str:
+        """The OIDC issuer identifier (config-driven base_url)."""
+        return self._cfg.base_url.rstrip("/")
 
     def _mint_auth_code(
         self,
@@ -936,6 +1345,7 @@ class AuthService:
         access_id: uuid.UUID,
         client_id: str,
         redirect_uri: str,
+        scopes: frozenset[str],
         client_code_challenge: str | None,
         client_code_method: str | None,
     ) -> str:
@@ -949,6 +1359,8 @@ class AuthService:
             _CLIENT_ID_CLAIM: client_id,
             _REDIRECT_URI_CLAIM: redirect_uri,
         }
+        if scopes:
+            payload[_SCOPE_CLAIM] = " ".join(sorted(scopes))
         if client_code_challenge is not None:
             payload[_CODE_CHALLENGE_CLAIM] = client_code_challenge
             payload[_CODE_METHOD_CLAIM] = client_code_method or "plain"
@@ -960,7 +1372,7 @@ class AuthService:
         client_id: str,
         redirect_uri: str,
         client_state: str | None,
-        scope: str | None,
+        scopes: frozenset[str],
         client_code_challenge: str | None,
         client_code_method: str | None,
         idp_verifier: str,
@@ -975,8 +1387,8 @@ class AuthService:
         }
         if client_state is not None:
             payload[_STATE_CLAIM] = client_state
-        if scope is not None:
-            payload["scp"] = scope
+        if scopes:
+            payload[_SCOPE_CLAIM] = " ".join(sorted(scopes))
         if client_code_challenge is not None:
             payload[_CODE_CHALLENGE_CLAIM] = client_code_challenge
             payload[_CODE_METHOD_CLAIM] = client_code_method or "plain"
@@ -997,6 +1409,7 @@ class AuthService:
             "client_code_challenge": payload.get(_CODE_CHALLENGE_CLAIM),
             "client_code_method": payload.get(_CODE_METHOD_CLAIM),
             "response_type": response_type,
+            "scopes": _scopes_from_payload(payload),
             "idp_verifier": str(payload["ivf"]),
         }
 
@@ -1108,6 +1521,7 @@ class CallbackContext:
         "redirect_uri",
         "response_type",
         "row_id",
+        "scopes",
         "user_id",
     )
 
@@ -1122,6 +1536,7 @@ class CallbackContext:
         redirect_uri: str,
         client_state: str | None,
         response_type: str,
+        scopes: frozenset[str],
         auth_code: str | None,
         expires_in: int,
     ) -> None:
@@ -1133,6 +1548,7 @@ class CallbackContext:
         self.redirect_uri = redirect_uri
         self.client_state = client_state
         self.response_type = response_type
+        self.scopes = scopes
         self.auth_code = auth_code
         self.expires_in = expires_in
 
@@ -1144,6 +1560,7 @@ class TokenPair:
         "access_expires_at",
         "access_token",
         "expires_in",
+        "id_token",
         "refresh_expires_at",
         "refresh_token",
     )
@@ -1156,12 +1573,14 @@ class TokenPair:
         expires_in: int,
         refresh_expires_at: datetime,
         access_expires_at: datetime,
+        id_token: str | None = None,
     ) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.expires_in = expires_in
         self.refresh_expires_at = refresh_expires_at
         self.access_expires_at = access_expires_at
+        self.id_token = id_token
 
 
 # ---------------------------------------------------------------------- #
@@ -1176,6 +1595,27 @@ def _claim(claims: dict[str, Any], configured: str | None, default: str) -> str 
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _normalize_scopes(raw: str | None) -> frozenset[str]:
+    """Parse a space-delimited scope string into a deduplicated frozenset.
+
+    Unknown scopes are dropped: only the OIDC scopes the project issues claims
+    for (``openid``, ``email``, ``profile``) are retained, so a client cannot
+    request arbitrary scope strings that later surface in the id_token.
+    """
+    if not raw:
+        return frozenset()
+    requested = {s for s in raw.split() if s}
+    return frozenset(requested & _OIDC_SCOPES)
+
+
+def _scopes_from_payload(payload: dict[str, Any]) -> frozenset[str]:
+    """Extract the normalized scope set from a JWE payload's ``scp`` claim."""
+    raw = payload.get(_SCOPE_CLAIM)
+    if not isinstance(raw, str):
+        return frozenset()
+    return _normalize_scopes(raw)
 
 
 def _uuid(payload: dict[str, Any], key: str) -> uuid.UUID:

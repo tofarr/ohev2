@@ -41,6 +41,10 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "oauth_client_permission",
     "cors_origin_permission",
     "secret_permission",
+    "provider_connection_permission",
+    "llm_permission",
+    "feature_flag_permission",
+    "feature_flag_role_permission",
 )
 
 
@@ -96,6 +100,26 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for secret resources; null = deny.",
+    )
+    provider_connection_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for provider_connection resources; null = deny.",
+    )
+    llm_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for llm resources; null = deny.",
+    )
+    feature_flag_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for feature_flag resources; null = deny.",
+    )
+    feature_flag_role_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for feature_flag_role resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
