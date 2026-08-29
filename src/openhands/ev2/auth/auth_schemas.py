@@ -56,6 +56,23 @@ class TokenRequest(BaseModel):
     refresh_token: str | None = Field(default=None, description="Refresh token (refresh grant).")
 
 
+class DevLoginRequest(BaseModel):
+    """Body for ``POST /auth/dev/login``.
+
+    A development-only convenience endpoint that authenticates a user with
+    username + password and sets a session cookie directly, bypassing the
+    OAuth authorize/callback round trip. Intended for logging in from the
+    OpenAPI docs page in a development environment.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"username": "dev-user", "password": "dev-pass"}}
+    )
+
+    username: str = Field(description="Username of an enabled local user.")
+    password: str = Field(description="The user's password.")
+
+
 class TokenResponse(BaseModel):
     """OAuth2 token response (RFC 6749 §5.1).
 

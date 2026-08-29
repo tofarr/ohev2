@@ -51,6 +51,25 @@ class DbConfig(BaseModel):
         )
 
 
+class LlmConfig(BaseModel):
+    """LLM proxy configuration.
+
+    When a :class:`StoredProviderConnection` has ``enable_proxy`` set, the
+    effective ``base_url`` handed to the SDK is built from
+    :attr:`AppConfig.base_url` plus :attr:`completion_path` so LLM traffic is
+    routed through this service's ``POST /llm/completion/{id}`` endpoint.
+    """
+
+    completion_path: str = Field(
+        default="/llm/completion",
+        description=(
+            "Path (relative to AppConfig.base_url) of the proxy completion "
+            "endpoint. A provider connection id is appended to form the full "
+            "proxy URL handed to the SDK when enable_proxy is set."
+        ),
+    )
+
+
 class IdpConfig(BaseModel):
     """Federated OAuth (auth) — identity provider configuration.
 
@@ -122,6 +141,18 @@ class IdpConfig(BaseModel):
             "Defaults to the token endpoint (RFC 6749)."
         ),
     )
+    revocation_path: str | None = Field(
+        default=None,
+        description=(
+            "Path appended to idp.url for the RFC 7009 token revocation "
+            "endpoint. When unset (the default), revocation is local-only: "
+            "the project's own tokens are revoked but the underlying IdP "
+            "credential is not. Set this (e.g. '/revoke') when the IdP "
+            "exposes a revocation endpoint so /auth/revoke also forwards the "
+            "best-effort revocation to the IdP. IdP revocation failures are "
+            "swallowed — the local revocation always succeeds."
+        ),
+    )
     # Fallback access-token lifetime (seconds) used only when the IdP token
     # response omits both ``expires_in`` and ``expires_at``. The IdP is the
     # source of truth for access control; this is a last-resort default.
@@ -187,36 +218,16 @@ class AppConfig(BaseModel):
         default_factory=DbConfig,
         description="Structured database connection configuration (host/port/db/credentials).",
     )
-    # Access-token lifetime (OAuth2 flow). Short-lived; replaced via refresh.
-    auth_access_token_ttl_seconds: int = Field(
-        default=900,
-        ge=1,
-        description="Lifetime (seconds) of OAuth2 access tokens (JWE).",
+    llm: LlmConfig = Field(
+        default_factory=LlmConfig,
+        description="LLM proxy configuration (base_url for proxied provider connections).",
     )
-    # Refresh-token lifetimes (OAuth2 flow). The sliding window is added to
-    # the current time on each newly minted refresh token; the absolute TTL
-    # caps how far repeated refreshes can extend a session.
-    auth_refresh_token_ttl_seconds: int = Field(
-        default=2_592_000,
-        ge=1,
-        description="Absolute cap (seconds) on the total refresh window.",
-    )
-    auth_refresh_token_sliding_seconds: int = Field(
-        default=86_400,
-        ge=1,
-        description=("Sliding window (seconds) added to now when minting a refresh token."),
-    )
-    # Cookie timeout for the password/cookie flow. Each authenticated request
-    # re-mints the cookie with a fresh expiry of now + this timeout (sliding
-    # session), so an active browser session never expires while idle ones do.
-    auth_cookie_timeout_seconds: int = Field(
-        default=1800,
-        ge=1,
-        description=(
-            "Sliding timeout (seconds) applied to the session cookie on every "
-            "authenticated request."
-        ),
-    )
+    # Minted-token lifetimes are NOT configurable here: they are always synced
+    # to the expiries advertised by the IdP (with idp.* fallbacks when the IdP
+    # omits one). See IdpConfig.access_token_expires_in /
+    # refresh_token_expires_in and AuthService._mint_access_token /
+    # _mint_refresh_token / _mint_cookie_jwe. The app server never grants
+    # access beyond what the IdP sanctions.
     auth_cookie_name: str = Field(
         default="ohesession",
         description="Name of the auth cookie set by the login endpoint.",

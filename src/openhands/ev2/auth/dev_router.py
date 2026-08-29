@@ -34,13 +34,19 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_service import _derive_code_challenge, _join_url
+from openhands.ev2.auth.auth_schemas import DevLoginRequest
+from openhands.ev2.auth.auth_service import (
+    AuthService,
+    _derive_code_challenge,
+    _join_url,
+    _mint_cookie_jwe,
+)
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
@@ -135,6 +141,22 @@ class DevIdpService:
     # ------------------------------------------------------------------ #
     # /authorize — authenticate the user, mint the authorization code.
     # ------------------------------------------------------------------ #
+
+    async def login(
+        self,
+        *,
+        username: str,
+        password: str,
+    ) -> tuple[User, dict[str, Any]]:
+        """Authenticate a user directly with username + password.
+
+        Returns the authenticated user and a dev IdP token response (the same
+        shape ``/auth/dev/token`` produces) so the caller can persist the IdP
+        tokens and mint a session cookie exactly as the OAuth callback does.
+        Raises :class:`InvalidGrantError` on bad credentials / disabled user.
+        """
+        user = await self._authenticate_user(username, password)
+        return user, self._token_response(user.id, user.email)
 
     async def authorize(
         self,
@@ -371,6 +393,80 @@ async def _dev_idp_dep(
 
 
 DevIdpDep = Annotated[DevIdpService, Depends(_dev_idp_dep)]
+
+
+def _set_dev_session_cookie(
+    response: Response,
+    *,
+    user_id: uuid.UUID,
+    access_id: uuid.UUID,
+    access_expires_at: datetime,
+) -> None:
+    """Set an auth session cookie on *response*, mirroring the callback flow.
+
+    Uses the same ``_mint_cookie_jwe`` + config-driven cookie attributes as
+    :func:`auth_router._set_session_cookie` so the resulting cookie is
+    indistinguishable from one set by the ``response_type=cookie`` OAuth
+    callback: the auth dependency can auto-refresh it the same way.
+    """
+    cfg = get_config()
+    enc = get_encryption_service()
+    cookie_token = _mint_cookie_jwe(
+        enc,
+        user_id=user_id,
+        access_id=access_id,
+        access_expires_at=access_expires_at,
+    )
+    response.set_cookie(
+        key=cfg.auth_cookie_name,
+        value=cookie_token,
+        max_age=max(1, int((access_expires_at - datetime.now(UTC)).total_seconds())),
+        httponly=True,
+        samesite=cfg.auth_cookie_samesite,
+        secure=cfg.auth_cookie_secure,
+        path="/",
+    )
+
+
+@router.post("/login")
+async def login(
+    service: DevIdpDep,
+    session: SessionDep,
+    response: Response,
+    payload: DevLoginRequest,
+) -> dict[str, str]:
+    """Dev-only username/password login that sets a session cookie.
+
+    Authenticates the user directly (no OAuth round trip), issues a dev IdP
+    token pair, persists it through the same path the OAuth callback uses, and
+    sets a session cookie so subsequent requests from the OpenAPI docs page (or
+    any dev browser client) are authenticated. Returns ``401`` on bad
+    credentials. Only available when the dev IdP is mounted
+    (``idp.url == "/auth/dev"``).
+    """
+    try:
+        user, idp_tokens = await service.login(
+            username=payload.username,
+            password=payload.password,
+        )
+    except InvalidGrantError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+        ) from None
+    auth_service = AuthService(session)
+    try:
+        _, access_row = await auth_service.persist_idp_tokens(user.id, idp_tokens)
+    finally:
+        await auth_service.aclose()
+    await session.commit()
+    _set_dev_session_cookie(
+        response,
+        user_id=user.id,
+        access_id=access_row.id,
+        access_expires_at=access_row.expires_at,
+    )
+    return {"user_id": str(user.id), "username": user.username}
 
 
 @router.get("/authorize")

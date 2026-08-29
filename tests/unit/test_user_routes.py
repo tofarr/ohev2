@@ -176,6 +176,52 @@ class TestCountUsersRoute:
         assert resp.json()["count"] == 2
 
 
+class TestBatchUsersRoute:
+    async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
+        a = await client.post("/users", json={"email": "a@example.com", "username": "a"})
+        b = await client.post("/users", json={"email": "b@example.com", "username": "b"})
+        aid, bid = a.json()["id"], b.json()["id"]
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/users/batch?ids={aid}&ids={missing}&ids={bid}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["id"] == aid
+        assert items[1] is None
+        assert items[2]["id"] == bid
+
+    async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
+        # No ids query param -> FastAPI yields []; service short-circuits.
+        resp = await client.get("/users/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
+        a = await client.post("/users", json={"email": "dup@example.com", "username": "dup"})
+        aid = a.json()["id"]
+        resp = await client.get(f"/users/batch?ids={aid}&ids={aid}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == aid
+        assert items[1]["id"] == aid
+
+    async def test_batch_all_missing_returns_all_nulls(self, client: AsyncClient) -> None:
+        m1, m2 = str(uuid.uuid4()), str(uuid.uuid4())
+        resp = await client.get(f"/users/batch?ids={m1}&ids={m2}")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == [None, None]
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/users/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_batch_invalid_uuid_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.get("/users/batch?ids=not-a-uuid")
+        assert resp.status_code == 422
+
+
 class TestUpdateUserRoute:
     async def test_update_email(self, client: AsyncClient) -> None:
         create = await client.post("/users", json={"email": "old@example.com", "username": "old"})
@@ -388,3 +434,106 @@ class TestUserRouterErrorPaths:
         resp = await client.patch(f"/users/{target.id}", json={"enabled": False})
         assert resp.status_code == 200
         assert resp.json()["enabled"] is False
+
+
+class TestBatchWriteUsers:
+    """POST /users/batch — mix of create/update/delete in one transaction."""
+
+    async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
+        u1 = await client.post("/users", json={"email": "bwu1@example.com", "username": "bwu1"})
+        u2 = await client.post("/users", json={"email": "bwu2@example.com", "username": "bwu2"})
+        uid1, uid2 = u1.json()["id"], u2.json()["id"]
+        resp = await client.post(
+            "/users/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": {"email": "bwu3@example.com", "username": "bwu3"}},
+                    {"op": "update", "id": uid1, "data": {"enabled": False}},
+                    {"op": "delete", "id": uid2},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 3
+        assert items[0]["email"] == "bwu3@example.com"
+        assert items[1]["id"] == uid1 and items[1]["enabled"] is False
+        assert items[2] is None
+        # delete persisted
+        assert (await client.get(f"/users/{uid2}")).status_code == 404
+
+    async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
+        keep = await client.post("/users", json={"email": "keep@example.com", "username": "keepbw"})
+        before_count = (await client.get("/users/count")).json()["count"]
+        resp = await client.post(
+            "/users/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"email": "rollback@example.com", "username": "rollbackbw"},
+                    },
+                    {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
+                ]
+            },
+        )
+        assert resp.status_code == 404
+        # Nothing committed: count unchanged, create did not persist.
+        after_count = (await client.get("/users/count")).json()["count"]
+        assert after_count == before_count
+        assert (await client.get(f"/users/{keep.json()['id']}")).status_code == 200
+
+    async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/users/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
+        ops = [
+            {"op": "create", "data": {"email": f"bx{i}@example.com", "username": f"bx{i}"}}
+            for i in range(101)
+        ]
+        resp = await client.post("/users/batch", json={"operations": ops})
+        assert resp.status_code == 422
+
+    async def test_batch_unknown_op_discriminator_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/users/batch",
+            json={
+                "operations": [
+                    {"op": "upsert", "data": {"email": "z@example.com", "username": "z"}}
+                ]
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_create_conflict_rolls_back_whole_batch(
+        self, client: AsyncClient, session
+    ) -> None:
+        from openhands.ev2.user.user_models import User
+        from openhands.ev2.user.user_schemas import UserCreate
+        from openhands.ev2.user.user_service import UserService
+        from openhands.ev2.util.search_filter import AllSearchFilter
+
+        await UserService(session, AllSearchFilter[User]()).create(
+            UserCreate(email="bwconflict@example.com", username="bwconflict")
+        )
+        await session.commit()
+        before = (await client.get("/users/count")).json()["count"]
+        resp = await client.post(
+            "/users/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": {"email": "bwfresh@example.com", "username": "bwfresh"},
+                    },
+                    {
+                        "op": "create",
+                        "data": {"email": "bwconflict@example.com", "username": "other"},
+                    },  # 409
+                ]
+            },
+        )
+        assert resp.status_code == 409
+        after = (await client.get("/users/count")).json()["count"]
+        assert after == before  # fresh user not persisted (atomic rollback)

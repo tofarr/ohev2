@@ -14,6 +14,9 @@ Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 * ``POST /auth/token``     — exchange our authorization code for an access +
   refresh token pair (RFC 6749 §4.1.3). Also handles the refresh grant.
 * ``POST /auth/refresh``   — rotate the access + refresh pair via the IdP.
+* ``POST /auth/revoke``    — revoke a token (RFC 7009). Refresh-token
+  revocation is immediate; access-token revocation is best-effort (the
+  JWE remains usable until its own short ``exp``).
 
 OAuth client management is a REST resource at ``/auth/clients``.
 """
@@ -25,8 +28,8 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
 from openhands.ev2.auth.auth_dependencies import depends_access_token, depends_permissions
@@ -322,6 +325,43 @@ async def refresh(
         await service.aclose()
     await session.commit()
     return _to_response(pair)
+
+
+@router.post("/revoke", status_code=status.HTTP_200_OK)
+async def revoke(
+    token: Annotated[str, Form()],
+    session: SessionDep,
+    token_type_hint: Annotated[str | None, Form()] = None,
+    client_id: Annotated[str, Form()] = "",
+    client_secret: Annotated[str, Form()] = "",
+) -> Response:
+    """Revoke a token (RFC 7009).
+
+    Form-encoded. Client credentials are validated (401 on failure); the token
+    itself is best-effort — the endpoint always returns 200 and never reveals
+    whether the token was valid, per §2.2. Refresh-token revocation is
+    immediate (the federated session can no longer refresh); access-token
+    revocation is best-effort (the JWE remains usable until its own short
+    ``exp``).
+    """
+    service = AuthService(session)
+    try:
+        await service.revoke_token(
+            token=token,
+            token_type_hint=token_type_hint,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    except InvalidClientError as exc:
+        # Only client-auth failures are surfaced to the caller.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except AuthError:
+        # Any other token error is swallowed (best-effort, RFC 7009 §2.2).
+        pass
+    finally:
+        await service.aclose()
+    await session.commit()
+    return Response(status_code=status.HTTP_200_OK)
 
 
 # ---------------------------------------------------------------------- #

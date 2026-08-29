@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -128,3 +129,47 @@ class UserSearchResult(BaseModel):
         description="Opaque cursor for the next page; null when no more results.",
     )
     limit: int
+
+
+# Batch write: a single POST /users/batch applies a list of create/update/delete
+# operations in one transaction (AGENTS.md §3). Each operation is one of the
+# three kinds below; the discriminator is `op`. Creates reuse UserCreate;
+# updates target a specific id and reuse UserUpdate; deletes target an id.
+
+
+class UserBatchCreate(BaseModel):
+    """Create operation within a user batch write."""
+
+    op: Literal["create"] = "create"
+    data: UserCreate
+
+
+class UserBatchUpdate(BaseModel):
+    """Update operation within a user batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: UserUpdate
+
+
+class UserBatchDelete(BaseModel):
+    """Delete operation within a user batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+UserBatchOp = Annotated[
+    UserBatchCreate | UserBatchUpdate | UserBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class UserBatchWriteRequest(BaseModel):
+    """Request body for `POST /users/batch`."""
+
+    operations: list[UserBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/update/delete mixed.",
+    )

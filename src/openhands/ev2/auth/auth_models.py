@@ -47,9 +47,17 @@ _TZ = DateTime(timezone=True)
 class TokenType(enum.StrEnum):
     """The kind of credential a token represents.
 
-    COOKIE and ACCESS_TOKEN are short-lived JWE tokens validated against the
-    user row only. API_KEY and REFRESH_TOKEN are additionally validated
-    against their DB rows.
+    COOKIE and ACCESS_TOKEN are short-lived JWE tokens whose ``exp`` is synced
+    to the backing IdP access-token row; they are validated against the user
+    row only. API_KEY is a long-lived, user-managed service credential backed
+    by an ``api_keys`` row. IDP_REFRESH_TOKEN is an exchange-only credential
+    backed by an ``idp_refresh_tokens`` row; it is never accepted as a bearer
+    token by :meth:`TokenService.authenticate` and is rotated only by the auth
+    refresh endpoint (the IdP refresh grant).
+
+    REFRESH_TOKEN is a legacy self-issued type retained for the
+    ``refresh_tokens`` table schema; it is no longer minted by the app server
+    (token rotation is federated via IDP_REFRESH_TOKEN).
     """
 
     COOKIE = "cookie"

@@ -28,7 +28,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, HTTPException, Request, Response, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
@@ -147,7 +147,7 @@ async def depends_access_token(
         )
 
     if used_cookie:
-        await _maybe_refresh_auth_cookie(token, response, session, service)
+        await _maybe_refresh_auth_cookie(token, response, session)
 
     _cache_token(request, auth_token)
     return auth_token
@@ -161,17 +161,22 @@ async def _maybe_refresh_auth_cookie(
     token: str,
     response: Response,
     session: AsyncSession,
-    auth_service: TokenService,
 ) -> None:
     """Re-mint the session cookie, refreshing the federated access token if needed.
 
-    A legacy (password-flow) cookie has no federated claims and is simply
-    re-minted with a fresh expiry (sliding session). An auth federated cookie
-    carries an IdP access-token row id + expiry; when that expiry is imminent
-    (within the drift tolerance) the dependency triggers a server-side refresh
-    (mirroring what a standard OAuth client does at ``/auth/refresh``) before
-    re-minting the cookie. On a concurrent-refresh lock timeout the existing
-    cookie is kept so the client is not logged out; the next request retries.
+    A federated cookie carries an IdP access-token row id (``aid``) + expiry
+    (``axp``); when that expiry is imminent (within the drift tolerance) the
+    dependency triggers a server-side refresh (mirroring what a standard OAuth
+    client does at ``/auth/refresh``) before re-minting the cookie. The
+    re-minted cookie's ``exp`` and ``max_age`` are always synced to the
+    access-token row's expiry — never to a config value — so the cookie never
+    outlives the federated grant. On a concurrent-refresh lock timeout the
+    existing cookie is kept so the client is not logged out; the next request
+    retries.
+
+    A cookie without ``aid`` is a test/bootstrap token (no federated backing
+    row); it is re-minted off its own presented expiry so the no-DB path stays
+    self-consistent without any config TTL.
     """
     from openhands.ev2.auth.auth_service import (
         AuthService,
@@ -184,57 +189,48 @@ async def _maybe_refresh_auth_cookie(
     enc = get_encryption_service()
     payload = enc.decrypt_jwe_token(token)
     access_id_raw = payload.get(_AUTH2_ACCESS_ID_CLAIM)
+    now = datetime.now(UTC)
 
     if not isinstance(access_id_raw, str):
-        # Legacy (password-flow) cookie: plain sliding re-mint.
-        fresh = auth_service.reissue_cookie(_user_sub(payload))
-        _set_cookie(response, fresh, cfg.auth_cookie_timeout_seconds, cfg)
+        # Test/bootstrap cookie (no federated backing row): re-mint a plain
+        # COOKIE off its own presented expiry. No config TTL involved.
+        fresh = _reissue_plain_cookie(enc, payload, now)
+        _set_cookie(response, fresh, _remaining_seconds(payload, now), cfg)
         return
 
     access_id = uuid.UUID(access_id_raw)
     access_exp = _access_exp(payload)
     drift = timedelta(seconds=cfg.idp.expire_drift_tolerance)
 
-    if access_exp is None or access_exp > datetime.now(UTC) + drift:
-        # Not imminent: re-mint off the existing (synced) expiry.
-        if access_exp is None:
-            fresh = auth_service.reissue_cookie(_user_sub(payload))
-            _set_cookie(response, fresh, cfg.auth_cookie_timeout_seconds, cfg)
-            return
+    if access_exp is not None and access_exp > now + drift:
+        # Not imminent: re-mint off the existing (synced) access-token expiry.
         fresh = _mint_cookie_jwe(
             enc,
             user_id=_user_sub(payload),
             access_id=access_id,
             access_expires_at=access_exp,
         )
-        _set_cookie(
-            response,
-            fresh,
-            max(1, int((access_exp - datetime.now(UTC)).total_seconds())),
-            cfg,
-        )
+        _set_cookie(response, fresh, max(1, int((access_exp - now).total_seconds())), cfg)
         return
 
-    # Imminent/expired: refresh the federated access token under a row lock.
+    # Imminent / expired / missing axp: refresh the federated access token
+    # under a row lock, then re-mint synced to the refreshed row's expiry.
     service = AuthService(session)
     try:
         access_row, _ = await service.refresh_access_token(access_id)
         await session.commit()
     except RefreshLockTimeoutError:
-        # Concurrent refresh holds the lock; keep the existing cookie valid this
-        # request. The next request retries the refresh.
+        # Concurrent refresh holds the lock; keep the existing cookie valid
+        # this request. Fall back to the presented expiry (or a 1s floor) so
+        # the client is not logged out; the next request retries the refresh.
+        fallback_exp = access_exp or (now + timedelta(seconds=1))
         fresh = _mint_cookie_jwe(
             enc,
             user_id=_user_sub(payload),
             access_id=access_id,
-            access_expires_at=access_exp,
+            access_expires_at=fallback_exp,
         )
-        _set_cookie(
-            response,
-            fresh,
-            max(1, int((access_exp - datetime.now(UTC)).total_seconds())),
-            cfg,
-        )
+        _set_cookie(response, fresh, max(1, int((fallback_exp - now).total_seconds())), cfg)
         return
     finally:
         await service.aclose()
@@ -248,7 +244,7 @@ async def _maybe_refresh_auth_cookie(
     _set_cookie(
         response,
         fresh,
-        max(1, int((access_row.expires_at - datetime.now(UTC)).total_seconds())),
+        max(1, int((access_row.expires_at - now).total_seconds())),
         cfg,
     )
 
@@ -265,6 +261,46 @@ def _access_exp(payload: dict[str, object]) -> datetime | None:
     if not isinstance(raw, int | float):
         return None
     return datetime.fromtimestamp(int(raw), tz=UTC)
+
+
+def _payload_exp(payload: dict[str, object], now: datetime) -> datetime:
+    """The presented token's own ``exp`` (or a 1h fallback for no-expiry tokens)."""
+    raw = payload.get("exp")
+    if isinstance(raw, int | float) and raw > 0:
+        return datetime.fromtimestamp(int(raw), tz=UTC)
+    # No exp claim (e.g. a bootstrap token minted without one): keep the
+    # session alive for a short, fixed window so it eventually rotates.
+    return now + timedelta(hours=1)
+
+
+def _remaining_seconds(payload: dict[str, object], now: datetime) -> int:
+    return max(1, int((_payload_exp(payload, now) - now).total_seconds()))
+
+
+def _reissue_plain_cookie(
+    enc: object,
+    payload: dict[str, object],
+    now: datetime,
+) -> str:
+    """Re-mint a plain (no-``aid``) COOKIE off its own presented expiry.
+
+    Used only for test/bootstrap cookies that carry no federated backing row.
+    The fresh token keeps the same remaining lifetime as the presented one.
+    """
+    from openhands.ev2.auth.auth_models import TokenType
+    from openhands.ev2.auth.auth_tokens import _JTI_CLAIM, _SUB_CLAIM, _TYP_CLAIM
+    from openhands.ev2.encryption.encryption_service import EncryptionService
+
+    ttl = timedelta(seconds=_remaining_seconds(payload, now))
+    sub = payload.get(_SUB_CLAIM)
+    return cast(EncryptionService, enc).create_jwe_token(
+        {
+            _SUB_CLAIM: str(sub) if isinstance(sub, str) else "",
+            _TYP_CLAIM: TokenType.COOKIE.value,
+            _JTI_CLAIM: str(uuid.uuid4()),
+        },
+        expires_in=ttl,
+    )
 
 
 def _set_cookie(response: Response, value: str, max_age: int, cfg: AppConfig) -> None:
@@ -423,6 +459,10 @@ def register_resource_policy(model: type, column: str) -> None:
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
+from openhands.ev2.llm.llm_models import StoredLLM as _StoredLLM  # noqa: E402
+from openhands.ev2.llm.llm_models import (  # noqa: E402
+    StoredProviderConnection as _StoredProviderConnection,
+)
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
@@ -433,6 +473,8 @@ register_resource_policy(_UserRole, "user_role_permission")
 register_resource_policy(_ApiKey, "api_key_permission")
 register_resource_policy(_OAuthClient, "oauth_client_permission")
 register_resource_policy(_AllowedOrigin, "cors_origin_permission")
+register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
+register_resource_policy(_StoredLLM, "llm_permission")
 
 
 def depends_permissions(
@@ -466,26 +508,8 @@ def depends_permissions(
         session: SessionDep,
         token: Annotated[AuthToken | None, Depends(depends_access_token)],
     ) -> SearchFilter[Any]:
-        user_id = token.user_id if token is not None else None
-        column = _policy_attr_for(model_type)
-        if column is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Permission denied: no policy registered for "
-                    f"{model_type.__name__} action={action.value}"
-                ),
-            )
-
-        filters: list[SearchFilter[Any]] = []
-        async for role in depends_roles(request, session, token):
-            policy = _role_policy_for(role, column)
-            if policy is None:
-                continue
-            filters.append(policy.to_search_filter(user_id, action))
-
-        effective = _combine(filters)
-        if effective is None or isinstance(effective, NoneSearchFilter):
+        effective = await resolve_permission_filter(model_type, action, request, session, token)
+        if effective is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(f"Permission denied: action={action.value} resource={model_type.__name__}"),
@@ -493,6 +517,61 @@ def depends_permissions(
         return effective
 
     return _guard
+
+
+def depends_permissions_or_none(
+    model_type: type,
+    action: Action,
+) -> Callable[..., Coroutine[Any, Any, SearchFilter[Any] | None]]:
+    """Like :func:`depends_permissions` but returns ``None`` instead of 403.
+
+    Used by batch-write endpoints, which mix create/update/delete in one
+    request: the handler resolves a filter per action without pre-failing on an
+    action the batch does not use, then the service denies (raises) per
+    operation when its action has no grant. A ``None`` return means "no grant
+    for this action" — callers must reject operations of that action.
+    """
+
+    async def _resolve(
+        request: Request,
+        session: SessionDep,
+        token: Annotated[AuthToken | None, Depends(depends_access_token)],
+    ) -> SearchFilter[Any] | None:
+        return await resolve_permission_filter(model_type, action, request, session, token)
+
+    return _resolve
+
+
+async def resolve_permission_filter(
+    model_type: type,
+    action: Action,
+    request: Request,
+    session: AsyncSession,
+    token: AuthToken | None,
+) -> SearchFilter[Any] | None:
+    """Reduce the principal's role policies to one filter, or ``None`` if denied.
+
+    Shared by :func:`depends_permissions` (which raises 403 on ``None``) and
+    :func:`depends_permissions_or_none` (which returns the ``None``). Returns
+    ``None`` when no policy is registered for *model_type* or when every policy
+    reduces to a deny for ``(user_id, action)``.
+    """
+    user_id = token.user_id if token is not None else None
+    column = _policy_attr_for(model_type)
+    if column is None:
+        return None
+
+    filters: list[SearchFilter[Any]] = []
+    async for role in depends_roles(request, session, token):
+        policy = _role_policy_for(role, column)
+        if policy is None:
+            continue
+        filters.append(policy.to_search_filter(user_id, action))
+
+    effective = _combine(filters)
+    if effective is None or isinstance(effective, NoneSearchFilter):
+        return None
+    return effective
 
 
 def _policy_attr_for(model_type: type) -> str | None:
@@ -541,7 +620,9 @@ __all__ = [
     "UserId",
     "depends_access_token",
     "depends_permissions",
+    "depends_permissions_or_none",
     "depends_roles",
     "depends_user_id",
     "register_resource_policy",
+    "resolve_permission_filter",
 ]
