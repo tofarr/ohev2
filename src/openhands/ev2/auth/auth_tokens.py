@@ -139,6 +139,7 @@ class TokenService:
         user_id: uuid.UUID,
         *,
         name: str | None = None,
+        enabled: bool = True,
         expires_at: datetime | None = None,
     ) -> tuple[str, ApiKey]:
         """Mint a long-lived API_KEY token and persist its backing row.
@@ -149,7 +150,13 @@ class TokenService:
         entirely when the key never expires).
         """
         jti = uuid.uuid4()
-        row = ApiKey(jti=jti, user_id=user_id, name=name, expires_at=expires_at)
+        row = ApiKey(
+            jti=jti,
+            user_id=user_id,
+            name=name,
+            enabled=enabled,
+            expires_at=expires_at,
+        )
         self._session.add(row)
         await self._session.flush()
         ttl = None
