@@ -18,8 +18,17 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
-from openhands.ev2.user.user_schemas import UserCreate, UserSearchFilter, UserUpdate
+from openhands.ev2.user.user_schemas import (
+    UserBatchCreate,
+    UserBatchDelete,
+    UserBatchOp,
+    UserBatchUpdate,
+    UserCreate,
+    UserSearchFilter,
+    UserUpdate,
+)
 from openhands.ev2.util.password import hash_password, verify_password
 from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
@@ -38,6 +47,10 @@ class UserUsernameConflictError(Exception):
 
 class UserPermissionScopeError(Exception):
     """Raised when a create payload falls outside the principal's scope."""
+
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 class UserService:
@@ -176,6 +189,66 @@ class UserService:
         await self._session.delete(user)
         await self._session.flush()
 
+    async def apply_batch(
+        self,
+        operations: list[UserBatchOp],
+        perm_filters: dict[Action, SearchFilter[User] | None],
+    ) -> list[User | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action using the matching
+        entry in *perm_filters*; an action with a ``None`` filter is denied
+        (:class:`BatchPermissionDeniedError`). Operations are flushed in order
+        so integrity errors surface, but no commit is performed — the caller
+        commits once after the whole batch succeeds (atomic: a failure of any
+        operation leaves the session rolled back with nothing applied).
+
+        Returns results positionally aligned with *operations*: the created/
+        updated :class:`User` for create/update ops, ``None`` for delete ops.
+        """
+        results: list[User | None] = []
+        for op in operations:
+            if isinstance(op, UserBatchCreate):
+                results.append(await self._batch_create(op, perm_filters))
+            elif isinstance(op, UserBatchUpdate):
+                results.append(await self._batch_update(op, perm_filters))
+            elif isinstance(op, UserBatchDelete):
+                await self._batch_delete(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create(
+        self,
+        op: UserBatchCreate,
+        perm_filters: dict[Action, SearchFilter[User] | None],
+    ) -> User:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        # A per-operation UserService so the create's perm_filter matches the
+        # operation's action, not the batch endpoint's single action.
+        return await UserService(self._session, filt).create(op.data)
+
+    async def _batch_update(
+        self,
+        op: UserBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[User] | None],
+    ) -> User:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await UserService(self._session, filt).update(op.id, op.data)
+
+    async def _batch_delete(
+        self,
+        op: UserBatchDelete,
+        perm_filters: dict[Action, SearchFilter[User] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await UserService(self._session, filt).delete(op.id)
+
     async def count(
         self,
         search_filter: UserSearchFilter | None = None,
@@ -252,6 +325,7 @@ def _classify_integrity_error(
 # Re-export for type-checking convenience in callers that import from the
 # service namespace.
 __all__ = [
+    "BatchPermissionDeniedError",
     "User",
     "UserEmailConflictError",
     "UserNotFoundError",

@@ -18,7 +18,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.role.role_schemas import RoleCreate, RoleSearchFilter, RoleUpdate
+from openhands.ev2.role.role_schemas import (
+    RoleBatchCreate,
+    RoleBatchDelete,
+    RoleBatchOp,
+    RoleBatchUpdate,
+    RoleCreate,
+    RoleSearchFilter,
+    RoleUpdate,
+)
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
 
 
@@ -32,6 +41,10 @@ class RoleNameConflictError(Exception):
 
 class RolePermissionScopeError(Exception):
     """Raised when a create payload falls outside the principal's scope."""
+
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
 
 
 class RoleService:
@@ -161,6 +174,61 @@ class RoleService:
         await self._session.delete(role)
         await self._session.flush()
 
+    async def apply_batch(
+        self,
+        operations: list[RoleBatchOp],
+        perm_filters: dict[Action, SearchFilter[Role] | None],
+    ) -> list[Role | None]:
+        """Apply a mix of create/update/delete operations in one transaction.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic). Returns
+        results aligned with *operations*: the role for create/update, ``None``
+        for delete.
+        """
+        results: list[Role | None] = []
+        for op in operations:
+            if isinstance(op, RoleBatchCreate):
+                results.append(await self._batch_create(op, perm_filters))
+            elif isinstance(op, RoleBatchUpdate):
+                results.append(await self._batch_update(op, perm_filters))
+            elif isinstance(op, RoleBatchDelete):
+                await self._batch_delete(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create(
+        self,
+        op: RoleBatchCreate,
+        perm_filters: dict[Action, SearchFilter[Role] | None],
+    ) -> Role:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        return await RoleService(self._session, filt).create(op.data)
+
+    async def _batch_update(
+        self,
+        op: RoleBatchUpdate,
+        perm_filters: dict[Action, SearchFilter[Role] | None],
+    ) -> Role:
+        filt = perm_filters.get(Action.UPDATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("update")
+        return await RoleService(self._session, filt).update(op.id, op.data)
+
+    async def _batch_delete(
+        self,
+        op: RoleBatchDelete,
+        perm_filters: dict[Action, SearchFilter[Role] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await RoleService(self._session, filt).delete(op.id)
+
     async def count(
         self,
         search_filter: RoleSearchFilter | None = None,
@@ -191,6 +259,7 @@ def _classify_integrity_error(
 
 
 __all__ = [
+    "BatchPermissionDeniedError",
     "Role",
     "RoleNameConflictError",
     "RoleNotFoundError",

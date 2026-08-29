@@ -15,10 +15,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
 from openhands.ev2.db import SessionDep
 from openhands.ev2.role.role_models import Role
 from openhands.ev2.role.role_schemas import (
+    RoleBatchWriteRequest,
     RoleCreate,
     RoleRead,
     RoleSearchFilter,
@@ -26,13 +27,14 @@ from openhands.ev2.role.role_schemas import (
     RoleUpdate,
 )
 from openhands.ev2.role.role_service import (
+    BatchPermissionDeniedError,
     RoleNameConflictError,
     RoleNotFoundError,
     RolePermissionScopeError,
     RoleService,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.schemas import BatchReadResult, CountResult
+from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -125,6 +127,60 @@ async def get_roles_batch(
     roles = await service.get_many(ids)
     return BatchReadResult(
         items=[RoleRead.model_validate(r) if r is not None else None for r in roles],
+    )
+
+
+@router.post(
+    "/batch",
+    response_model=BatchWriteResult[RoleRead],
+)
+async def write_roles_batch(
+    payload: RoleBatchWriteRequest,
+    session: SessionDep,
+    # Resolve a per-action filter without raising so a CUD batch does not 403
+    # on an unused action. Declared before `/{role_id}` so the static `/batch`
+    # path matches ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[Role] | None, Depends(depends_permissions_or_none(Role, Action.CREATE))
+    ],
+    update_filter: Annotated[
+        SearchFilter[Role] | None, Depends(depends_permissions_or_none(Role, Action.UPDATE))
+    ],
+    delete_filter: Annotated[
+        SearchFilter[Role] | None, Depends(depends_permissions_or_none(Role, Action.DELETE))
+    ],
+) -> BatchWriteResult[RoleRead]:
+    service = RoleService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(payload.operations, perm_filters)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except RolePermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role falls outside your create scope: {exc}",
+        ) from exc
+    except RoleNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Role not found: {exc}",
+        ) from exc
+    except RoleNameConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Role with name already exists: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[RoleRead.model_validate(r) if r is not None else None for r in results],
     )
 
 

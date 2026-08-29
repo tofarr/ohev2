@@ -31,3 +31,18 @@ class BatchReadResult[T](BaseModel):
     items: list[T | None] = Field(
         description="Resources aligned to the requested ids; null where missing."
     )
+
+
+class BatchWriteResult[T](BaseModel):
+    """Generic response for `POST /{resource}/batch` endpoints.
+
+    ``items`` is positionally aligned with the request's ``operations`` list:
+    the i-th entry is the resulting resource ``Read`` for a create/update
+    operation or ``None`` for a delete operation. The whole batch is applied in
+    a single transaction, so either every entry is present or the request
+    failed and no entry is returned.
+    """
+
+    items: list[T | None] = Field(
+        description="Results aligned to the operations; null for deletes."
+    )
