@@ -47,7 +47,7 @@
 //   - A revoked flow can never refresh: refresh is rejected from REVOKED.
 
 module auth {
-  type FlowState = Pending | Coded | Granted | Expired | Revoked | Cleaned
+  type FlowState = Pending | Coded | Granted | Expired | Revoked | LoggedOut | Cleaned
   type ResponseType = Code | Cookie
   type FlowId = str
 
@@ -157,6 +157,22 @@ module auth {
     flows' = flows.map(g => toRevoked(g, id)),
   }
 
+  // logout: cookie-focused session end (/auth/logout). Same terminal effect
+  // as revoke — the federated session can no longer refresh or exchange —
+  // but driven by the session cookie rather than a presented token. Requires
+  // a GRANTED flow (the cookie is only set for an established session).
+  pure def toLoggedOut(g: Flow, id: FlowId): Flow =
+    if (g.id == id)
+      { id: g.id, state: LoggedOut, clientEnabled: g.clientEnabled,
+        codeConsumed: g.codeConsumed, rowExpiresAt: g.rowExpiresAt, responseType: g.responseType,
+        hasOpenid: g.hasOpenid, idTokenIssued: g.idTokenIssued }
+    else g
+
+  action logout(id: FlowId): bool = all {
+    flows.exists(f => f.id == id and f.state == Granted),
+    flows' = flows.map(g => toLoggedOut(g, id)),
+  }
+
   // expire: the IdP refresh-token row's expiry passes.
   pure def toExpired(g: Flow, id: FlowId): Flow =
     if (g.id == id)
@@ -224,11 +240,12 @@ module auth {
   def discoveryIssuerNonEmptyInvariant: bool =
     discoveryDocument("https://api.example.com") != ""
 
-  // A revoked flow can never refresh: refresh requires Granted, and revoke
-  // moves the flow out of Granted. No transition returns a REVOKED flow to
-  // Granted, so the federated session is permanently dead.
+  // A revoked or logged-out flow can never refresh: refresh requires
+  // Granted, and both revoke and logout move the flow out of Granted. No
+  // transition returns a REVOKED/LOGGEDOUT flow to Granted, so the federated
+  // session is permanently dead.
   def revokedCannotRefreshInvariant: bool =
-    flows.forall(f => f.state == Revoked implies f.state != Granted)
+    flows.forall(f => (f.state == Revoked or f.state == LoggedOut) implies f.state != Granted)
 
   // ------------------------------------------------------------------ #
   // Tests
@@ -305,6 +322,30 @@ module auth {
       .then(exchangeCode("f1"))
       .then(revoke("f1"))
       .then(revoke("f1"))
+      .fail()
+  }
+
+  // Logout kills the federated session: after logout the flow is LOGGEDOUT
+  // and a subsequent refresh is rejected (refresh requires Granted).
+  run logoutKillsRefresh = {
+    init
+      .then(authorize("f1", true, 100, Code, false))
+      .then(callback("f1"))
+      .then(exchangeCode("f1"))
+      .then(logout("f1"))
+      .then(all {
+        assert(flows.exists(f => f.id == "f1" and f.state == LoggedOut)),
+        flows' = flows,
+      })
+      .then(refresh("f1", 200))
+      .fail()
+  }
+
+  // Logout requires an established (GRANTED) session.
+  run logoutRequiresGranted = {
+    init
+      .then(authorize("f1", true, 100, Code, false))
+      .then(logout("f1"))
       .fail()
   }
 

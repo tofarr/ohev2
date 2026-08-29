@@ -17,6 +17,10 @@ Endpoints (AGENTS.md §3 — standard verbs, plural resource names):
 * ``POST /auth/revoke``    — revoke a token (RFC 7009). Refresh-token
   revocation is immediate; access-token revocation is best-effort (the
   JWE remains usable until its own short ``exp``).
+* ``POST /auth/logout``    — cookie-focused session end. Revokes the
+  federated session backing the session cookie (deleting the IdP refresh
+  + access token rows) and clears the cookie. No client credentials
+  required: the cookie *is* the credential.
 
 OAuth client management is a REST resource at ``/auth/clients``.
 """
@@ -28,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
@@ -403,6 +407,48 @@ async def userinfo(
         name=claims.get("name"),
         preferred_username=claims.get("preferred_username"),
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> Response:
+    """End the browser session.
+
+    Cookie-focused counterpart to ``/auth/revoke``: revokes the federated
+    session backing the session cookie (deleting the IdP refresh + access
+    token rows, best-effort forwarding to the IdP revocation endpoint) and
+    clears the cookie. No client credentials are required — the cookie *is*
+    the credential.
+
+    Always returns 204 and clears the cookie, regardless of whether a cookie
+    was present or whether its backing session was still live. The federated
+    revocation is best-effort: a decrypt/parse failure or a missing backing
+    row is swallowed, and the cookie is still cleared so the browser is logged
+    out locally.
+    """
+    cfg = get_config()
+    cookie_token = request.cookies.get(cfg.auth_cookie_name)
+    if cookie_token is not None:
+        service = AuthService(session)
+        try:
+            await service.revoke_session(cookie_token)
+        except AuthError:
+            pass
+        finally:
+            await service.aclose()
+        await session.commit()
+    response.delete_cookie(
+        key=cfg.auth_cookie_name,
+        httponly=True,
+        samesite=cfg.auth_cookie_samesite,
+        secure=cfg.auth_cookie_secure,
+        path="/",
+    )
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 # ---------------------------------------------------------------------- #

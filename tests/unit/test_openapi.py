@@ -22,7 +22,8 @@ def openapi_spec(app: FastAPI) -> dict[str, object]:
 _PUBLIC_PATHS = {
     "/health",
     # auth OAuth entry points — public by design (they mint or revoke
-    # credentials, authenticating via client credentials in the body).
+    # credentials, authenticating via client credentials in the body or,
+    # for logout, via the session cookie itself).
     "/auth/authorize",
     "/auth/callback",
     "/auth/token",
@@ -32,6 +33,7 @@ _PUBLIC_PATHS = {
     "/.well-known/openid-configuration",
     "/.well-known/oauth-authorization-server",
     "/auth/revoke",
+    "/auth/logout",
 }
 
 
@@ -94,3 +96,4 @@ def test_health_and_auth_token_endpoints_are_public(openapi_spec: dict[str, obje
     assert not paths["/.well-known/openid-configuration"]["get"].get("security")  # type: ignore[index]
     assert not paths["/.well-known/oauth-authorization-server"]["get"].get("security")  # type: ignore[index]
     assert not paths["/auth/revoke"]["post"].get("security")  # type: ignore[index]
+    assert not paths["/auth/logout"]["post"].get("security")  # type: ignore[index]
