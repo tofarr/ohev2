@@ -21,6 +21,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
+from openhands.ev2.llm.llm_router import router as llm_router
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
 from openhands.ev2.user.user_router import router as user_router
@@ -93,6 +94,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(cors_router)
+    app.include_router(llm_router)
     app.include_router(role_router)
     app.include_router(user_role_router)
     app.include_router(user_router)
