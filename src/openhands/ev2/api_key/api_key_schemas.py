@@ -22,14 +22,14 @@ from openhands.ev2.util.search_filter import BaseSearchFilter
 class ApiKeyCreate(BaseModel):
     """Payload to create an API key.
 
-    ``user_id`` is required: an API key always belongs to a user (the subject
-    of the minted JWE). ``expires_at`` is optional; ``None`` means the key
-    never expires on its own.
+    ``user_id`` is not accepted on the payload: the subject of the minted JWE
+    is always the current principal, derived from the authenticated request
+    (AGENTS.md §9). ``expires_at`` is optional; ``None`` means the key never
+    expires on its own.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    user_id: uuid.UUID
     name: str | None = Field(default=None, max_length=255)
     enabled: bool = True
     expires_at: datetime | None = Field(
