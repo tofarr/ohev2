@@ -62,6 +62,29 @@ uniform across the API — there is no mixing of `/list`, `/search`, `/all`, etc
 Nested collections mirror the parent: `GET /{parent}/{id}/{child}`. Query endpoints
 that perform search do so via `GET /{resource}?q=…` rather than a bespoke path.
 
+### Batch endpoints
+
+Every CRUD resource also exposes batch read and write endpoints alongside its
+single-item CRUD:
+
+* `GET /{resource}/batch?ids=<uuid>&ids=<uuid>...` — batch read. Returns the
+  resources positionally aligned with the requested ids (`null` for missing or
+  out-of-scope items). Capped at 100 ids.
+* `POST /{resource}/batch` — batch write. Accepts a list of operations, each a
+  create, update, or delete against the same resource, applied in a single
+  transaction.
+
+Batch writes authorize each operation against its own action (`CREATE` /
+`UPDATE` / `DELETE`) using the principal's effective permission filter and
+deny the whole batch if any operation is out of scope. They commit exactly
+once at the end, so a failure of any operation rolls back the entire batch
+(atomic, no partial application). Updates target a specific id; deletes target
+a specific id; creates carry the same payload as `POST /{resource}`. The
+batch response is positionally aligned with the operations: the i-th entry is
+the resulting `Read` for a create/update, or `null` for a delete. Resources
+without an update (e.g. immutable link tables) omit the `update` op rather
+than inventing one.
+
 ## Sandbox model
 
 Sandboxes are first-class resources. A `SandboxProvider` interface is implemented by
