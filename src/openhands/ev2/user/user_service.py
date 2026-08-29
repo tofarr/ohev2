@@ -99,6 +99,25 @@ class UserService:
             raise UserNotFoundError(str(user_id))
         return user
 
+    async def get_many(
+        self,
+        user_ids: list[uuid.UUID],
+    ) -> list[User | None]:
+        """Retrieve users by ids in a single query, scoped by ``perm_filter``.
+
+        Returns a list positionally aligned with *user_ids*: the i-th entry is
+        the :class:`User` for ``user_ids[i]`` or ``None`` when missing/out of
+        scope. Duplicate ids are preserved (the same user appears at each
+        position). An empty *user_ids* yields an empty list without hitting the
+        DB.
+        """
+        if not user_ids:
+            return []
+        stmt = self._perm_filter.filter_sql(select(User).where(User.id.in_(user_ids)))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, User] = {u.id: u for u in result.scalars().all()}
+        return [by_id.get(uid) for uid in user_ids]
+
     async def search_users(
         self,
         *,

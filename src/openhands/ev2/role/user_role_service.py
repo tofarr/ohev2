@@ -59,6 +59,24 @@ class UserRoleService:
             raise UserRoleNotFoundError(str(user_role_id))
         return link
 
+    async def get_many(
+        self,
+        user_role_ids: list[uuid.UUID],
+    ) -> list[UserRole | None]:
+        """Retrieve assignments by ids in a single query.
+
+        Returns a list positionally aligned with *user_role_ids*: the i-th entry
+        is the :class:`UserRole` for ``user_role_ids[i]`` or ``None`` when
+        missing. Duplicate ids are preserved. An empty *user_role_ids* yields an
+        empty list without hitting the DB.
+        """
+        if not user_role_ids:
+            return []
+        stmt = select(UserRole).where(UserRole.id.in_(user_role_ids))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, UserRole] = {link.id: link for link in result.scalars().all()}
+        return [by_id.get(lid) for lid in user_role_ids]
+
     async def search_user_roles(
         self,
         *,

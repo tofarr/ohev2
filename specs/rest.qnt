@@ -18,6 +18,7 @@ module rest {
     | KAction
     | KNested
     | KCount
+    | KBatch
 
   // A route is a kind plus the resource path segments that identify it.
   type Route = {
@@ -39,6 +40,7 @@ module rest {
       | KAction => Post
       | KNested => Get
       | KCount => Get
+      | KBatch => Get
     }
 
   // A route is standard iff its kind is one of the known kinds.
@@ -52,6 +54,7 @@ module rest {
       | KAction => true
       | KNested => true
       | KCount => true
+      | KBatch => true
     }
 
   // Helpers to construct routes concisely.
@@ -67,6 +70,9 @@ module rest {
   pure def countRoute(resource: str): Route =
     { kind: KCount, resource: resource, id: "", actionName: "", child: "" }
 
+  pure def batchRoute(resource: str): Route =
+    { kind: KBatch, resource: resource, id: "", actionName: "", child: "" }
+
   // Tests
 
   run listIsGet = {
@@ -81,6 +87,10 @@ module rest {
     assert(verbFor(countRoute("users")) == Get)
   }
 
+  run batchIsGet = {
+    assert(verbFor(batchRoute("users")) == Get)
+  }
+
   run standardRoutes = all {
     assert(isStandard(collection("users"))),
     assert(isStandard(createRoute("users"))),
@@ -89,5 +99,8 @@ module rest {
     assert(isStandard(actionRoute("sandboxes", "sb1", "stop"))),
     assert(isStandard(countRoute("users"))),
     assert(isStandard(countRoute("permissions"))),
+    assert(isStandard(batchRoute("users"))),
+    assert(isStandard(batchRoute("roles"))),
+    assert(isStandard(batchRoute("user-roles"))),
   }
 }

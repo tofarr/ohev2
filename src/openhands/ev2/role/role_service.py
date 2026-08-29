@@ -88,6 +88,24 @@ class RoleService:
             raise RoleNotFoundError(str(role_id))
         return role
 
+    async def get_many(
+        self,
+        role_ids: list[uuid.UUID],
+    ) -> list[Role | None]:
+        """Retrieve roles by ids in a single query, scoped by ``perm_filter``.
+
+        Returns a list positionally aligned with *role_ids*: the i-th entry is
+        the :class:`Role` for ``role_ids[i]`` or ``None`` when missing/out of
+        scope. Duplicate ids are preserved. An empty *role_ids* yields an empty
+        list without hitting the DB.
+        """
+        if not role_ids:
+            return []
+        stmt = self._perm_filter.filter_sql(select(Role).where(Role.id.in_(role_ids)))
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, Role] = {r.id: r for r in result.scalars().all()}
+        return [by_id.get(rid) for rid in role_ids]
+
     async def search_roles(
         self,
         *,
