@@ -186,7 +186,7 @@ Flow: `GET /auth/authorize` redirects to the IdP (with PKCE), `GET
 /auth/callback` exchanges the code and, for `response_type=cookie`, mints a
 session cookie (the `code` response type mints an exchangeable code instead),
 `POST /auth/token` and `POST /auth/refresh` exchange codes / refresh tokens
-for token pairs. OAuth clients are managed via `/auth/clients` (CRUD with
+for token pairs. OAuth clients are managed via `/auth-clients` (CRUD with
 wildcard redirect-URI matching). The IdP `id_token` (or the decoded
 refresh-token JWT) supplies the `sub`/email used for JIT user provisioning
 (`users.idp_user_id`).

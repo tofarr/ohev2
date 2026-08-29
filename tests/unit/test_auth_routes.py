@@ -44,7 +44,7 @@ def _decode_jwt_payload(token: str) -> dict:
 class TestOAuthClientCrud:
     async def test_create_and_get_client(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={
                 "client_id": "route-client-1",
                 "client_secret": "s3cr3t",
@@ -61,25 +61,25 @@ class TestOAuthClientCrud:
         assert "client_secret" not in body
         cid = body["id"]
 
-        got = await client.get(f"/auth/clients/{cid}")
+        got = await client.get(f"/auth-clients/{cid}")
         assert got.status_code == 200
         assert got.json()["client_id"] == "route-client-1"
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get(f"/auth/clients/{uuid.uuid4()}")
+        resp = await client.get(f"/auth-clients/{uuid.uuid4()}")
         assert resp.status_code == 404
 
     async def test_search_clients(self, client: AsyncClient) -> None:
         for i in range(3):
             await client.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": f"search-{i}",
                     "client_secret": "s",
                     "redirect_uris": [],
                 },
             )
-        resp = await client.get("/auth/clients", params={"limit": 2})
+        resp = await client.get("/auth-clients", params={"limit": 2})
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["items"]) == 2
@@ -87,7 +87,7 @@ class TestOAuthClientCrud:
 
     async def test_update_client(self, client: AsyncClient) -> None:
         create = await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={
                 "client_id": "upd-1",
                 "client_secret": "s",
@@ -96,7 +96,7 @@ class TestOAuthClientCrud:
         )
         cid = create.json()["id"]
         resp = await client.patch(
-            f"/auth/clients/{cid}",
+            f"/auth-clients/{cid}",
             json={"name": "Renamed", "enabled": False, "redirect_uris": ["https://b/cb"]},
         )
         assert resp.status_code == 200, resp.text
@@ -107,26 +107,26 @@ class TestOAuthClientCrud:
 
     async def test_delete_client(self, client: AsyncClient) -> None:
         create = await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={"client_id": "del-1", "client_secret": "s", "redirect_uris": []},
         )
         cid = create.json()["id"]
-        resp = await client.delete(f"/auth/clients/{cid}")
+        resp = await client.delete(f"/auth-clients/{cid}")
         assert resp.status_code == 204
-        assert (await client.get(f"/auth/clients/{cid}")).status_code == 404
+        assert (await client.get(f"/auth-clients/{cid}")).status_code == 404
 
 
 class TestBatchClientsRoute:
     async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
         a = await client.post(
-            "/auth/clients", json={"client_id": "ba", "client_secret": "s", "redirect_uris": []}
+            "/auth-clients", json={"client_id": "ba", "client_secret": "s", "redirect_uris": []}
         )
         b = await client.post(
-            "/auth/clients", json={"client_id": "bb", "client_secret": "s", "redirect_uris": []}
+            "/auth-clients", json={"client_id": "bb", "client_secret": "s", "redirect_uris": []}
         )
         aid, bid = a.json()["id"], b.json()["id"]
         missing = str(uuid.uuid4())
-        resp = await client.get(f"/auth/clients/batch?ids={aid}&ids={missing}&ids={bid}")
+        resp = await client.get(f"/auth-clients/batch?ids={aid}&ids={missing}&ids={bid}")
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         assert len(items) == 3
@@ -135,29 +135,29 @@ class TestBatchClientsRoute:
         assert items[2]["id"] == bid
 
     async def test_batch_empty_ids_returns_empty_list(self, client: AsyncClient) -> None:
-        resp = await client.get("/auth/clients/batch")
+        resp = await client.get("/auth-clients/batch")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
     async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
         ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
-        resp = await client.get(f"/auth/clients/batch?{ids}")
+        resp = await client.get(f"/auth-clients/batch?{ids}")
         assert resp.status_code == 422
 
 
 class TestBatchWriteClients:
-    """POST /auth/clients/batch — mix of create/update/delete in one transaction."""
+    """POST /auth-clients/batch — mix of create/update/delete in one transaction."""
 
     async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
         r1 = await client.post(
-            "/auth/clients", json={"client_id": "bwr1", "client_secret": "s", "redirect_uris": []}
+            "/auth-clients", json={"client_id": "bwr1", "client_secret": "s", "redirect_uris": []}
         )
         r2 = await client.post(
-            "/auth/clients", json={"client_id": "bwr2", "client_secret": "s", "redirect_uris": []}
+            "/auth-clients", json={"client_id": "bwr2", "client_secret": "s", "redirect_uris": []}
         )
         cid1, cid2 = r1.json()["id"], r2.json()["id"]
         resp = await client.post(
-            "/auth/clients/batch",
+            "/auth-clients/batch",
             json={
                 "operations": [
                     {
@@ -175,11 +175,11 @@ class TestBatchWriteClients:
         assert items[0]["client_id"] == "bwr3"
         assert items[1]["id"] == cid1 and items[1]["name"] == "Renamed"
         assert items[2] is None
-        assert (await client.get(f"/auth/clients/{cid2}")).status_code == 404
+        assert (await client.get(f"/auth-clients/{cid2}")).status_code == 404
 
     async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/auth/clients/batch",
+            "/auth-clients/batch",
             json={
                 "operations": [
                     {
@@ -195,17 +195,17 @@ class TestBatchWriteClients:
             },
         )
         assert resp.status_code == 404
-        clients = (await client.get("/auth/clients?limit=100")).json()["items"]
+        clients = (await client.get("/auth-clients?limit=100")).json()["items"]
         ids = {c["client_id"] for c in clients}
         assert "bwrollback" not in ids
 
     async def test_batch_conflict_rolls_back_whole_batch(self, client: AsyncClient) -> None:
         await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={"client_id": "bwconflict", "client_secret": "s", "redirect_uris": []},
         )
         resp = await client.post(
-            "/auth/clients/batch",
+            "/auth-clients/batch",
             json={
                 "operations": [
                     {
@@ -224,19 +224,19 @@ class TestBatchWriteClients:
             },
         )
         assert resp.status_code == 409
-        clients = (await client.get("/auth/clients?limit=100")).json()["items"]
+        clients = (await client.get("/auth-clients?limit=100")).json()["items"]
         ids = {c["client_id"] for c in clients}
         assert "bwfresh" not in ids
 
     async def test_batch_empty_operations_rejected(self, client: AsyncClient) -> None:
-        resp = await client.post("/auth/clients/batch", json={"operations": []})
+        resp = await client.post("/auth-clients/batch", json={"operations": []})
         assert resp.status_code == 422
 
 
 class TestAuthorizeRoute:
     async def test_authorize_redirects_to_idp(self, client: AsyncClient) -> None:
         await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={
                 "client_id": "auth-1",
                 "client_secret": "s",
@@ -262,7 +262,7 @@ class TestAuthorizeRoute:
 
     async def test_authorize_rejects_unlisted_redirect(self, client: AsyncClient) -> None:
         await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={"client_id": "auth-2", "client_secret": "s", "redirect_uris": ["https://ok/cb"]},
         )
         resp = await client.get(
@@ -292,7 +292,7 @@ class TestAuthorizeRoute:
         # response_type is an OpenAPI enum (Literal["code", "cookie"]); a value
         # outside it is rejected as a validation error (422), not a 400.
         await client.post(
-            "/auth/clients",
+            "/auth-clients",
             json={"client_id": "auth-3", "client_secret": "s", "redirect_uris": ["https://ok/cb"]},
         )
         resp = await client.get(
@@ -321,7 +321,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "flow-1",
                     "client_secret": "flow-secret",
@@ -416,7 +416,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "flow-2",
                     "client_secret": "right",
@@ -467,7 +467,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "cookie-flow",
                     "client_secret": "cookie-secret",
@@ -519,7 +519,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "revoke-1",
                     "client_secret": "revoke-secret",
@@ -592,7 +592,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={"client_id": "revoke-2", "client_secret": "right", "redirect_uris": []},
             )
             rev = await c.post(
@@ -615,7 +615,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={"client_id": "revoke-3", "client_secret": "s", "redirect_uris": []},
             )
             rev = await c.post(
@@ -638,7 +638,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "revoke-4",
                     "client_secret": "revoke-secret",
@@ -699,7 +699,7 @@ class TestFullOAuthFlowRoute:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "revoke-5",
                     "client_secret": "revoke-secret",
@@ -819,7 +819,7 @@ class TestIdTokenIssuance:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "oidc-1",
                     "client_secret": "s",
@@ -878,7 +878,7 @@ class TestIdTokenIssuance:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "oidc-2",
                     "client_secret": "s",
@@ -929,7 +929,7 @@ class TestIdTokenIssuance:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "oidc-3",
                     "client_secret": "s",
@@ -1015,7 +1015,7 @@ class TestUserInfo:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "ui-1",
                     "client_secret": "s",
@@ -1083,7 +1083,7 @@ class TestLogout:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "logout-1",
                     "client_secret": "logout-secret",
@@ -1144,7 +1144,7 @@ class TestLogout:
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
-                "/auth/clients",
+                "/auth-clients",
                 json={
                     "client_id": "logout-2",
                     "client_secret": "logout-secret",
