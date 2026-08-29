@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from openhands.ev2 import __version__
+from openhands.ev2.auth.auth_discovery import router as auth_discovery_router
 from openhands.ev2.auth.auth_router import router as auth_router
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth_router)
+    app.include_router(auth_discovery_router)
     app.include_router(cors_router)
     app.include_router(role_router)
     app.include_router(user_role_router)

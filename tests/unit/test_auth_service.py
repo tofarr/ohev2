@@ -37,6 +37,7 @@ from openhands.ev2.auth.auth_service import (
     _generate_code_verifier,
     _idp_access_expiry,
     _idp_refresh_expiry,
+    _normalize_scopes,
     _wildcard_match,
 )
 from openhands.ev2.config import AppConfig, EncryptionKeyConfig
@@ -158,6 +159,20 @@ class TestHelpers:
 
     def test_decode_id_token_garbage_returns_empty(self) -> None:
         assert _decode_id_token("not-a-jwt") == {}
+
+    def test_normalize_scopes_parses_and_dedups(self) -> None:
+        assert _normalize_scopes("openid email openid profile") == frozenset(
+            {"openid", "email", "profile"}
+        )
+
+    def test_normalize_scopes_drops_unknown(self) -> None:
+        # Unknown scopes are dropped — only openid/email/profile are retained.
+        assert _normalize_scopes("openid bogus-scope admin") == frozenset({"openid"})
+
+    def test_normalize_scopes_empty(self) -> None:
+        assert _normalize_scopes(None) == frozenset()
+        assert _normalize_scopes("") == frozenset()
+        assert _normalize_scopes("   ") == frozenset()
 
     def test_generate_and_derive_code_challenge_s256(self) -> None:
         verifier = _generate_code_verifier()
@@ -602,7 +617,7 @@ class TestCallback:
                 select(IdpRefreshToken).where(IdpRefreshToken.id == ctx.row_id)
             )
         ).scalar_one()
-        refresh_token = service._mint_refresh_token(ctx.user_id, refresh_row)
+        refresh_token = service._mint_refresh_token(ctx.user_id, refresh_row, frozenset())
         respx.post(f"{_IDP_BASE}/token").mock(
             return_value=httpx.Response(
                 200,

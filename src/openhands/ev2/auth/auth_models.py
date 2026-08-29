@@ -78,6 +78,10 @@ class AuthToken(BaseModel):
     enabled: bool
     expires_at: datetime
     token_type: TokenType
+    # OAuth/OIDC scopes granted to the token (empty for non-OAuth tokens like
+    # API keys). Carried in the JWE ``scp`` claim so the UserInfo endpoint and
+    # other consumers can gate claims without re-decrypting.
+    scopes: frozenset[str] = frozenset()
 
 
 class ApiKey(Base):
