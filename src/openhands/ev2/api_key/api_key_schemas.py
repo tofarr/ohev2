@@ -22,14 +22,14 @@ from openhands.ev2.util.search_filter import BaseSearchFilter
 class ApiKeyCreate(BaseModel):
     """Payload to create an API key.
 
-    ``user_id`` is required: an API key always belongs to a user (the subject
-    of the minted JWE). ``expires_at`` is optional; ``None`` means the key
-    never expires on its own.
+    ``user_id`` is not accepted on the payload: the subject of the minted key
+    is always the current principal, derived from the authenticated request
+    (AGENTS.md §9). ``expires_at`` is optional; ``None`` means the key never
+    expires on its own.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    user_id: uuid.UUID
     name: str | None = Field(default=None, max_length=255)
     enabled: bool = True
     expires_at: datetime | None = Field(
@@ -51,7 +51,7 @@ class ApiKeyCreate(BaseModel):
 class ApiKeyUpdate(BaseModel):
     """Payload to partially update an API key. All fields optional.
 
-    ``jti`` and ``user_id`` are immutable: the token's identity and subject
+    ``prefix`` and ``user_id`` are immutable: the key's identity and subject
     cannot change after minting.
     """
 
@@ -160,7 +160,7 @@ class ApiKeySearchResult(BaseModel):
 
 # Batch write: POST /api-keys/batch applies create/update/delete atomically
 # (AGENTS.md §3). Operations reuse ApiKeyCreate/ApiKeyUpdate; updates and
-# deletes target a specific id. Batch creates return ApiKeyRead (no token).
+# deletes target a specific id. Batch creates return ApiKeyRead (no key).
 
 
 class ApiKeyBatchCreate(BaseModel):

@@ -79,7 +79,7 @@ class TestCreateApiKey:
     async def test_create_api_key(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        raw_key, key = await service.create(ApiKeyCreate(user_id=uid, name="ci"))
+        raw_key, key = await service.create(ApiKeyCreate(name="ci"), user_id=uid)
         assert key.id is not None
         assert key.user_id == uid
         assert key.name == "ci"
@@ -96,13 +96,13 @@ class TestCreateApiKey:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         expires = datetime.now(UTC) + timedelta(hours=1)
-        _key, row = await service.create(ApiKeyCreate(user_id=uid, expires_at=expires))
+        _key, row = await service.create(ApiKeyCreate(expires_at=expires), user_id=uid)
         assert row.expires_at is not None
 
     async def test_create_disabled(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        raw_key, key = await service.create(ApiKeyCreate(user_id=uid, enabled=False))
+        raw_key, key = await service.create(ApiKeyCreate(enabled=False), user_id=uid)
         assert key.enabled is False
         # A disabled key does not authenticate as enabled.
         auth = await TokenService(session).authenticate(raw_key)
@@ -115,13 +115,13 @@ class TestCreateApiKey:
         await _seed_user(session, other)
         scoped = ApiKeyService(session, _UserScopedFilter(user_id=uid))
         with pytest.raises(ApiKeyPermissionScopeError):
-            await scoped.create(ApiKeyCreate(user_id=other, name="cross"))
+            await scoped.create(ApiKeyCreate(name="cross"), user_id=other)
 
     async def test_create_within_scope_succeeds(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         scoped = ApiKeyService(session, _UserScopedFilter(user_id=uid))
-        _key, row = await scoped.create(ApiKeyCreate(user_id=uid, name="own"))
+        _key, row = await scoped.create(ApiKeyCreate(name="own"), user_id=uid)
         assert row.user_id == uid
 
 
@@ -129,7 +129,7 @@ class TestGetApiKey:
     async def test_get_existing(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _key, created = await service.create(ApiKeyCreate(user_id=uid))
+        _key, created = await service.create(ApiKeyCreate(), user_id=uid)
         fetched = await service.get(created.id)
         assert fetched.id == created.id
 
@@ -140,7 +140,7 @@ class TestGetApiKey:
     async def test_get_respects_perm_filter(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _key, created = await ApiKeyService(session, _ALL).create(ApiKeyCreate(user_id=uid))
+        _key, created = await ApiKeyService(session, _ALL).create(ApiKeyCreate(), user_id=uid)
         denied = ApiKeyService(session, _NONE)
         with pytest.raises(ApiKeyNotFoundError):
             await denied.get(created.id)
@@ -152,8 +152,8 @@ class TestGetManyApiKeys:
     ) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        a = (await service.create(ApiKeyCreate(user_id=uid, name="a")))[1]
-        b = (await service.create(ApiKeyCreate(user_id=uid, name="b")))[1]
+        a = (await service.create(ApiKeyCreate(name="a"), user_id=uid))[1]
+        b = (await service.create(ApiKeyCreate(name="b"), user_id=uid))[1]
         missing = uuid.uuid4()
         result = await service.get_many([a.id, missing, b.id])
         assert len(result) == 3
@@ -169,7 +169,7 @@ class TestGetManyApiKeys:
     ) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        a = (await service.create(ApiKeyCreate(user_id=uid, name="dup")))[1]
+        a = (await service.create(ApiKeyCreate(name="dup"), user_id=uid))[1]
         result = await service.get_many([a.id, a.id])
         assert len(result) == 2
         assert result[0] is not None and result[0].id == a.id
@@ -182,7 +182,7 @@ class TestGetManyApiKeys:
     async def test_get_many_respects_perm_filter(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        a = (await ApiKeyService(session, _ALL).create(ApiKeyCreate(user_id=uid)))[1]
+        a = (await ApiKeyService(session, _ALL).create(ApiKeyCreate(), user_id=uid))[1]
         denied = ApiKeyService(session, _NONE)
         assert await denied.get_many([a.id]) == [None]
 
@@ -198,7 +198,7 @@ class TestSearchApiKeys:
     ) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        await service.create(ApiKeyCreate(user_id=uid, name="one"))
+        await service.create(ApiKeyCreate(name="one"), user_id=uid)
         keys, _next = await service.search_api_keys()
         assert len(keys) == 1
         assert keys[0].name == "one"
@@ -207,7 +207,7 @@ class TestSearchApiKeys:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         for i in range(3):
-            await service.create(ApiKeyCreate(user_id=uid, name=f"p{i}"))
+            await service.create(ApiKeyCreate(name=f"p{i}"), user_id=uid)
         first, next_cursor = await service.search_api_keys(limit=2)
         assert len(first) == 2
         assert next_cursor is not None
@@ -220,8 +220,8 @@ class TestSearchApiKeys:
     ) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        await service.create(ApiKeyCreate(user_id=uid, name="Admin"))
-        await service.create(ApiKeyCreate(user_id=uid, name="viewer"))
+        await service.create(ApiKeyCreate(name="Admin"), user_id=uid)
+        await service.create(ApiKeyCreate(name="viewer"), user_id=uid)
         keys, _next = await service.search_api_keys(
             search_filter=ApiKeySearchFilter(name__contains="ADMIN")
         )
@@ -236,8 +236,8 @@ class TestSearchApiKeys:
         other = uuid.uuid4()
         await _seed_user(session, uid)
         await _seed_user(session, other)
-        await service.create(ApiKeyCreate(user_id=uid, name="mine"))
-        await service.create(ApiKeyCreate(user_id=other, name="theirs"))
+        await service.create(ApiKeyCreate(name="mine"), user_id=uid)
+        await service.create(ApiKeyCreate(name="theirs"), user_id=other)
         keys, _next = await service.search_api_keys(
             search_filter=ApiKeySearchFilter(user_id__eq=uid)
         )
@@ -249,14 +249,14 @@ class TestUpdateApiKey:
     async def test_update_name(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _t, key = await service.create(ApiKeyCreate(user_id=uid, name="old"))
+        _t, key = await service.create(ApiKeyCreate(name="old"), user_id=uid)
         updated = await service.update(key.id, ApiKeyUpdate(name="new"))
         assert updated.name == "new"
 
     async def test_update_enabled(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        raw_key, key = await service.create(ApiKeyCreate(user_id=uid))
+        raw_key, key = await service.create(ApiKeyCreate(), user_id=uid)
         updated = await service.update(key.id, ApiKeyUpdate(enabled=False))
         assert updated.enabled is False
         auth = await TokenService(session).authenticate(raw_key)
@@ -265,7 +265,7 @@ class TestUpdateApiKey:
     async def test_update_no_fields(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _t, key = await service.create(ApiKeyCreate(user_id=uid, name="keep"))
+        _t, key = await service.create(ApiKeyCreate(name="keep"), user_id=uid)
         updated = await service.update(key.id, ApiKeyUpdate())
         assert updated.name == "keep"
 
@@ -278,7 +278,7 @@ class TestDeleteApiKey:
     async def test_delete_removes_row(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        raw_key, key = await service.create(ApiKeyCreate(user_id=uid))
+        raw_key, key = await service.create(ApiKeyCreate(), user_id=uid)
         await service.delete(key.id)
         with pytest.raises(ApiKeyNotFoundError):
             await service.get(key.id)
@@ -299,7 +299,7 @@ class TestCountApiKeys:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         for i in range(3):
-            await service.create(ApiKeyCreate(user_id=uid, name=f"c{i}"))
+            await service.create(ApiKeyCreate(name=f"c{i}"), user_id=uid)
         assert await service.count() == 3
 
     async def test_count_with_name_filter(
@@ -307,8 +307,8 @@ class TestCountApiKeys:
     ) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        await service.create(ApiKeyCreate(user_id=uid, name="admin"))
-        await service.create(ApiKeyCreate(user_id=uid, name="viewer"))
+        await service.create(ApiKeyCreate(name="admin"), user_id=uid)
+        await service.create(ApiKeyCreate(name="viewer"), user_id=uid)
         assert await service.count(ApiKeySearchFilter(name__contains="admin")) == 1
 
 
@@ -316,11 +316,11 @@ class TestBatchWriteApiKeys:
     async def test_batch_mix_cud(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _t1, k1 = await service.create(ApiKeyCreate(user_id=uid, name="bwr1"))
-        _t2, k2 = await service.create(ApiKeyCreate(user_id=uid, name="bwr2"))
+        _t1, k1 = await service.create(ApiKeyCreate(name="bwr1"), user_id=uid)
+        _t2, k2 = await service.create(ApiKeyCreate(name="bwr2"), user_id=uid)
         results = await service.apply_batch(
             [
-                ApiKeyBatchCreate(data=ApiKeyCreate(user_id=uid, name="bwr3")),
+                ApiKeyBatchCreate(data=ApiKeyCreate(name="bwr3")),
                 ApiKeyBatchUpdate(id=k1.id, data=ApiKeyUpdate(name="bwr1b")),
                 ApiKeyBatchDelete(id=k2.id),
             ],
@@ -329,6 +329,7 @@ class TestBatchWriteApiKeys:
                 Action.UPDATE: _ALL,
                 Action.DELETE: _ALL,
             },
+            user_id=uid,
         )
         assert len(results) == 3
         assert results[0] is not None and results[0].name == "bwr3"
@@ -344,8 +345,9 @@ class TestBatchWriteApiKeys:
         await _seed_user(session, uid)
         with pytest.raises(BatchPermissionDeniedError):
             await service.apply_batch(
-                [ApiKeyBatchCreate(data=ApiKeyCreate(user_id=uid, name="x"))],
+                [ApiKeyBatchCreate(data=ApiKeyCreate(name="x"))],
                 {Action.CREATE: None, Action.UPDATE: _ALL, Action.DELETE: _ALL},
+                user_id=uid,
             )
 
     async def test_batch_rolls_back_on_missing_id(
@@ -360,8 +362,9 @@ class TestBatchWriteApiKeys:
         with pytest.raises(ApiKeyNotFoundError):
             await service.apply_batch(
                 [
-                    ApiKeyBatchCreate(data=ApiKeyCreate(user_id=uid, name="rollback")),
+                    ApiKeyBatchCreate(data=ApiKeyCreate(name="rollback")),
                     ApiKeyBatchDelete(id=uuid.uuid4()),  # missing
                 ],
                 {Action.CREATE: _ALL, Action.UPDATE: _ALL, Action.DELETE: _ALL},
+                user_id=uid,
             )

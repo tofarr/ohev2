@@ -19,7 +19,7 @@ class TestCreateApiKeyRoute:
     async def test_create_api_key(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "name": "ci-key"},
+            json={"name": "ci-key"},
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
@@ -38,7 +38,7 @@ class TestCreateApiKeyRoute:
         expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "expires_at": expires},
+            json={"expires_at": expires},
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["expires_at"] is not None
@@ -46,7 +46,7 @@ class TestCreateApiKeyRoute:
     async def test_create_api_key_disabled(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "name": "off", "enabled": False},
+            json={"name": "off", "enabled": False},
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
@@ -58,18 +58,28 @@ class TestCreateApiKeyRoute:
     async def test_create_api_key_empty_name_returns_422(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "name": "  "},
+            json={"name": "  "},
         )
         assert resp.status_code == 422
 
-    async def test_create_api_key_missing_user_id_returns_422(self, client: AsyncClient) -> None:
+    async def test_create_api_key_derives_user_id_from_principal(self, client: AsyncClient) -> None:
+        # user_id is never accepted on the payload; it is derived from the
+        # authenticated principal (the seeded test user).
         resp = await client.post("/api-keys", json={"name": "no-user"})
-        assert resp.status_code == 422
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["user_id"] == str(_TEST_USER_ID)
+
+    async def test_create_api_key_ignores_payload_user_id(self, client: AsyncClient) -> None:
+        # A client-supplied user_id must be ignored in favor of the principal.
+        other = uuid.uuid4()
+        resp = await client.post("/api-keys", json={"user_id": str(other), "name": "ignored"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["user_id"] == str(_TEST_USER_ID)
 
 
 class TestGetApiKeyRoute:
     async def test_get_existing_api_key(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "g"})
+        create = await client.post("/api-keys", json={"name": "g"})
         kid = create.json()["id"]
         resp = await client.get(f"/api-keys/{kid}")
         assert resp.status_code == 200
@@ -95,7 +105,7 @@ class TestSearchApiKeysRoute:
 
     async def test_search_with_limit(self, client: AsyncClient) -> None:
         for i in range(3):
-            await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": f"k{i}"})
+            await client.post("/api-keys", json={"name": f"k{i}"})
         resp = await client.get("/api-keys?limit=2")
         body = resp.json()
         assert len(body["items"]) == 2
@@ -104,7 +114,7 @@ class TestSearchApiKeysRoute:
 
     async def test_search_pagination(self, client: AsyncClient) -> None:
         for i in range(4):
-            await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": f"p{i}"})
+            await client.post("/api-keys", json={"name": f"p{i}"})
         resp1 = await client.get("/api-keys?limit=2")
         cursor = resp1.json()["next_cursor"]
         assert cursor is not None
@@ -127,8 +137,8 @@ class TestSearchApiKeysRoute:
         assert (await client.get("/api-keys?limit=101")).status_code == 422
 
     async def test_search_name_contains_filter(self, client: AsyncClient) -> None:
-        await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "Admin"})
-        await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "viewer"})
+        await client.post("/api-keys", json={"name": "Admin"})
+        await client.post("/api-keys", json={"name": "viewer"})
         resp = await client.get("/api-keys?name__contains=ADMIN")
         assert resp.status_code == 200
         names = {k["name"] for k in resp.json()["items"]}
@@ -136,7 +146,7 @@ class TestSearchApiKeysRoute:
         assert "viewer" not in names
 
     async def test_search_user_id_eq_filter(self, client: AsyncClient) -> None:
-        await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "mine"})
+        await client.post("/api-keys", json={"name": "mine"})
         resp = await client.get(f"/api-keys?user_id__eq={_TEST_USER_ID}")
         assert resp.status_code == 200
         for k in resp.json()["items"]:
@@ -145,11 +155,11 @@ class TestSearchApiKeysRoute:
     async def test_search_enabled_eq_filter(self, client: AsyncClient) -> None:
         await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "name": "on", "enabled": True},
+            json={"name": "on", "enabled": True},
         )
         await client.post(
             "/api-keys",
-            json={"user_id": str(_TEST_USER_ID), "name": "off", "enabled": False},
+            json={"name": "off", "enabled": False},
         )
         resp = await client.get("/api-keys?enabled__eq=false")
         assert resp.status_code == 200
@@ -165,14 +175,14 @@ class TestCountApiKeysRoute:
 
     async def test_count_after_creates(self, client: AsyncClient) -> None:
         for i in range(3):
-            await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": f"c{i}"})
+            await client.post("/api-keys", json={"name": f"c{i}"})
         resp = await client.get("/api-keys/count")
         assert resp.status_code == 200
         assert resp.json()["count"] == 3
 
     async def test_count_with_name_filter(self, client: AsyncClient) -> None:
-        await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "admin"})
-        await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "viewer"})
+        await client.post("/api-keys", json={"name": "admin"})
+        await client.post("/api-keys", json={"name": "viewer"})
         resp = await client.get("/api-keys/count?name__contains=admin")
         assert resp.status_code == 200
         assert resp.json()["count"] == 1
@@ -180,8 +190,8 @@ class TestCountApiKeysRoute:
 
 class TestBatchReadApiKeysRoute:
     async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
-        a = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "a"})
-        b = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "b"})
+        a = await client.post("/api-keys", json={"name": "a"})
+        b = await client.post("/api-keys", json={"name": "b"})
         aid, bid = a.json()["id"], b.json()["id"]
         missing = str(uuid.uuid4())
         resp = await client.get(f"/api-keys/batch?ids={aid}&ids={missing}&ids={bid}")
@@ -198,7 +208,7 @@ class TestBatchReadApiKeysRoute:
         assert resp.json()["items"] == []
 
     async def test_batch_preserves_duplicate_ids(self, client: AsyncClient) -> None:
-        a = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "dup"})
+        a = await client.post("/api-keys", json={"name": "dup"})
         aid = a.json()["id"]
         resp = await client.get(f"/api-keys/batch?ids={aid}&ids={aid}")
         assert resp.status_code == 200
@@ -225,14 +235,14 @@ class TestBatchReadApiKeysRoute:
 
 class TestUpdateApiKeyRoute:
     async def test_update_name(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "old"})
+        create = await client.post("/api-keys", json={"name": "old"})
         kid = create.json()["id"]
         resp = await client.patch(f"/api-keys/{kid}", json={"name": "new"})
         assert resp.status_code == 200
         assert resp.json()["name"] == "new"
 
     async def test_update_enabled(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "k"})
+        create = await client.post("/api-keys", json={"name": "k"})
         kid = create.json()["id"]
         key = create.json()["key"]
         # Key works before disabling.
@@ -244,7 +254,7 @@ class TestUpdateApiKeyRoute:
         assert (await client.get("/users", headers={"X-API-Key": key})).status_code == 401
 
     async def test_update_expires_at(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "k"})
+        create = await client.post("/api-keys", json={"name": "k"})
         kid = create.json()["id"]
         expires = (datetime.now(UTC) + timedelta(days=30)).isoformat()
         resp = await client.patch(f"/api-keys/{kid}", json={"expires_at": expires})
@@ -252,9 +262,7 @@ class TestUpdateApiKeyRoute:
         assert resp.json()["expires_at"] is not None
 
     async def test_update_no_fields(self, client: AsyncClient) -> None:
-        create = await client.post(
-            "/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "keep"}
-        )
+        create = await client.post("/api-keys", json={"name": "keep"})
         kid = create.json()["id"]
         resp = await client.patch(f"/api-keys/{kid}", json={})
         assert resp.status_code == 200
@@ -265,7 +273,7 @@ class TestUpdateApiKeyRoute:
         assert resp.status_code == 404
 
     async def test_update_empty_name_returns_422(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "k"})
+        create = await client.post("/api-keys", json={"name": "k"})
         kid = create.json()["id"]
         resp = await client.patch(f"/api-keys/{kid}", json={"name": "  "})
         assert resp.status_code == 422
@@ -273,7 +281,7 @@ class TestUpdateApiKeyRoute:
 
 class TestDeleteApiKeyRoute:
     async def test_delete_api_key(self, client: AsyncClient) -> None:
-        create = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "del"})
+        create = await client.post("/api-keys", json={"name": "del"})
         kid = create.json()["id"]
         key = create.json()["key"]
         resp = await client.delete(f"/api-keys/{kid}")
@@ -289,14 +297,14 @@ class TestDeleteApiKeyRoute:
 
 class TestBatchWriteApiKeys:
     async def test_batch_mix_cud_returns_positional_results(self, client: AsyncClient) -> None:
-        r1 = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "bwr1"})
-        r2 = await client.post("/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "bwr2"})
+        r1 = await client.post("/api-keys", json={"name": "bwr1"})
+        r2 = await client.post("/api-keys", json={"name": "bwr2"})
         rid1, rid2 = r1.json()["id"], r2.json()["id"]
         resp = await client.post(
             "/api-keys/batch",
             json={
                 "operations": [
-                    {"op": "create", "data": {"user_id": str(_TEST_USER_ID), "name": "bwr3"}},
+                    {"op": "create", "data": {"name": "bwr3"}},
                     {"op": "update", "id": rid1, "data": {"name": "bwr1b"}},
                     {"op": "delete", "id": rid2},
                 ]
@@ -313,14 +321,12 @@ class TestBatchWriteApiKeys:
         assert (await client.get(f"/api-keys/{rid2}")).status_code == 404
 
     async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
-        keep = await client.post(
-            "/api-keys", json={"user_id": str(_TEST_USER_ID), "name": "bwkeep"}
-        )
+        keep = await client.post("/api-keys", json={"name": "bwkeep"})
         resp = await client.post(
             "/api-keys/batch",
             json={
                 "operations": [
-                    {"op": "create", "data": {"user_id": str(_TEST_USER_ID), "name": "bwrollback"}},
+                    {"op": "create", "data": {"name": "bwrollback"}},
                     {"op": "delete", "id": str(uuid.uuid4())},  # missing -> 404
                 ]
             },
@@ -336,10 +342,7 @@ class TestBatchWriteApiKeys:
         assert resp.status_code == 422
 
     async def test_batch_over_100_ops_rejected(self, client: AsyncClient) -> None:
-        ops = [
-            {"op": "create", "data": {"user_id": str(_TEST_USER_ID), "name": f"bx{i}"}}
-            for i in range(101)
-        ]
+        ops = [{"op": "create", "data": {"name": f"bx{i}"}} for i in range(101)]
         resp = await client.post("/api-keys/batch", json={"operations": ops})
         assert resp.status_code == 422
 
@@ -366,7 +369,7 @@ class TestPermissionEnforcement:
         assert resp.status_code == 403
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(principal.id), "name": "x"},
+            json={"name": "x"},
             headers={"X-API-Key": token},
         )
         assert resp.status_code == 403
@@ -396,7 +399,7 @@ class TestPermissionEnforcement:
         assert resp.status_code == 200
         resp = await client.post(
             "/api-keys",
-            json={"user_id": str(principal.id), "name": "new"},
+            json={"name": "new"},
             headers={"X-API-Key": token},
         )
         assert resp.status_code == 403
