@@ -220,3 +220,42 @@ Expired IdP refresh tokens are pruned by a background sweep.
 * `idp.delete_expired_seconds` (`OHE_IDP_DELETE_EXPIRED_SECONDS`, default
   `86400`): rows whose `expires_at` is older than this window are deleted.
   `0` deletes any already-expired row regardless of age.
+
+## LLM usage logging
+
+Every LLM completion is recorded to a daily-partitioned `llm_usage` table
+(raw, append-only, **not** exposed over REST). Usage queries go through the
+`llm_aggregated_usage` projection — per-minute, per-user rollups exposed
+read-only at `GET /llm/aggregated-usage` (paginated), `GET /llm/aggregated-usage/{id}`,
+`GET /llm/aggregated-usage/batch?ids=…`, and `GET /llm/aggregated-usage/count`.
+Access is gated by the `llm_aggregated_usage_permission` role column.
+
+Two background sweeps (same lifespan pattern as the IdP cleanup above) keep
+the projection usable:
+
+* **Partition manager** — preallocates `preallocate_days` future daily
+  `llm_usage` partitions and drops partitions older than `retention_days`.
+  * `llm.usage.partition_interval` (`OHE_LLM_USAGE_PARTITION_INTERVAL`, default
+    `300`): seconds between sweeps. **Non-zero** runs an `asyncio` loop in the
+    FastAPI lifespan.
+  * `llm.usage.partition_interval = 0` **disables** the in-process loop; drive
+    partition management with an external scheduler calling
+    `LlmUsageService.ensure_partitions`.
+  * `llm.usage.preallocate_days` (`OHE_LLM_USAGE_PREALLOCATE_DAYS`, default
+    `7`): how many future daily partitions to keep allocated ahead of time.
+  * `llm.usage.retention_days` (`OHE_LLM_USAGE_RETENTION_DAYS`, default
+    `365`): partitions whose day is older than this are dropped. `0` drops any
+    day older than today.
+
+* **Aggregator** — rolls finished minutes from `llm_usage` into
+  `llm_aggregated_usage`, at least one minute behind wall-clock time so a
+  minute is only rolled once it has finished receiving rows.
+  * `llm.usage.aggregate_interval` (`OHE_LLM_USAGE_AGGREGATE_INTERVAL`, default
+    `60`): seconds between sweeps. **Non-zero** runs an `asyncio` loop in the
+    FastAPI lifespan.
+  * `llm.usage.aggregate_interval = 0` **disables** the in-process loop; drive
+    aggregation with an external scheduler calling
+    `LlmUsageService.aggregate_behind_now`.
+
+A `DEFAULT` partition is created by the initial migration so inserts never
+fail before the manager's first sweep (or for out-of-range timestamps).
