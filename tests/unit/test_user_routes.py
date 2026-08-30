@@ -286,12 +286,12 @@ class TestPermissionEnforcement:
         await session.commit()
         token = create_auth_token(principal.id)
 
-        resp = await client.get("/users", headers={"X-API-Key": token})
+        resp = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 403
         resp = await client.post(
             "/users",
             json={"email": "x@example.com", "username": "x"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403
 
@@ -306,7 +306,7 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/users", headers={"X-API-Key": token})
+        resp = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
     async def test_partial_permission_denies_other_action(
@@ -320,12 +320,12 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/users", headers={"X-API-Key": token})
+        resp = await client.get("/users", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         resp = await client.post(
             "/users",
             json={"email": "new@example.com", "username": "new"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403
 

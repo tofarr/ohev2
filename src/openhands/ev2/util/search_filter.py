@@ -16,13 +16,19 @@ mirrors a resource's fields. A subclass declares optional fields named
 reflects over its own Pydantic field declarations to build `matches` and
 `filter_sql` automatically.
 
-Supported operators (the suffix after the final `__`):
+`AttributeFilter` provides a generic runtime-specified filter with an attribute
+name, value, and condition. It is useful for permission scopes and dynamic
+queries where the filterable attributes are not known at schema definition time.
+
+Supported operators (the suffix after the final `__` for BaseSearchFilter, or
+the `condition` field for AttributeFilter):
 
 =========== =============================================================
 suffix      semantics
 =========== =============================================================
 contains    substring / membership match (case-insensitive for `str`)
 eq          equals
+ne          not equals
 lt          strictly less than
 lte         less than or equal
 gt          strictly greater than
@@ -39,8 +45,16 @@ Example::
     f.matches(user)                       # bool
     f.filter_sql(select(User))            # Select with WHERE applied
 
+    # Generic attribute filter for dynamic queries:
+    g = AttributeFilter(attribute="email", value="alice", condition=Condition.CONTAINS)
+    g.matches(user)                       # bool
+
 The same filter shapes are intended to be used as optional inclusions on
 search endpoints and as the per-item scope of a permission grant.
+
+Factory functions `and_filter()` and `or_filter()` normalize composite filters,
+applying algebraic identities (e.g., And with None → None, Or with All → All)
+and returning the simplest equivalent filter type.
 """
 
 from __future__ import annotations
@@ -49,6 +63,7 @@ import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from datetime import datetime
+from enum import Enum
 from typing import Any, Generic, TypeVar, cast
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
@@ -58,18 +73,36 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select
 
 __all__ = [
-    "ALL_SEARCH_FILTER",
+    "ALL",
+    "NONE",
     "AllSearchFilter",
     "AndSearchFilter",
+    "AttributeFilter",
     "BaseSearchFilter",
+    "Condition",
     "NoneSearchFilter",
     "OrSearchFilter",
     "SearchFilter",
     "T",
+    "and_filter",
+    "or_filter",
 ]
 
 T = TypeVar("T")
 S = TypeVar("S", bound=Select[Any])
+
+
+class Condition(Enum):
+    """Comparison operators for attribute filters."""
+
+    CONTAINS = "contains"
+    EQ = "eq"
+    NE = "ne"
+    LT = "lt"
+    LTE = "lte"
+    GT = "gt"
+    GTE = "gte"
+
 
 # A SQL boolean expression (the WHERE clause fragment a filter contributes).
 # `None` means "no restriction" — the filter matches every row, so it adds no
@@ -118,6 +151,7 @@ def _in_mem_contains(attr_value: Any, value: Any) -> bool:
 _OPS: dict[str, tuple[Callable[[Any, Any], Any], Callable[[Any, Any], bool]]] = {
     "contains": (_sql_contains, _in_mem_contains),
     "eq": (lambda c, v: c == _naive(v), operator.eq),
+    "ne": (lambda c, v: c != _naive(v), operator.ne),
     "lt": (lambda c, v: c < _naive(v), operator.lt),
     "lte": (lambda c, v: c <= _naive(v), operator.le),
     "gt": (lambda c, v: c > _naive(v), operator.gt),
@@ -263,6 +297,8 @@ class AllSearchFilter(SearchFilter[T]):
 
     The identity for conjunction: ``And([... All, f]) == f``. Its SQL
     condition is ``None`` (no WHERE clause).
+
+    Use the ``ALL`` singleton instead of instantiating directly.
     """
 
     def matches(self, item: T) -> bool:
@@ -272,18 +308,13 @@ class AllSearchFilter(SearchFilter[T]):
         return None
 
 
-# Shared unrestricted filter instance. AllSearchFilter is stateless and
-# ignores its type parameter, so a single Any-parameterized instance serves as
-# the default for any SearchFilter[T]. Exposed for reuse as a default argument
-# (avoids per-module duplicates and satisfies ruff B008).
-ALL_SEARCH_FILTER: AllSearchFilter[Any] = AllSearchFilter[Any]()
-
-
 class NoneSearchFilter(SearchFilter[T]):
     """Constant filter that matches no item.
 
     Its SQL condition is ``false`` so any statement filtered by it yields
     zero rows. The identity for disjunction: ``Or([... None, f]) == f``.
+
+    Use the ``NONE`` singleton instead of instantiating directly.
     """
 
     def matches(self, item: T) -> bool:
@@ -293,6 +324,50 @@ class NoneSearchFilter(SearchFilter[T]):
         return false()
 
 
+# Singletons for stateless constant filters. These are typed as Any so they
+# satisfy SearchFilter[T] for any T. Use these instead of instantiating
+# AllSearchFilter/NoneSearchFilter directly.
+ALL: AllSearchFilter[Any] = AllSearchFilter[Any]()
+NONE: NoneSearchFilter[Any] = NoneSearchFilter[Any]()
+
+
+class AttributeFilter(SearchFilter[T]):
+    """Generic runtime-specified filter on a single attribute.
+
+    Unlike ``BaseSearchFilter`` (which derives its predicates from statically
+    declared field names), ``AttributeFilter`` accepts the attribute name,
+    value, and condition at runtime. This is useful for permission scopes and
+    dynamic queries where the filterable attributes are not known at schema
+    definition time.
+
+    The entity type ``T`` must be set via ``__class_getitem__`` parameterization
+    (e.g. ``AttributeFilter[User]``) for SQL filtering to work; in-memory
+    ``matches`` works against any object with the named attribute.
+    """
+
+    attribute: str
+    value: Any
+    condition: Condition
+
+    def matches(self, item: T) -> bool:
+        attr_value = getattr(item, self.attribute, None)
+        _sql_builder, in_mem = _OPS[self.condition.value]
+        return in_mem(attr_value, self.value)
+
+    def sql_condition(self) -> SqlCondition:
+        entity = type(self)._entity_cls
+        if not isinstance(entity, type):
+            raise TypeError(
+                f"{type(self).__name__} is not parameterized with a concrete entity "
+                "type; subclass as AttributeFilter[YourEntity] to enable SQL filtering."
+            )
+        column = getattr(entity, self.attribute, None)
+        if column is None:
+            raise AttributeError(f"{entity.__name__!r} has no attribute {self.attribute!r}")
+        sql_builder, _ = _OPS[self.condition.value]
+        return cast("SqlCondition", sql_builder(column, self.value))
+
+
 class AndSearchFilter(SearchFilter[T]):
     """Conjunction of a list of search filters.
 
@@ -300,6 +375,9 @@ class AndSearchFilter(SearchFilter[T]):
     the ``AND`` of the children's conditions; a child with ``None`` condition
     (e.g. :class:`AllSearchFilter`) contributes nothing. An empty filter
     matches everything (empty conjunction is true).
+
+    Prefer the ``and_filter()`` factory function which normalizes the result
+    (removes redundant All/None filters, unwraps singletons, etc.).
     """
 
     filters: list[Any]
@@ -335,6 +413,9 @@ class OrSearchFilter(SearchFilter[T]):
     condition is the ``OR`` of the children's conditions; if any child has a
     ``None`` condition (matches everything) the disjunction matches
     everything. An empty filter matches nothing (empty disjunction is false).
+
+    Prefer the ``or_filter()`` factory function which normalizes the result
+    (removes redundant All/None filters, unwraps singletons, etc.).
     """
 
     filters: list[Any]
@@ -363,3 +444,76 @@ class OrSearchFilter(SearchFilter[T]):
         if len(conditions) == 1:
             return conditions[0]
         return or_(*conditions)
+
+
+# ---------------------------------------------------------------------------
+# Factory functions for normalized composite filters
+# ---------------------------------------------------------------------------
+
+
+def and_filter[T](*filters: SearchFilter[T]) -> SearchFilter[T]:
+    """Construct a normalized conjunction of filters.
+
+    Applies algebraic identities to return the simplest equivalent filter:
+    - And with All is simplified (All is identity for AND)
+    - And with None yields None (None is annihilator for AND)
+    - Empty And yields All (empty conjunction = true)
+    - Singleton And is unwrapped
+    - Nested And filters are flattened.
+    """
+    children: list[SearchFilter[T]] = []
+    for f in filters:
+        if f is NONE or isinstance(f, NoneSearchFilter):
+            return NONE  # Annihilator — short-circuit
+        if f is ALL or isinstance(f, AllSearchFilter):
+            continue  # Identity — skip
+        if isinstance(f, AndSearchFilter):
+            # Flatten nested And (recursively normalized children)
+            for child in f.filters:
+                if child is NONE or isinstance(child, NoneSearchFilter):
+                    return NONE
+                if child is ALL or isinstance(child, AllSearchFilter):
+                    continue
+                children.append(child)
+        else:
+            children.append(f)
+
+    if not children:
+        return ALL  # Empty conjunction = true
+    if len(children) == 1:
+        return children[0]  # Unwrap singleton
+    return AndSearchFilter(filters=children)
+
+
+def or_filter[T](*filters: SearchFilter[T]) -> SearchFilter[T]:
+    """Construct a normalized disjunction of filters.
+
+    Applies algebraic identities to return the simplest equivalent filter:
+    - Or with None is simplified (None is identity for OR)
+    - Or with All yields All (All is annihilator for OR)
+    - Empty Or yields None (empty disjunction = false)
+    - Singleton Or is unwrapped
+    - Nested Or filters are flattened.
+    """
+    children: list[SearchFilter[T]] = []
+    for f in filters:
+        if f is ALL or isinstance(f, AllSearchFilter):
+            return ALL  # Annihilator — short-circuit
+        if f is NONE or isinstance(f, NoneSearchFilter):
+            continue  # Identity — skip
+        if isinstance(f, OrSearchFilter):
+            # Flatten nested Or (recursively normalized children)
+            for child in f.filters:
+                if child is ALL or isinstance(child, AllSearchFilter):
+                    return ALL
+                if child is NONE or isinstance(child, NoneSearchFilter):
+                    continue
+                children.append(child)
+        else:
+            children.append(f)
+
+    if not children:
+        return NONE  # Empty disjunction = false
+    if len(children) == 1:
+        return children[0]  # Unwrap singleton
+    return OrSearchFilter(filters=children)

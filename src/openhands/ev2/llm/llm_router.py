@@ -10,10 +10,10 @@ over the ``provider_connection`` / ``llm`` resource types; the returned
 The ``api_key`` on a provider connection is write-only: accepted on create/
 update (plaintext, encrypted before persistence) but never returned.
 
-The action endpoint ``POST /llm/completion/{provider_connection_id}`` proxies a
-completion request through a stored LLM, sourcing credentials from the named
-provider connection. It requires the ``USE`` action on the
-``provider_connection`` resource.
+The action endpoint ``POST /llm/completion/{llm_id}`` proxies a completion
+request through a stored LLM profile, inferring the provider connection from
+the LLM. It requires the ``USE`` action on the ``llm`` resource; the
+provider connection is resolved from the LLM purely to source credentials.
 """
 
 from __future__ import annotations
@@ -554,26 +554,28 @@ async def delete_llm(
 
 
 @router.post(
-    "/completion/{provider_connection_id}",
+    "/completion/{llm_id}",
     response_model=CompletionResponse,
 )
 async def completion(
-    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
     payload: CompletionRequest,
     session: SessionDep,
     perm_filter: Annotated[
-        SearchFilter[StoredProviderConnection],
-        Depends(depends_permissions(StoredProviderConnection, Action.USE)),
+        SearchFilter[StoredLLM],
+        Depends(depends_permissions(StoredLLM, Action.USE)),
     ],
     user_id: Annotated[uuid.UUID, Depends(depends_user_id)],
 ) -> CompletionResponse:
-    """Proxy a completion through a stored LLM.
+    """Proxy a completion through a stored LLM profile.
 
-    Resolves the named provider connection (must be in the principal's
-    ``USE`` scope), selects the stored LLM profile (``payload.llm_id`` or the
-    first LLM on the connection owned by the principal), materializes the SDK
-    :class:`LLM`, and runs :meth:`LLM.acompletion`. The SDK :class:`Message`
-    and :class:`ToolDefinition` inputs are validated from the request dicts.
+    Authorizes ``USE`` on the named stored LLM (must be in the principal's
+    ``USE`` scope), resolves its provider connection purely to source
+    credentials (no separate ``USE`` check on the connection — the LLM and
+    connection share an owner, enforced at LLM create/update time), materializes
+    the SDK :class:`LLM`, and runs :meth:`LLM.acompletion`. The SDK
+    :class:`Message` and :class:`ToolDefinition` inputs are validated from the
+    request dicts.
     """
     from openhands.sdk.llm.message import Message
     from openhands.sdk.tool.tool import ToolDefinition
@@ -583,17 +585,14 @@ async def completion(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
         )
 
-    conn_service = ProviderConnectionService(session, perm_filter)
+    llm_service = LLMService(session, perm_filter)
     try:
-        conn = await conn_service.get(provider_connection_id)
-    except ProviderConnectionNotFoundError as exc:
+        llm = await llm_service.get(llm_id)
+    except LLMNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Provider connection not found: {exc}",
+            detail=f"LLM not found: {exc}",
         ) from exc
-
-    llm_service = LLMService(session)
-    llm = await _resolve_llm(llm_service, conn, user_id, payload.llm_id)
 
     try:
         messages = [Message.model_validate(m) for m in payload.messages]
@@ -629,7 +628,7 @@ async def completion(
             detail=f"LLM completion failed: {exc}",
         ) from exc
     # Record raw usage (best-effort; never fails the already-succeeded completion).
-    await _record_usage(session, user_id, conn.id, llm.id, response)
+    await _record_usage(session, user_id, llm.provider_connection_id, llm.id, response)
     return _to_completion_response(response)
 
 
@@ -667,30 +666,6 @@ async def _record_usage(
         # Roll back the usage insert only; the completion response is already
         # built and returned regardless. Logged in the service on rollback.
         await session.rollback()
-
-
-async def _resolve_llm(
-    service: LLMService,
-    conn: StoredProviderConnection,
-    user_id: uuid.UUID,
-    llm_id: uuid.UUID | None,
-) -> StoredLLM:
-    """Resolve the stored LLM to run, by explicit id or first on the connection."""
-    if llm_id is not None:
-        try:
-            return await service.get(llm_id)
-        except LLMNotFoundError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"LLM not found: {exc}",
-            ) from exc
-    llm = await service.first_for_connection(conn.id, user_id=user_id)
-    if llm is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No stored LLM found for this provider connection.",
-        )
-    return llm
 
 
 def _to_completion_response(response) -> CompletionResponse:  # type: ignore[no-untyped-def]

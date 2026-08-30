@@ -272,9 +272,11 @@ class TestPermissionEnforcement:
         await session.commit()
         token = create_auth_token(principal.id)
 
-        resp = await client.get("/roles", headers={"X-API-Key": token})
+        resp = await client.get("/roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 403
-        resp = await client.post("/roles", json={"name": "x"}, headers={"X-API-Key": token})
+        resp = await client.post(
+            "/roles", json={"name": "x"}, headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 403
 
     async def test_allowed_with_permitted_role(
@@ -287,7 +289,7 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/roles", headers={"X-API-Key": token})
+        resp = await client.get("/roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
     async def test_partial_permission_denies_other_action(
@@ -300,9 +302,11 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/roles", headers={"X-API-Key": token})
+        resp = await client.get("/roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
-        resp = await client.post("/roles", json={"name": "new"}, headers={"X-API-Key": token})
+        resp = await client.post(
+            "/roles", json={"name": "new"}, headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 403
 
 

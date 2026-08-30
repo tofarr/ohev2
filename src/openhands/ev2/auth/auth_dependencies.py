@@ -35,14 +35,14 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_models import AuthToken
+from openhands.ev2.auth.auth_models import AuthToken, TokenType
 from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.security.security_models import Action, Permission
 from openhands.ev2.util.search_filter import (
-    ALL_SEARCH_FILTER,
+    ALL,
     AllSearchFilter,
     NoneSearchFilter,
     OrSearchFilter,
@@ -148,6 +148,8 @@ async def depends_access_token(
 
     if used_cookie:
         await _maybe_refresh_auth_cookie(token, response, session)
+    elif auth_token.token_type is TokenType.API_KEY and get_config().idp.sync_api_keys:
+        await _maybe_sync_api_key_session(auth_token.user_id, session)
 
     _cache_token(request, auth_token)
     return auth_token
@@ -155,6 +157,62 @@ async def depends_access_token(
 
 def _cache_token(request: Request, value: AuthToken | Any) -> None:
     setattr(request.state, _ACCESS_TOKEN_KEY, value)
+
+
+async def _maybe_sync_api_key_session(
+    user_id: uuid.UUID,
+    session: AsyncSession,
+) -> None:
+    """When ``idp.sync_api_keys`` is on, gate an API key on a live IdP session.
+
+    Loads the user's most recent IdP access-token row and, if its expiry is
+    imminent (within the drift tolerance) or already past, refreshes it under
+    the same ``FOR UPDATE`` lock the cookie path uses (no cookie is re-minted
+    — an API key carries nothing to rotate). On a concurrent-refresh lock
+    timeout the request proceeds: another process is refreshing, and the next
+    request will re-check. If the user has no federated access/refresh row the
+    request is rejected with 401 — a synced API key cannot outlive a session
+    that does not exist.
+    """
+    from openhands.ev2.auth.auth_service import (
+        AuthService,
+        InvalidGrantError,
+        RefreshLockTimeoutError,
+    )
+    from openhands.ev2.auth.auth_tokens import TokenService
+
+    token_service = TokenService(session)
+    try:
+        access_row = await token_service._load_access_row(user_id)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key requires a live federated session for this user.",
+        ) from exc
+
+    cfg = get_config()
+    drift = timedelta(seconds=cfg.idp.expire_drift_tolerance)
+    now = datetime.now(UTC)
+    if access_row.expires_at > now + drift:
+        return  # Not imminent; nothing to refresh.
+
+    service = AuthService(session)
+    try:
+        await service.refresh_access_token(access_row.id)
+        await session.commit()
+    except RefreshLockTimeoutError:
+        # A concurrent refresh holds the lock; proceed on this request. The
+        # lock holder will have refreshed by the next request.
+        return
+    except InvalidGrantError as exc:
+        # The backing refresh token is expired/revoked — the federated session
+        # is gone, so a synced API key must stop working.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Federated session backing this API key has expired.",
+        ) from exc
+    finally:
+        await service.aclose()
 
 
 async def _maybe_refresh_auth_cookie(
@@ -489,6 +547,9 @@ def register_resource_policy(model: type, column: str) -> None:
 
 # Register every shipped resource at import time so the mapping is populated
 # before any request runs. Column names are `<entity>_permission` on Role.
+from openhands.ev2.api_key import (  # noqa: E402,F401
+    api_key_security as _api_key_security,  # registers ApiKeyAccess in the Permission union
+)
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
@@ -663,7 +724,7 @@ UserId = Annotated[uuid.UUID | None, Depends(depends_user_id)]
 
 
 __all__ = [
-    "ALL_SEARCH_FILTER",
+    "ALL",
     "AccessToken",
     "AllSearchFilter",
     "NoneSearchFilter",

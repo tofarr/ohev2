@@ -22,14 +22,14 @@ from openhands.ev2.util.search_filter import BaseSearchFilter
 class ApiKeyCreate(BaseModel):
     """Payload to create an API key.
 
-    ``user_id`` is required: an API key always belongs to a user (the subject
-    of the minted JWE). ``expires_at`` is optional; ``None`` means the key
-    never expires on its own.
+    ``user_id`` is not accepted on the payload: the subject of the minted key
+    is always the current principal, derived from the authenticated request
+    (AGENTS.md §9). ``expires_at`` is optional; ``None`` means the key never
+    expires on its own.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    user_id: uuid.UUID
     name: str | None = Field(default=None, max_length=255)
     enabled: bool = True
     expires_at: datetime | None = Field(
@@ -51,7 +51,7 @@ class ApiKeyCreate(BaseModel):
 class ApiKeyUpdate(BaseModel):
     """Payload to partially update an API key. All fields optional.
 
-    ``jti`` and ``user_id`` are immutable: the token's identity and subject
+    ``prefix`` and ``user_id`` are immutable: the key's identity and subject
     cannot change after minting.
     """
 
@@ -78,14 +78,15 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyRead(BaseModel):
     """API key representation returned by the API.
 
-    The JWE token secret is never returned here; it is surfaced only once, on
-    the single-item create response (:class:`ApiKeyCreated`).
+    The raw key value is never returned here; it is surfaced only once, on the
+    single-item create response (:class:`ApiKeyCreated`). The non-secret
+    ``prefix`` lets a client identify a key in listings without the secret.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    jti: uuid.UUID
+    prefix: str
     user_id: uuid.UUID
     name: str | None
     enabled: bool
@@ -95,14 +96,14 @@ class ApiKeyRead(BaseModel):
 
 
 class ApiKeyCreated(ApiKeyRead):
-    """Single-item create response carrying the one-time JWE secret.
+    """Single-item create response carrying the one-time raw key value.
 
-    The ``token`` is the only time the raw credential is surfaced to a client;
-    it is not stored or recoverable. Batch creates do not return tokens
-    (AGENTS.md §3 — batch write returns ``Read`` for create/update).
+    The ``key`` is the only time the raw ``oh_...`` value is surfaced to a
+    client; it is not stored and cannot be recovered. Batch creates do not
+    return keys (AGENTS.md §3 — batch write returns ``Read`` for create/update).
     """
 
-    token: str = Field(description="The JWE API-key token; shown only once.")
+    key: str = Field(description="The raw API key value (oh_...); shown only once.")
 
 
 class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
@@ -115,6 +116,9 @@ class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
 
     name__contains: str | None = Field(default=None, description="Case-insensitive name substring.")
     name__eq: str | None = Field(default=None, description="Exact name match.")
+    prefix__contains: str | None = Field(
+        default=None, description="Case-insensitive prefix substring (e.g. 'oh_abcd')."
+    )
     user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
     enabled__eq: bool | None = Field(default=None, description="Exact enabled match.")
     expires_at__gte: datetime | None = Field(
@@ -156,13 +160,13 @@ class ApiKeySearchResult(BaseModel):
 
 # Batch write: POST /api-keys/batch applies create/update/delete atomically
 # (AGENTS.md §3). Operations reuse ApiKeyCreate/ApiKeyUpdate; updates and
-# deletes target a specific id. Batch creates return ApiKeyRead (no token).
+# deletes target a specific id. Batch creates return ApiKeyRead (no key).
 
 
 class ApiKeyBatchCreate(BaseModel):
     """Create operation within an API-key batch write.
 
-    The minted JWE token is not returned for batch creates (AGENTS.md §3 —
+    The raw key value is not returned for batch creates (AGENTS.md §3 —
     batch write returns ``Read`` for create/update). Retrieve the row id and
     mint a new key via the single-item endpoint if the secret is needed.
     """

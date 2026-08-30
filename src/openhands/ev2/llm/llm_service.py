@@ -10,7 +10,8 @@ The completion action resolves a stored LLM profile, materializes its SDK
 :class:`LLM` (sourcing ``api_key``/``base_url``/``provider_connection_id`` from
 the linked provider connection), and calls :meth:`LLM.acompletion`. The proxy
 URL for an ``enable_proxy`` connection is built from :attr:`AppConfig.base_url`
-plus the configured completion path.
+plus the configured completion path, keyed on the LLM id (the path parameter
+of ``POST /llm/completion/{llm_id}``).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from openhands.ev2.llm.llm_schemas import (
     ProviderConnectionUpdate,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 if TYPE_CHECKING:
     from openhands.sdk.llm.llm import LLM
@@ -80,17 +81,19 @@ class BatchPermissionDeniedError(Exception):
 # ---------------------------------------------------------------------- #
 
 
-def proxy_url_for(connection_id: uuid.UUID, *, config: AppConfig | None = None) -> str:
+def proxy_url_for(llm_id: uuid.UUID, *, config: AppConfig | None = None) -> str:
     """Build the SDK ``base_url`` for an ``enable_proxy`` provider connection.
 
     Derived from :attr:`AppConfig.base_url` plus the configured completion path
-    with the connection id appended, so LLM traffic is routed through this
-    service's ``POST /llm/completion/{id}`` endpoint.
+    with the LLM id appended, so LLM traffic is routed through this service's
+    ``POST /llm/completion/{llm_id}`` endpoint. The LLM id (not the connection
+    id) is the path key because the completion endpoint authorizes ``USE`` on
+    the stored LLM profile and infers the connection from it.
     """
     cfg = config or get_config()
     base = cfg.base_url.rstrip("/")
     path = cfg.llm.completion_path.strip("/")
-    return f"{base}/{path}/{connection_id}"
+    return f"{base}/{path}/{llm_id}"
 
 
 # ---------------------------------------------------------------------- #
@@ -104,7 +107,7 @@ class ProviderConnectionService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[StoredProviderConnection] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[StoredProviderConnection] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
     ) -> None:
@@ -297,7 +300,7 @@ class LLMService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[StoredLLM] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[StoredLLM] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
         config: AppConfig | None = None,
@@ -494,24 +497,16 @@ class LLMService:
             self._session, filt, encryption_service=self._enc, config=self._cfg
         ).delete(op.id)
 
-    async def first_for_connection(
-        self,
-        connection_id: uuid.UUID,
-        *,
-        user_id: uuid.UUID,
-    ) -> StoredLLM | None:
-        """Return the first stored LLM owned by *user_id* pointing at *connection_id*."""
-        stmt = (
-            select(StoredLLM)
-            .where(
-                StoredLLM.provider_connection_id == connection_id,
-                StoredLLM.user_id == user_id,
-            )
-            .order_by(StoredLLM.id)
-            .limit(1)
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+    async def connection_for_llm(self, llm: StoredLLM) -> StoredProviderConnection:
+        """Resolve the provider connection sourcing credentials for *llm*.
+
+        The connection must exist and share the LLM's owner; otherwise the LLM
+        is treated as not found (its credential bundle is unavailable).
+        """
+        conn = await self._session.get(StoredProviderConnection, llm.provider_connection_id)
+        if conn is None or conn.user_id != llm.user_id:
+            raise LLMNotFoundError(str(llm.id))
+        return conn
 
     async def materialize_llm(
         self,
@@ -522,14 +517,13 @@ class LLMService:
         """Materialize the SDK :class:`LLM` for a stored profile.
 
         Resolves the linked provider connection (scoped to the profile owner),
-        builds the SDK :class:`ProviderConnection` (with the proxy URL when
-        ``enable_proxy`` is set), and returns ``llm.to_llm(connection)``.
+        builds the SDK :class:`ProviderConnection` (with the proxy URL — keyed
+        on the LLM id — when ``enable_proxy`` is set), and returns
+        ``llm.to_llm(connection)``.
         """
         cfg = config or self._cfg
-        conn = await self._session.get(StoredProviderConnection, llm.provider_connection_id)
-        if conn is None or conn.user_id != llm.user_id:
-            raise LLMNotFoundError(str(llm.id))
-        proxy = proxy_url_for(conn.id, config=cfg) if conn.enable_proxy else None
+        conn = await self.connection_for_llm(llm)
+        proxy = proxy_url_for(llm.id, config=cfg) if conn.enable_proxy else None
         sdk_conn = conn.to_provider_connection(self._enc, proxy_url=proxy)
         return llm.to_llm(sdk_conn)
 

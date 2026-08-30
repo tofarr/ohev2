@@ -105,7 +105,7 @@ class LlmConfig(BaseModel):
     When a :class:`StoredProviderConnection` has ``enable_proxy`` set, the
     effective ``base_url`` handed to the SDK is built from
     :attr:`AppConfig.base_url` plus :attr:`completion_path` so LLM traffic is
-    routed through this service's ``POST /llm/completion/{id}`` endpoint.
+    routed through this service's ``POST /llm/completion/{llm_id}`` endpoint.
 
     ``usage`` configures the background loops that manage the daily-partitioned
     raw ``llm_usage`` table and its per-minute ``llm_aggregated_usage``
@@ -116,8 +116,8 @@ class LlmConfig(BaseModel):
         default="/llm/completion",
         description=(
             "Path (relative to AppConfig.base_url) of the proxy completion "
-            "endpoint. A provider connection id is appended to form the full "
-            "proxy URL handed to the SDK when enable_proxy is set."
+            "endpoint. An LLM id is appended to form the full proxy URL "
+            "handed to the SDK when enable_proxy is set."
         ),
     )
     usage: UsageConfig = Field(
@@ -148,7 +148,7 @@ class IdpConfig(BaseModel):
         description="Client id registered at the identity provider.",
     )
     client_secret: SecretStr = Field(
-        default=SecretStr("change-me"),
+        default=SecretStr("changeme"),
         description="Client secret registered at the identity provider.",
     )
     expire_drift_tolerance: int = Field(
@@ -241,6 +241,18 @@ class IdpConfig(BaseModel):
             "Max seconds to wait for the refresh-row lock during a concurrent "
             "IdP token refresh. On timeout the refresh is abandoned with an "
             "error so the client can retry / re-authenticate."
+        ),
+    )
+    # Whether API-key authentication is gated by a live federated session.
+    sync_api_keys: bool = Field(
+        default=False,
+        description=(
+            "When true, an API key presented via X-API-Key is only accepted if "
+            "the user has a live IdP access/refresh token pair; if that pair is "
+            "imminent/expired the dependency refreshes it server-side exactly as "
+            "the cookie flow does (no cookie is re-minted). When false (default) "
+            "API keys are long-lived, user-managed service credentials whose "
+            "lifetime is independent of any federated session."
         ),
     )
     # Background cleanup of expired IdP refresh tokens.

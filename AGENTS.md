@@ -218,9 +218,12 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
 * The role-to-user link table is `user_roles` (model `UserRole`), plural
   noun-first naming per §3. A user may have multiple roles; there is no
   single `role` column on `User`.
-* `seed_admin.py` grants `Permitted()` on every column in
-  `ROLE_ENTITY_COLUMNS`, so re-running it after adding a new entity
-  backfills the missing grant automatically.
+* `seed_db.py` (run via `uv run python -m openhands.ev2.scripts.seed_db`)
+  seeds two roles: an `admin` role granting `Permitted()` on every column in
+  `ROLE_ENTITY_COLUMNS` (so re-running after adding a new entity backfills the
+  missing grant automatically), and a `user` role granting `ApiKeyAccess` on
+  `api_key_permission` so a non-admin user can manage their own API keys. It
+  also upserts an admin user and (by default) a regular user account.
 
 ## 10. Review checklist (for agents reviewing PRs)
 

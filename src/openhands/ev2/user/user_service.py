@@ -30,7 +30,7 @@ from openhands.ev2.user.user_schemas import (
     UserUpdate,
 )
 from openhands.ev2.util.password import hash_password, verify_password
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
 class UserNotFoundError(Exception):
@@ -63,7 +63,7 @@ class UserService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[User] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[User] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter

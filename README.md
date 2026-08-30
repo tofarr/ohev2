@@ -149,10 +149,13 @@ uv run alembic upgrade head
 
 Seed an admin user (credentials default from `OHE_SEED_ADMIN_*` env vars, or dev
 defaults). Idempotent — re-running upserts the user and ensures the `admin` role
-grants unrestricted access to every resource type:
+grants unrestricted access to every resource type. Also seeds a `user` role
+(granting `ApiKeyAccess` on `api_key_permission` so a regular user can manage
+their own API keys) and, by default, a regular user account
+(`OHE_SEED_USER_*` env vars):
 
 ```bash
-uv run python -m openhands.ev2.scripts.seed_admin
+uv run python -m openhands.ev2.scripts.seed_db
 ```
 
 Start the app with:
@@ -186,7 +189,7 @@ Flow: `GET /auth/authorize` redirects to the IdP (with PKCE), `GET
 /auth/callback` exchanges the code and, for `response_type=cookie`, mints a
 session cookie (the `code` response type mints an exchangeable code instead),
 `POST /auth/token` and `POST /auth/refresh` exchange codes / refresh tokens
-for token pairs. OAuth clients are managed via `/auth/clients` (CRUD with
+for token pairs. OAuth clients are managed via `/auth-clients` (CRUD with
 wildcard redirect-URI matching). The IdP `id_token` (or the decoded
 refresh-token JWT) supplies the `sub`/email used for JIT user provisioning
 (`users.idp_user_id`).

@@ -5,8 +5,9 @@ JWE-encoded token string into an :class:`AuthToken`. Per-type validity:
 
 * COOKIE / ACCESS_TOKEN — derived from the JWE claims alone; ``enabled`` is
   the user row's ``enabled`` flag (a disabled user cannot use any token).
-* API_KEY — the token's ``jti`` must match a live ``api_keys`` row, and the
-  user must be enabled.
+* API_KEY — the ``oh_``-prefixed raw key's SHA-256 hash must match a live
+  ``api_keys`` row, and the user must be enabled. The raw key is returned only
+  once at create time and never stored.
 * IDP_REFRESH_TOKEN — the token's ``rid`` must match a live
   ``idp_refresh_tokens`` row, and the user must be enabled. (Refresh tokens
   are not accepted by ``authenticate`` for general requests; they are
@@ -25,6 +26,9 @@ service only mints and validates.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
+import string
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -60,6 +64,27 @@ _ROW_ID_CLAIM = "rid"  # idp_refresh_tokens row id
 # expires_in positive.
 _FLOOR_TTL = timedelta(seconds=1)
 
+# --- API key value generation --------------------------------------------- #
+# Raw API key values are ``oh_<base52(128 random bits)>``. base52 excludes
+# visually-ambiguous characters so the key is transcribable; the ``oh_`` prefix
+# lets the authenticator route the credential without trying JWE decryption.
+_API_KEY_PREFIX = "oh_"
+_API_KEY_RANDOM_BITS = 128  # 16 bytes of entropy
+# Ambiguous characters removed from the alphanumeric set to form the base52
+# alphabet (0/O, 1/I/l, 5/S, 8/B pair visual collisions).
+_AMBIGUOUS = set("0Oo1IlB8S5")
+_BASE52_ALPHABET = "".join(
+    c
+    for c in (string.digits + string.ascii_lowercase + string.ascii_uppercase)
+    if c not in _AMBIGUOUS
+)
+assert len(_BASE52_ALPHABET) == 52
+# Number of leading characters of the raw key persisted as the non-secret
+# ``prefix`` for display in listings. ``oh_`` (3) + 4 base52 chars leaks only
+# ~23 bits of the 128-bit secret, leaving ~105 bits unknown — enough to
+# disambiguate keys in a listing without disclosing meaningful entropy.
+_API_KEY_PREFIX_DISPLAY_LEN = 7
+
 
 class InvalidTokenError(Exception):
     """Raised internally when a token string cannot be authenticated."""
@@ -67,6 +92,34 @@ class InvalidTokenError(Exception):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _base52_encode(data: bytes) -> str:
+    """Encode *data* as a base52 string over :data:`_BASE52_ALPHABET`."""
+    num = int.from_bytes(data, "big")
+    if num == 0:
+        return _BASE52_ALPHABET[0]
+    chars: list[str] = []
+    while num > 0:
+        num, rem = divmod(num, 52)
+        chars.append(_BASE52_ALPHABET[rem])
+    return "".join(reversed(chars))
+
+
+def _generate_api_key_value() -> str:
+    """Generate a raw API key value ``oh_<base52(128 random bits)>``."""
+    raw = secrets.token_bytes(_API_KEY_RANDOM_BITS // 8)
+    return _API_KEY_PREFIX + _base52_encode(raw)
+
+
+def _hash_api_key(raw: str) -> str:
+    """SHA-256 hex digest of the raw key value (stored for auth-time lookup)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _api_key_display_prefix(raw: str) -> str:
+    """Non-secret leading prefix of the raw key, for display in listings."""
+    return raw[:_API_KEY_PREFIX_DISPLAY_LEN]
 
 
 def _scopes_from_payload(payload: dict[str, object]) -> frozenset[str]:
@@ -151,16 +204,19 @@ class TokenService:
         enabled: bool = True,
         expires_at: datetime | None = None,
     ) -> tuple[str, ApiKey]:
-        """Mint a long-lived API_KEY token and persist its backing row.
+        """Mint a long-lived API key and persist its backing row.
 
-        Returns (token, row). API keys are the one credential whose lifetime
-        is *not* IdP-synced: they are user-managed service credentials. The
-        token's JWE ``exp`` mirrors the row's ``expires_at`` (or is omitted
-        entirely when the key never expires).
+        Returns (raw_key, row). The raw key is ``oh_<base52(128 random bits)>``
+        and is returned to the caller exactly once (at create time); it is never
+        stored. The row persists only a SHA-256 ``key_hash`` of the raw value
+        (for auth-time lookup) and a non-secret ``prefix`` for display. API keys
+        are the one credential whose lifetime is *not* IdP-synced: they are
+        user-managed service credentials.
         """
-        jti = uuid.uuid4()
+        raw_key = _generate_api_key_value()
         row = ApiKey(
-            jti=jti,
+            key_hash=_hash_api_key(raw_key),
+            prefix=_api_key_display_prefix(raw_key),
             user_id=user_id,
             name=name,
             enabled=enabled,
@@ -168,21 +224,7 @@ class TokenService:
         )
         self._session.add(row)
         await self._session.flush()
-        ttl = None
-        if expires_at is not None:
-            ttl = expires_at - _now()
-            if ttl.total_seconds() <= 0:
-                ttl = None
-        token = self._enc.create_jwe_token(
-            {
-                _SUB_CLAIM: str(user_id),
-                _TYP_CLAIM: TokenType.API_KEY.value,
-                _JTI_CLAIM: str(jti),
-                **({"name": name} if name is not None else {}),
-            },
-            expires_in=ttl,
-        )
-        return token, row
+        return raw_key, row
 
     # ------------------------------------------------------------------ #
     # Authentication (token string -> AuthToken)
@@ -194,14 +236,24 @@ class TokenService:
         *,
         allow_refresh: bool = False,
     ) -> AuthToken:
-        """Decrypt *token* and return a validated :class:`AuthToken`.
+        """Resolve *token* into a validated :class:`AuthToken`.
 
-        Raises :class:`InvalidTokenError` on any failure (bad JWE, expired,
-        unknown type, revoked/disabled DB row, disabled user). Callers in the
-        dependency layer catch this to produce a 401.
+        API keys (``oh_``-prefixed) are authenticated by hash lookup against the
+        ``api_keys`` table; all other tokens are JWE-encrypted (cookie / access
+        / refresh). Raises :class:`InvalidTokenError` on any failure (bad JWE,
+        expired, unknown type, revoked/disabled DB row, disabled user). Callers
+        in the dependency layer catch this to produce a 401.
         """
+        if token.startswith(_API_KEY_PREFIX):
+            return await self._authenticate_api_key(token)
+
         payload = self._decrypt(token)
         token_type = self._token_type(payload)
+        if token_type is TokenType.API_KEY:
+            # API keys are no longer carried in a JWE; only the ``oh_``-prefixed
+            # plain value is accepted (handled above). Reject any legacy JWE that
+            # claims the api_key type so it cannot bypass the row check.
+            raise InvalidTokenError("api key not valid for this endpoint")
         if token_type is TokenType.IDP_REFRESH_TOKEN and not allow_refresh:
             # Refresh tokens are exchange-only credentials, not bearer tokens.
             raise InvalidTokenError("refresh token not valid for this endpoint")
@@ -218,9 +270,7 @@ class TokenService:
             raise InvalidTokenError("token expired")
 
         enabled = True
-        if token_type is TokenType.API_KEY:
-            enabled = await self._api_key_live(jti)
-        elif token_type is TokenType.IDP_REFRESH_TOKEN:
+        if token_type is TokenType.IDP_REFRESH_TOKEN:
             enabled = await self._idp_refresh_token_live(self._row_id(payload))
 
         return AuthToken(
@@ -232,6 +282,38 @@ class TokenService:
             expires_at=exp,
             token_type=token_type,
             scopes=_scopes_from_payload(payload),
+        )
+
+    async def _authenticate_api_key(self, raw_key: str) -> AuthToken:
+        """Authenticate an ``oh_``-prefixed API key by hash lookup.
+
+        Looks up the backing row by the SHA-256 of the raw key. A missing or
+        expired row raises :class:`InvalidTokenError` (the key is simply
+        invalid). A present but disabled row resolves to an :class:`AuthToken`
+        with ``enabled=False`` so the caller surfaces a 401 without leaking
+        whether the key exists. The token's ``exp`` mirrors the row's
+        ``expires_at`` (or ``datetime.max`` for a no-expiry key).
+        """
+        row = await self._load_api_key_row(_hash_api_key(raw_key))
+        if row is None:
+            raise InvalidTokenError("unknown api key")
+        now = _now()
+        exp = row.expires_at if row.expires_at is not None else datetime.max.replace(tzinfo=UTC)
+        if exp <= now:
+            raise InvalidTokenError("api key expired")
+
+        user = await self._load_user(row.user_id)
+        if user is None or not user.enabled:
+            raise InvalidTokenError("user not found or disabled")
+
+        return AuthToken(
+            id=row.id,
+            user_id=row.user_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            enabled=row.enabled and user.enabled,
+            expires_at=exp,
+            token_type=TokenType.API_KEY,
         )
 
     # ------------------------------------------------------------------ #
@@ -387,14 +469,10 @@ class TokenService:
             raise InvalidTokenError("no federated refresh token for user")
         return row
 
-    async def _api_key_live(self, jti: uuid.UUID) -> bool:
-        result = await self._session.execute(
-            select(ApiKey).where(ApiKey.jti == jti, ApiKey.enabled.is_(True))
-        )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return False
-        return not (row.expires_at is not None and row.expires_at <= _now())
+    async def _load_api_key_row(self, key_hash: str) -> ApiKey | None:
+        """Load an API-key backing row by its key hash (or ``None`` if absent)."""
+        result = await self._session.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
+        return result.scalar_one_or_none()
 
     async def _idp_refresh_token_live(self, row_id: uuid.UUID) -> bool:
         row = await self._session.get(IdpRefreshToken, row_id)
