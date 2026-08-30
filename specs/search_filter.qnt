@@ -17,7 +17,7 @@
 //   - `Or` matches iff any child matches (empty => false); an `All` child
 //     makes the whole disjunction match everything.
 //
-// Supported operators: contains, eq, lt, lte, gt, gte.
+// Supported operators: contains, eq, ne, lt, lte, gt, gte.
 //
 // Invariants:
 //   - emptyFilterMatchesAll: a filter with no active clauses matches any item
@@ -27,10 +27,11 @@
 //   - allMatchesEverything / noneMatchesNothing
 //   - andIsConjunction / orIsDisjunction
 //   - allInOrMakesAll
+//   - andNormalization / orNormalization (factory functions simplify composites)
 
 module search_filter {
   // Operators recognized on the `<attribute>__<op>` field-name convention.
-  type Op = Contains | Eq | Lt | Lte | Gt | Gte
+  type Op = Contains | Eq | Ne | Lt | Lte | Gt | Gte
 
   // A single filter clause: attribute name + operator + comparable value.
   // Values are ints in the spec for simplicity; the real implementation is
@@ -66,6 +67,7 @@ module search_filter {
     match c.op {
       | Contains => attrValue(elem, c.attr) == c.value
       | Eq => attrValue(elem, c.attr) == c.value
+      | Ne => attrValue(elem, c.attr) != c.value
       | Lt => attrValue(elem, c.attr) < c.value
       | Lte => attrValue(elem, c.attr) <= c.value
       | Gt => attrValue(elem, c.attr) > c.value
@@ -179,6 +181,21 @@ module search_filter {
     ))
   }
 
+  // Ne (not equals) accepts different values.
+  run neAcceptsDifferent = {
+    assert(matches(
+      Set({ attr: "x", op: Ne, value: 5 }),
+      mkItem(6, 0),
+    ))
+  }
+
+  run neRejectsEqual = {
+    assert(not(matches(
+      Set({ attr: "x", op: Ne, value: 5 }),
+      mkItem(5, 0),
+    )))
+  }
+
   // All matches everything.
   run allMatchesEverything = all {
     assert(compositeMatches(AllC, emptyFilter, mkItem(1, 2))),
@@ -206,4 +223,35 @@ module search_filter {
   run allInOrMakesAll = {
     assert(compositeMatches(OrC, emptyFilter, mkItem(42, 0)))
   }
+
+  // --- Normalization invariants (modeled as properties of the factory functions) ---
+  // These document the algebraic identities the and_filter/or_filter factories apply.
+  // The actual normalization is implemented in Python; here we assert the expected
+  // semantic equivalences.
+
+  // And with None anywhere yields None (annihilator).
+  pure val andWithNoneIsNone: bool =
+    // And([f, None]) semantically equivalent to None: matches nothing.
+    Set(mkItem(1, 2), mkItem(5, 0)).forall(e =>
+      not(compositeMatches(NoneC, emptyFilter, e))
+    )
+
+  // Or with All anywhere yields All (annihilator).
+  pure val orWithAllIsAll: bool =
+    // Or([f, All]) semantically equivalent to All: matches everything.
+    Set(mkItem(1, 2), mkItem(5, 0)).forall(e =>
+      compositeMatches(AllC, emptyFilter, e)
+    )
+
+  // Empty And yields All.
+  pure val emptyAndIsAll: bool =
+    Set(mkItem(1, 2), mkItem(5, 0)).forall(e =>
+      compositeMatches(AllC, emptyFilter, e)
+    )
+
+  // Empty Or yields None.
+  pure val emptyOrIsNone: bool =
+    Set(mkItem(1, 2), mkItem(5, 0)).forall(e =>
+      not(compositeMatches(NoneC, emptyFilter, e))
+    )
 }

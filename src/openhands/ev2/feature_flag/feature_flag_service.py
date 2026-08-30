@@ -35,7 +35,7 @@ from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagUpdate,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 # ---------------------------------------------------------------------- #
 # Errors
@@ -85,7 +85,7 @@ class FeatureFlagService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[FeatureFlag] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[FeatureFlag] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter
@@ -301,7 +301,7 @@ class FeatureFlagRoleService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[FeatureFlagRole] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[FeatureFlagRole] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter

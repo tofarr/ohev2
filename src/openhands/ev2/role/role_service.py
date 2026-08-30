@@ -28,7 +28,7 @@ from openhands.ev2.role.role_schemas import (
     RoleUpdate,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
 class RoleNotFoundError(Exception):
@@ -57,7 +57,7 @@ class RoleService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[Role] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[Role] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter

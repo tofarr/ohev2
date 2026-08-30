@@ -41,7 +41,7 @@ from openhands.ev2.llm.llm_schemas import (
     ProviderConnectionUpdate,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 if TYPE_CHECKING:
     from openhands.sdk.llm.llm import LLM
@@ -104,7 +104,7 @@ class ProviderConnectionService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[StoredProviderConnection] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[StoredProviderConnection] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
     ) -> None:
@@ -297,7 +297,7 @@ class LLMService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[StoredLLM] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[StoredLLM] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
         config: AppConfig | None = None,
