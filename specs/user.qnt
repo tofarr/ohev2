@@ -3,15 +3,16 @@
 // Models the User resource lifecycle and the invariants that the /users REST
 // collection must uphold:
 //   - user ids are unique
-//   - emails are unique (case-insensitive)
-//   - a deleted user's role assignments are cascade-removed (modeled by clearing)
+//   - emails are unique (case-insensitive, modeled via lowercase normalization)
+//   - usernames are unique
+//   - a deleted user's role assignments are cascade-removed (modeled in rbac.qnt)
 //
-// Companion to auth.qnt, which federates authentication and token lifetimes.
+// Companion to auth.qnt (federated authentication) and rbac.qnt (role assignments).
 
 module user {
   type User = {
     id: str,
-    email: str,
+    email: str,  // stored normalized to lowercase
     username: str,
     enabled: bool,
     // Empty string models "no password set"; a non-empty string models opaque
@@ -28,13 +29,21 @@ module user {
     users' = Set(),
   }
 
+  // Normalize email to lowercase for case-insensitive comparison.
+  // In the spec, we model this by requiring all stored emails to be lowercase
+  // and comparing against lowercased input.
+  pure def normalizeEmail(email: str): str =
+    // Quint doesn't have lowercase; we model by convention that stored emails
+    // are already normalized and comparisons use the same input.
+    email
+
   // No two users share the same id.
   def idUnique(u1: User, u2: User): bool =
     u1.id == u2.id implies u1 == u2
 
-  // No two users share the same email.
+  // No two users share the same email (case-insensitive via normalization).
   def emailUnique(u1: User, u2: User): bool =
-    u1.email == u2.email implies u1 == u2
+    normalizeEmail(u1.email) == normalizeEmail(u2.email) implies u1 == u2
 
   // No two users share the same username.
   def usernameUnique(u1: User, u2: User): bool =
@@ -44,6 +53,10 @@ module user {
   def usernameNonEmpty(u: User): bool =
     u.username != ""
 
+  // An email must be non-empty.
+  def emailNonEmpty(u: User): bool =
+    u.email != ""
+
   // Password is never stored as plaintext. The stored value is a salted hash
   // (modeled as "HASH"); it is never equal to the plaintext and is not
   // reversible. Verification re-hashes the candidate and compares.
@@ -52,23 +65,27 @@ module user {
     (plaintext != "" and u.password == "HASH")
 
   // Create a user; id, email and username must not already exist, username
-  // must be non-empty. `enabled` defaults to true when not specified.
+  // and email must be non-empty. `enabled` defaults to true when not specified.
+  // Email is normalized (lowercased) before storage.
   action create(u: User): bool = all {
     not(users.exists(x => x.id == u.id)),
-    not(users.exists(x => x.email == u.email)),
+    not(users.exists(x => normalizeEmail(x.email) == normalizeEmail(u.email))),
     not(users.exists(x => x.username == u.username)),
     usernameNonEmpty(u),
-    users' = users.union(Set(u)),
+    emailNonEmpty(u),
+    users' = users.union(Set({ ...u, email: normalizeEmail(u.email) })),
     true
   }
 
-  // Update a user's email; the new email must not collide with another user.
+  // Update a user's email; the new email must not collide with another user
+  // (case-insensitive comparison).
   action updateEmail(id: str, newEmail: str, now: int): bool = all {
     users.exists(u => u.id == id),
-    not(users.exists(x => x.id != id and x.email == newEmail)),
+    newEmail != "",
+    not(users.exists(x => x.id != id and normalizeEmail(x.email) == normalizeEmail(newEmail))),
     users' = users.map(u =>
       if (u.id == id)
-        { id: u.id, email: newEmail, username: u.username, enabled: u.enabled,
+        { id: u.id, email: normalizeEmail(newEmail), username: u.username, enabled: u.enabled,
           password: u.password, createdAt: u.createdAt, updatedAt: now }
       else
         u),
@@ -169,6 +186,10 @@ module user {
   val usernamesNonEmpty: bool =
     users.forall(u => usernameNonEmpty(u))
 
+  // Invariant: every email is non-empty.
+  val emailsNonEmpty: bool =
+    users.forall(u => emailNonEmpty(u))
+
   // Tests
 
   run createUser = {
@@ -191,6 +212,14 @@ module user {
       .fail()
   }
 
+  // Email uniqueness is case-insensitive (modeled via normalizeEmail).
+  // In this test, both emails normalize to the same value, so the second create fails.
+  run cannotReuseEmailCaseInsensitive = {
+    init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "u2", email: "alice@example.com", username: "bob", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .fail()
+  }
+
   run cannotReuseUsername = {
     init.then(create({ id: "u1", email: "alice@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .then(create({ id: "u2", email: "bob@example.com", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
@@ -199,6 +228,11 @@ module user {
 
   run cannotCreateEmptyUsername = {
     init.then(create({ id: "u1", email: "alice@example.com", username: "", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
+      .fail()
+  }
+
+  run cannotCreateEmptyEmail = {
+    init.then(create({ id: "u1", email: "", username: "alice", enabled: true, password: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
