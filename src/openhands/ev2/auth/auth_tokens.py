@@ -80,8 +80,10 @@ _BASE52_ALPHABET = "".join(
 )
 assert len(_BASE52_ALPHABET) == 52
 # Number of leading characters of the raw key persisted as the non-secret
-# ``prefix`` for display in listings.
-_API_KEY_PREFIX_DISPLAY_LEN = 12
+# ``prefix`` for display in listings. ``oh_`` (3) + 4 base52 chars leaks only
+# ~23 bits of the 128-bit secret, leaving ~105 bits unknown — enough to
+# disambiguate keys in a listing without disclosing meaningful entropy.
+_API_KEY_PREFIX_DISPLAY_LEN = 7
 
 
 class InvalidTokenError(Exception):
