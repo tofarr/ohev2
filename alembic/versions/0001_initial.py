@@ -580,6 +580,62 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
+    # llm_usage
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "llm_usage",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("provider_connection_id", sa.Uuid(), nullable=False),
+        sa.Column("llm_id", sa.Uuid(), nullable=True),
+        sa.Column("response_id", sa.String(length=255), nullable=True),
+        sa.Column("model", sa.String(length=255), nullable=False),
+        sa.Column("prompt_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "completion_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False
+        ),
+        sa.Column(
+            "cache_read_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False
+        ),
+        sa.Column(
+            "cache_write_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False
+        ),
+        sa.Column("reasoning_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("context_window", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("per_turn_token", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("accumulated_cost", sa.Float(), server_default=sa.text("0"), nullable=False),
+        sa.Column("metrics", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_llm_usage_user_id_users"
+        ),
+        sa.ForeignKeyConstraint(
+            ["provider_connection_id"],
+            ["provider_connections.id"],
+            ondelete="CASCADE",
+            name="fk_llm_usage_provider_connection_id_provider_connections",
+        ),
+        sa.ForeignKeyConstraint(
+            ["llm_id"], ["llms.id"], ondelete="SET NULL", name="fk_llm_usage_llm_id_llms"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Raw LLM invocation records",
+    )
+    op.create_index("ix_llm_usage_user_id", "llm_usage", ["user_id"], unique=False)
+    op.create_index(
+        "ix_llm_usage_provider_connection_id",
+        "llm_usage",
+        ["provider_connection_id"],
+        unique=False,
+    )
+    op.create_index("ix_llm_usage_llm_id", "llm_usage", ["llm_id"], unique=False)
+
+    # ------------------------------------------------------------------ #
     # feature_flags
     # ------------------------------------------------------------------ #
     op.create_table(
@@ -651,6 +707,10 @@ def downgrade() -> None:
     op.drop_index("ix_feature_flag_roles_feature_flag_id", table_name="feature_flag_roles")
     op.drop_table("feature_flag_roles")
     op.drop_table("feature_flags")
+    op.drop_index("ix_llm_usage_llm_id", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
+    op.drop_table("llm_usage")
     op.drop_index("ix_llms_provider_connection_id", table_name="llms")
     op.drop_index("ix_llms_user_id", table_name="llms")
     op.drop_table("llms")

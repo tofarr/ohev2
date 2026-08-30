@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
-from sqlalchemy import Boolean, ForeignKey, String, func
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -105,14 +105,14 @@ class StoredProviderConnection(Base):
         enc: EncryptionService,
         *,
         proxy_url: str | None = None,
+        use_proxy: bool = True,
     ) -> ProviderConnection:
         """Materialize the SDK :class:`ProviderConnection` for this row.
 
         ``api_key`` is decrypted via *enc* (returns ``None`` when unset). When
-        ``enable_proxy`` is ``True`` the effective ``base_url`` is *proxy_url*
-        (the caller builds it from :attr:`AppConfig.base_url`); otherwise the
-        stored ``base_url`` is used. ``id`` is stringified (the SDK type is
-        ``str``). Timestamps are emitted as Unix epoch seconds (the SDK shape).
+        ``enable_proxy`` and ``use_proxy`` are ``True`` the effective
+        ``base_url`` is *proxy_url*; otherwise the stored ``base_url`` is used.
+        ``id`` is stringified and timestamps are Unix epoch seconds.
         """
         from openhands.sdk.llm.provider_connection_store import ProviderConnection
 
@@ -120,7 +120,7 @@ class StoredProviderConnection(Base):
         if self.api_key is not None:
             api_key_plaintext = enc.decrypt_value(self.api_key)
 
-        effective_base_url = proxy_url if self.enable_proxy else self.base_url
+        effective_base_url = proxy_url if self.enable_proxy and use_proxy else self.base_url
 
         now = int(time.time())
         created = int(self.created_at.timestamp()) if self.created_at is not None else now
@@ -208,7 +208,50 @@ class StoredLLM(Base):
         return LLM.model_validate(fields)
 
 
+class LlmUsage(Base):
+    """Raw, append-only record of one proxied LLM completion."""
+
+    __tablename__ = "llm_usage"
+    __table_args__ = {"comment": "Raw LLM invocation records"}  # noqa: RUF012
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    provider_connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("provider_connections.id", ondelete="CASCADE"),
+        index=True,
+    )
+    llm_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("llms.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+        default=None,
+    )
+    response_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    model: Mapped[str] = mapped_column(String(255), default="")
+    prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    cache_read_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    cache_write_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    context_window: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    per_turn_token: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    accumulated_cost: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, default_factory=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+
+
 __all__ = [
+    "LlmUsage",
     "StoredLLM",
     "StoredProviderConnection",
 ]

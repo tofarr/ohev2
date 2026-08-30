@@ -212,6 +212,9 @@ class TestLLMService:
         # enable_proxy -> base_url is the proxy URL, keyed on the LLM id.
         assert str(llm.id) in sdk_llm.base_url
 
+        direct_llm = await llm_service.materialize_llm(llm, use_proxy=False)
+        assert direct_llm.base_url == "https://real.example.com"
+
     async def test_connection_for_llm(
         self,
         conn_service: ProviderConnectionService,
