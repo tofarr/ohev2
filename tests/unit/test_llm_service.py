@@ -29,8 +29,13 @@ from openhands.ev2.util.search_filter import AllSearchFilter
 _USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
-async def _seed_user(session: AsyncSession) -> uuid.UUID:
-    user = await make_principal(session, email="svc@example.com", username="svc")
+async def _seed_user(
+    session: AsyncSession,
+    *,
+    email: str = "svc@example.com",
+    username: str = "svc",
+) -> uuid.UUID:
+    user = await make_principal(session, email=email, username=username)
     await session.flush()
     return user.id
 
@@ -204,25 +209,43 @@ class TestLLMService:
         )
         sdk_llm = await llm_service.materialize_llm(llm)
         assert sdk_llm.model == "gpt-4o"
-        # enable_proxy -> base_url is the proxy URL.
-        assert str(conn.id) in sdk_llm.base_url
+        # enable_proxy -> base_url is the proxy URL, keyed on the LLM id.
+        assert str(llm.id) in sdk_llm.base_url
 
-    async def test_first_for_connection(
+    async def test_connection_for_llm(
         self,
         conn_service: ProviderConnectionService,
         llm_service: LLMService,
     ) -> None:
         uid = await _seed_user(conn_service._session)
         conn = await _make_conn(conn_service, uid)
-        await llm_service.create(
+        llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
             user_id=uid,
         )
-        found = await llm_service.first_for_connection(conn.id, user_id=uid)
-        assert found is not None
-        assert found.provider_connection_id == conn.id
-        none = await llm_service.first_for_connection(uuid.uuid4(), user_id=uid)
-        assert none is None
+        resolved = await llm_service.connection_for_llm(llm)
+        assert resolved.id == conn.id
+
+    async def test_connection_for_llm_missing_raises(
+        self,
+        conn_service: ProviderConnectionService,
+        llm_service: LLMService,
+    ) -> None:
+        uid = await _seed_user(conn_service._session)
+        conn = await _make_conn(conn_service, uid)
+        llm = await llm_service.create(
+            LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
+            user_id=uid,
+        )
+        # Re-point the LLM at a connection owned by a different user: the
+        # connection exists but its owner no longer matches the LLM's owner.
+        other_uid = await _seed_user(
+            conn_service._session, email="other@example.com", username="other"
+        )
+        other_conn = await _make_conn(conn_service, other_uid)
+        llm.provider_connection_id = other_conn.id
+        with pytest.raises(LLMNotFoundError):
+            await llm_service.connection_for_llm(llm)
 
 
 class TestProxyUrl:
