@@ -22,7 +22,11 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection
+from openhands.ev2.llm.llm_models import (
+    LlmAggregatedUsage,
+    StoredLLM,
+    StoredProviderConnection,
+)
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 # ---------------------------------------------------------------------- #
@@ -351,7 +355,57 @@ class CompletionResponse(BaseModel):
     metrics: dict[str, Any]
 
 
+# ---------------------------------------------------------------------- #
+# Aggregated usage (read-only)
+# ---------------------------------------------------------------------- #
+
+
+class AggregatedUsageRead(BaseModel):
+    """One per-minute, per-user rollup row, returned read-only by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    minute: datetime
+    user_id: uuid.UUID
+    invocations: int
+    prompt_tokens: int
+    completion_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    reasoning_tokens: int
+    context_window: int
+    per_turn_token: int
+    accumulated_cost: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class AggregatedUsageSearchFilter(BaseSearchFilter[LlmAggregatedUsage]):
+    """Optional filter clauses for `GET /llm/aggregated-usage`."""
+
+    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    minute__gte: datetime | None = Field(default=None)
+    minute__lt: datetime | None = Field(default=None)
+    minute__gt: datetime | None = Field(default=None)
+    minute__lte: datetime | None = Field(default=None)
+
+
+class AggregatedUsageSearchResult(BaseModel):
+    """Paginated collection of aggregated-usage rows."""
+
+    items: list[AggregatedUsageRead]
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
+    limit: int
+
+
 __all__ = [
+    "AggregatedUsageRead",
+    "AggregatedUsageSearchFilter",
+    "AggregatedUsageSearchResult",
     "CompletionRequest",
     "CompletionResponse",
     "LLMBatchCreate",

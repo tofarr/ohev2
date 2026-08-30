@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.ev2.app import create_app
@@ -31,6 +32,7 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlagRole,
 )
 from openhands.ev2.llm.llm_models import (  # noqa: F401
+    LlmAggregatedUsage,
     LlmUsage,
     StoredLLM,
     StoredProviderConnection,
@@ -80,6 +82,9 @@ def _set_test_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OHE_BASE_URL", "http://test")
     # Keep the background cleanup loop out of the test process.
     monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
+    # Keep the LLM usage background loops out of the test process.
+    monkeypatch.setenv("OHE_LLM_USAGE_PARTITION_INTERVAL", "0")
+    monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
 
 
 # Per-entity ``Permission`` columns the seeded test admin role grants
@@ -129,6 +134,14 @@ async def engine(monkeypatch: pytest.MonkeyPatch):
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+        # The llm_usage table is range-partitioned by created_at; create_all
+        # emits only the parent. Ensure a DEFAULT partition so test inserts
+        # land somewhere even before a dated partition is allocated. The
+        # partition manager / individual tests create dated partitions as
+        # needed (DEFAULT never overlaps dated partitions).
+        await conn.execute(
+            text("CREATE TABLE IF NOT EXISTS llm_usage_default PARTITION OF llm_usage DEFAULT")
+        )
     yield eng
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -157,7 +170,6 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     minted for it.
     """
     _set_test_config(monkeypatch)
-    from sqlalchemy import text
 
     from openhands.ev2.db import dispose_engine_factory
     from openhands.ev2.db import get_session as _app_get_session

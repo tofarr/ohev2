@@ -51,6 +51,54 @@ class DbConfig(BaseModel):
         )
 
 
+class UsageConfig(BaseModel):
+    """LLM usage logging configuration.
+
+    Raw LLM invocations are written to the daily-partitioned ``llm_usage`` table
+    and rolled up into the ``llm_aggregated_usage`` projection by background
+    loops (see README 'LLM usage logging'). These knobs control the two loops:
+
+    * the **partition manager** keeps ``preallocate_days`` future daily
+      partitions allocated and drops partitions older than ``retention_days``;
+    * the **aggregator** rolls per-minute ``llm_aggregated_usage`` rows one
+      minute at a time, always at least one minute behind wall-clock time.
+    """
+
+    partition_interval: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Seconds between partition-manager sweeps that allocate future "
+            "daily partitions and drop expired ones. 0 disables the in-process "
+            "loop (drive it with an external scheduler); see README 'LLM usage "
+            "logging'."
+        ),
+    )
+    preallocate_days: int = Field(
+        default=7,
+        ge=1,
+        description="How many future daily partitions the manager keeps allocated.",
+    )
+    retention_days: int = Field(
+        default=365,
+        ge=1,
+        description=(
+            "Partitions older than this many days are dropped by the manager. "
+            "The aggregated projection is unaffected (it is retained "
+            "independently)."
+        ),
+    )
+    aggregate_interval: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Seconds between aggregator sweeps that roll per-minute "
+            "llm_aggregated_usage rows from llm_usage. 0 disables the in-process "
+            "loop (drive it with an external scheduler)."
+        ),
+    )
+
+
 class LlmConfig(BaseModel):
     """LLM proxy configuration.
 
@@ -58,6 +106,10 @@ class LlmConfig(BaseModel):
     effective ``base_url`` handed to the SDK is built from
     :attr:`AppConfig.base_url` plus :attr:`completion_path` so LLM traffic is
     routed through this service's ``POST /llm/completion/{llm_id}`` endpoint.
+
+    ``usage`` configures the background loops that manage the daily-partitioned
+    raw ``llm_usage`` table and its per-minute ``llm_aggregated_usage``
+    projection (see README 'LLM usage logging').
     """
 
     completion_path: str = Field(
@@ -67,6 +119,10 @@ class LlmConfig(BaseModel):
             "endpoint. An LLM id is appended to form the full proxy URL "
             "handed to the SDK when enable_proxy is set."
         ),
+    )
+    usage: UsageConfig = Field(
+        default_factory=UsageConfig,
+        description="LLM usage logging (partitioning, retention, aggregation).",
     )
 
 

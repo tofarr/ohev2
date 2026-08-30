@@ -369,6 +369,12 @@ def upgrade() -> None:
             comment="Permission policy for llm resources; null = deny.",
         ),
         sa.Column(
+            "llm_aggregated_usage_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for llm_aggregated_usage resources; null = deny.",
+        ),
+        sa.Column(
             "feature_flag_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
@@ -701,8 +707,177 @@ def upgrade() -> None:
         "ix_feature_flag_roles_role_id", "feature_flag_roles", ["role_id"], unique=False
     )
 
+    # ------------------------------------------------------------------ #
+    # llm_usage (range-partitioned parent by created_at; partitions are
+    # created by the background partition manager at runtime — see README
+    # 'LLM usage logging'. A DEFAULT partition is created here so inserts
+    # never fail before the manager's first sweep.)
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "llm_usage",
+        sa.Column(
+            "id",
+            sa.BigInteger(),
+            server_default=sa.text("nextval(pg_get_serial_sequence('llm_usage', 'id'))"),
+            autoincrement=True,
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("provider_connection_id", sa.Uuid(), nullable=False),
+        sa.Column("llm_id", sa.Uuid(), nullable=True),
+        sa.Column("response_id", sa.String(length=255), nullable=True),
+        sa.Column("model", sa.String(length=255), nullable=False, server_default=""),
+        sa.Column("prompt_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "completion_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "cache_read_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "cache_write_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "reasoning_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column("context_window", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("per_turn_token", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "accumulated_cost",
+            sa.Numeric(precision=18, scale=6),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column("metrics", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.PrimaryKeyConstraint("id", "created_at"),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_llm_usage_user_id_users"
+        ),
+        sa.ForeignKeyConstraint(
+            ["provider_connection_id"],
+            ["provider_connections.id"],
+            ondelete="CASCADE",
+            name="fk_llm_usage_provider_connection_id_provider_connections",
+        ),
+        sa.ForeignKeyConstraint(
+            ["llm_id"], ["llms.id"], ondelete="SET NULL", name="fk_llm_usage_llm_id_llms"
+        ),
+        comment="Raw LLM invocation records, daily-partitioned by created_at",
+        postgresql_partition_by="RANGE(created_at)",
+    )
+    op.create_index("ix_llm_usage_user_id", "llm_usage", ["user_id"], unique=False)
+    op.create_index(
+        "ix_llm_usage_provider_connection_id",
+        "llm_usage",
+        ["provider_connection_id"],
+        unique=False,
+    )
+    op.create_index("ix_llm_usage_llm_id", "llm_usage", ["llm_id"], unique=False)
+    op.create_index("ix_llm_usage_created_at", "llm_usage", ["created_at"], unique=False)
+    # DEFAULT partition so inserts succeed before the manager allocates the
+    # day's partition (or when a row's created_at falls outside any allocated
+    # day). Created with raw SQL: op.create_table does not emit PARTITION OF.
+    op.execute("CREATE TABLE llm_usage_default PARTITION OF llm_usage DEFAULT")
+
+    # ------------------------------------------------------------------ #
+    # llm_aggregated_usage
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "llm_aggregated_usage",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("minute", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("invocations", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("prompt_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "completion_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "cache_read_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "cache_write_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "reasoning_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column("context_window", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("per_turn_token", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "accumulated_cost",
+            sa.Numeric(precision=18, scale=6),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_llm_aggregated_usage_user_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_id", "minute", name="uq_llm_aggregated_usage_user_id_minute"),
+        comment="Per-minute, per-user rollup of llm_usage",
+    )
+    op.create_index(
+        "ix_llm_aggregated_usage_minute", "llm_aggregated_usage", ["minute"], unique=False
+    )
+    op.create_index(
+        "ix_llm_aggregated_usage_user_id", "llm_aggregated_usage", ["user_id"], unique=False
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_llm_aggregated_usage_user_id", table_name="llm_aggregated_usage")
+    op.drop_index("ix_llm_aggregated_usage_minute", table_name="llm_aggregated_usage")
+    op.drop_table("llm_aggregated_usage")
+    op.drop_index("ix_llm_usage_created_at", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_llm_id", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
+    op.drop_table("llm_usage")
     op.drop_index("ix_feature_flag_roles_role_id", table_name="feature_flag_roles")
     op.drop_index("ix_feature_flag_roles_feature_flag_id", table_name="feature_flag_roles")
     op.drop_table("feature_flag_roles")
