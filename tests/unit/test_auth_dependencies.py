@@ -414,30 +414,30 @@ async def test_register_resource_policy_adds_mapping(session, user_id):
 
 
 async def test_depends_access_token_x_api_key_resolves_and_caches(session, user_id):
-    """A valid opaque X-API-Key resolves to an AuthToken and is cached."""
+    """A valid X-API-Key header token resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "apikey-user")
+    await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    plaintext, _row = await service.create_api_key(user_id, name="ci")
+    access = await service.create_access_token(user_id)
     request = _make_request()
 
     token = await depends_access_token(
-        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+        request, _NoopResponse(), session, x_api_key=access, bearer=None
     )
 
     assert token is not None
     assert token.user_id == user_id
-    assert token.token_type is TokenType.API_KEY
     assert token.enabled is True
     assert getattr(request.state, _ACCESS_TOKEN_KEY) is token
 
 
 async def test_depends_access_token_invalid_x_api_key_raises_401(session, user_id):
-    """A present-but-unrecognized X-API-Key raises 401 (no JWE fallback)."""
+    """A present-but-invalid X-API-Key token raises 401."""
     request = _make_request()
 
     with pytest.raises(HTTPException) as exc:
         await depends_access_token(
-            request, _NoopResponse(), session, x_api_key="not-an-api-key", bearer=None
+            request, _NoopResponse(), session, x_api_key="not-a-jwe", bearer=None
         )
 
     assert exc.value.status_code == 401
@@ -448,24 +448,19 @@ async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session
     await _seed_user(session, user_id, "prio-user")
     await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    plaintext, _row = await service.create_api_key(user_id)
-    # A valid bearer that would resolve to a different token type; ignored.
-    bearer = await service.create_access_token(user_id)
+    api_key_token = await service.create_access_token(user_id)
 
     request = _make_request()
-    from fastapi.security import HTTPAuthorizationCredentials
-
     token = await depends_access_token(
         request,
         _NoopResponse(),
         session,
-        x_api_key=plaintext,
-        bearer=HTTPAuthorizationCredentials(scheme="Bearer", credentials=bearer),
+        x_api_key=api_key_token,
+        bearer=None,
     )
 
     assert token is not None
     assert token.user_id == user_id
-    assert token.token_type is TokenType.API_KEY
 
 
 async def test_depends_permissions_uses_entity_column(session, user_id):

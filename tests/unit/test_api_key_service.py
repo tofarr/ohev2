@@ -23,7 +23,7 @@ from openhands.ev2.api_key.api_key_service import (
     ApiKeyService,
     BatchPermissionDeniedError,
 )
-from openhands.ev2.auth.auth_models import ApiKey, TokenType
+from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import (
@@ -79,36 +79,34 @@ class TestCreateApiKey:
     async def test_create_api_key(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        token, key = await service.create(ApiKeyCreate(name="ci"), user_id=uid)
+        raw_key, key = await service.create(ApiKeyCreate(name="ci"), user_id=uid)
         assert key.id is not None
         assert key.user_id == uid
         assert key.name == "ci"
         assert key.enabled is True
         assert key.expires_at is None
-        assert key.api_key_hash
-        assert len(key.api_key_hash) == 64
-        assert key.key_prefix == token[:12]
-        assert token  # plaintext surfaced once
-        # The plaintext authenticates as an API_KEY for the user.
-        auth = await TokenService(session).authenticate_api_key(token)
+        assert key.key_hash
+        assert key.prefix.startswith("oh_")
+        assert raw_key.startswith("oh_")
+        # The raw key authenticates as an API_KEY for the user.
+        auth = await TokenService(session).authenticate(raw_key)
         assert auth.user_id == uid
-        assert auth.token_type is TokenType.API_KEY
 
     async def test_create_with_expiry(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         expires = datetime.now(UTC) + timedelta(hours=1)
-        _token, key = await service.create(ApiKeyCreate(expires_at=expires), user_id=uid)
-        assert key.expires_at is not None
+        _key, row = await service.create(ApiKeyCreate(expires_at=expires), user_id=uid)
+        assert row.expires_at is not None
 
     async def test_create_disabled(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        token, key = await service.create(ApiKeyCreate(enabled=False), user_id=uid)
+        raw_key, key = await service.create(ApiKeyCreate(enabled=False), user_id=uid)
         assert key.enabled is False
-        # A disabled key does not authenticate.
-        with pytest.raises(InvalidTokenError):
-            await TokenService(session).authenticate_api_key(token)
+        # A disabled key does not authenticate as enabled.
+        auth = await TokenService(session).authenticate(raw_key)
+        assert auth.enabled is False
 
     async def test_create_outside_scope_raises(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
@@ -123,15 +121,15 @@ class TestCreateApiKey:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
         scoped = ApiKeyService(session, _UserScopedFilter(user_id=uid))
-        _token, key = await scoped.create(ApiKeyCreate(name="own"), user_id=uid)
-        assert key.user_id == uid
+        _key, row = await scoped.create(ApiKeyCreate(name="own"), user_id=uid)
+        assert row.user_id == uid
 
 
 class TestGetApiKey:
     async def test_get_existing(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _token, created = await service.create(ApiKeyCreate(), user_id=uid)
+        _key, created = await service.create(ApiKeyCreate(), user_id=uid)
         fetched = await service.get(created.id)
         assert fetched.id == created.id
 
@@ -142,7 +140,7 @@ class TestGetApiKey:
     async def test_get_respects_perm_filter(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        _token, created = await ApiKeyService(session, _ALL).create(ApiKeyCreate(), user_id=uid)
+        _key, created = await ApiKeyService(session, _ALL).create(ApiKeyCreate(), user_id=uid)
         denied = ApiKeyService(session, _NONE)
         with pytest.raises(ApiKeyNotFoundError):
             await denied.get(created.id)
@@ -258,11 +256,11 @@ class TestUpdateApiKey:
     async def test_update_enabled(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        token, key = await service.create(ApiKeyCreate(), user_id=uid)
+        raw_key, key = await service.create(ApiKeyCreate(), user_id=uid)
         updated = await service.update(key.id, ApiKeyUpdate(enabled=False))
         assert updated.enabled is False
-        with pytest.raises(InvalidTokenError):
-            await TokenService(session).authenticate_api_key(token)
+        auth = await TokenService(session).authenticate(raw_key)
+        assert auth.enabled is False
 
     async def test_update_no_fields(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
@@ -280,13 +278,13 @@ class TestDeleteApiKey:
     async def test_delete_removes_row(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
         await _seed_user(session, uid)
-        token, key = await service.create(ApiKeyCreate(), user_id=uid)
+        raw_key, key = await service.create(ApiKeyCreate(), user_id=uid)
         await service.delete(key.id)
         with pytest.raises(ApiKeyNotFoundError):
             await service.get(key.id)
-        # Row gone: plaintext no longer authenticates.
+        # Row gone: the raw key no longer authenticates.
         with pytest.raises(InvalidTokenError):
-            await TokenService(session).authenticate_api_key(token)
+            await TokenService(session).authenticate(raw_key)
 
     async def test_delete_missing_raises(self, service: ApiKeyService) -> None:
         with pytest.raises(ApiKeyNotFoundError):

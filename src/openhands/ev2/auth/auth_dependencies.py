@@ -6,20 +6,15 @@ it, and provides both role-based and policy-based authorization guards.
 
 Credential resolution priority:
 
-1. the ``X-API-Key`` header — an opaque API-key string looked up by
-   ``sha256(key)`` against ``api_keys`` (never a JWE).
-2. the ``Authorization: Bearer <token>`` header — an auth access-token JWE
-   (``ttyp: access_token``).
-3. the session cookie (``ttyp: cookie``) set by the auth callback.
+1. the ``Authorization: Bearer <token>`` header — an auth access-token JWE
+   (``ttyp: access_token``), or a legacy auth access-token / API-key JWE.
+2. the session cookie (``ttyp: cookie``) set by the auth callback.
 
 A token that is missing entirely means anonymous access (permissions with
 ``user_id IS NULL`` may still apply). A *present but invalid/expired* token is
 a 401. When the cookie flow is used and the federated access token backing it
 is about to expire, the dependency refreshes it server-side (mirroring
-``/auth/refresh``) and re-mints the cookie (sliding session). When
-``idp.sync_api_keys`` is set, an API-key request likewise refreshes the user's
-federated access token under lock if it is imminent/expired (no cookie is
-re-minted); an API key whose user has no federated session is rejected.
+``/auth/refresh``) and re-mints the cookie (sliding session).
 
 The decrypted :class:`AuthToken` is cached on ``request.state`` so
 ``depends_access_token``, ``depends_user_id``, ``depends_roles`` and
@@ -65,7 +60,7 @@ _api_key_scheme = APIKeyHeader(
     name="X-API-Key",
     scheme_name="ApiKey",
     auto_error=False,
-    description="Opaque API key sent in the X-API-Key header; looked up by sha256 hash.",
+    description="API key (JWE) sent in the X-API-Key header.",
 )
 _bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -103,71 +98,56 @@ async def depends_access_token(
 ) -> AuthToken | None:
     """Resolve the current principal from a credential, or ``None``.
 
-    Credential sources, tried in priority order:
+    The credential is a JWE-encrypted token supplied via, in priority order:
 
-    1. the ``X-API-Key`` header — an opaque API-key string (resolved by
-       ``sha256`` hash lookup, never decrypted as a JWE),
-    2. the ``Authorization: Bearer <token>`` header (an OAuth2 access-token
-       JWE), or
+    1. the ``X-API-Key`` header (an API-key JWE token),
+    2. the ``Authorization: Bearer <token>`` header (an OAuth2 access token), or
     3. the session cookie set by the login / auth callback endpoint.
 
-    The resolved :class:`AuthToken` is cached on ``request.state`` so
+    The decrypted :class:`AuthToken` is cached on ``request.state`` so
     ``depends_user_id``, ``depends_roles`` and ``depends_permissions`` reuse it
     without re-decrypting or re-loading the user row.
 
     Missing token => anonymous (None). Present-but-invalid token => 401. When the
     token is the session cookie, a fresh cookie is re-minted (sliding session);
     for an auth federated cookie that is about to expire, the federated access
-    token is refreshed server-side first. When ``idp.sync_api_keys`` is set and
-    the credential is an API key, the user's federated access token is likewise
-    refreshed under lock if imminent/expired (no cookie is re-minted).
+    token is refreshed server-side first.
     """
     cached = getattr(request.state, _ACCESS_TOKEN_KEY, None)
     if cached is not None:
         return cached if cached is not _ANON_SENTINEL else None
 
+    token = x_api_key
+    used_cookie = False
+    if token is None and bearer is not None:
+        token = bearer.credentials
+    if token is None:
+        cookie_name = get_config().auth_cookie_name
+        token = request.cookies.get(cookie_name)
+        used_cookie = token is not None
+    if token is None:
+        _cache_token(request, _ANON_SENTINEL)
+        return None
+
     service = TokenService(session)
-    auth_token: AuthToken | None = None
-    cookie_token: str | None = None
+    try:
+        auth_token = await service.authenticate(token)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired auth token.",
+        ) from exc
 
-    if x_api_key is not None:
-        # X-API-Key is exclusively the opaque-key path: hash + row lookup.
-        # A present-but-unrecognized key is a 401, never a fallback to JWE.
-        try:
-            auth_token = await service.authenticate_api_key(x_api_key)
-        except InvalidTokenError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired API key.",
-            ) from exc
-    else:
-        token = bearer.credentials if bearer is not None else None
-        if token is None:
-            cookie_name = get_config().auth_cookie_name
-            token = request.cookies.get(cookie_name)
-            if token is not None:
-                cookie_token = token
-        if token is None:
-            _cache_token(request, _ANON_SENTINEL)
-            return None
-        try:
-            auth_token = await service.authenticate(token)
-        except InvalidTokenError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired auth token.",
-            ) from exc
-
-    # A token that decrypts/looks-up but whose backing row is disabled (e.g. a
-    # revoked API key) authenticates as nobody.
+    # A token that decrypts but whose backing row is disabled (e.g. a revoked
+    # API key) authenticates as nobody.
     if not auth_token.enabled:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired auth token.",
         )
 
-    if cookie_token is not None:
-        await _maybe_refresh_auth_cookie(cookie_token, response, session)
+    if used_cookie:
+        await _maybe_refresh_auth_cookie(token, response, session)
     elif auth_token.token_type is TokenType.API_KEY and get_config().idp.sync_api_keys:
         await _maybe_sync_api_key_session(auth_token.user_id, session)
 
@@ -567,6 +547,9 @@ def register_resource_policy(model: type, column: str) -> None:
 
 # Register every shipped resource at import time so the mapping is populated
 # before any request runs. Column names are `<entity>_permission` on Role.
+from openhands.ev2.api_key import (  # noqa: E402,F401
+    api_key_security as _api_key_security,  # registers ApiKeyAccess in the Permission union
+)
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
