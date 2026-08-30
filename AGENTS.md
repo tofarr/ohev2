@@ -182,6 +182,15 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   runs an in-process `asyncio` loop in the app lifespan; `cleanup_interval = 0`
   disables it and cleanup must be driven by an external scheduler (cron). See
   README "Cleanup processes".
+* Background LLM usage management — two more lifespan loops follow the same
+  pattern (config `= 0` disables the in-process loop, falling back to an
+  external scheduler). See README "LLM usage logging":
+  - `llm.usage.partition_interval` (`OHE_LLM_USAGE_PARTITION_INTERVAL`):
+    preallocates `llm.usage.preallocate_days` future daily `llm_usage`
+    partitions and drops ones older than `llm.usage.retention_days`.
+  - `llm.usage.aggregate_interval` (`OHE_LLM_USAGE_AGGREGATE_INTERVAL`):
+    rolls finished minutes (at least one behind wall-clock) from `llm_usage`
+    into the read-only `llm_aggregated_usage` projection.
 * Authorization checks live in services (not just routers) — defense in depth.
 
 ## 11. Roles & per-entity permission columns
