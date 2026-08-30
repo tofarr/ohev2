@@ -49,11 +49,12 @@ class TokenType(enum.StrEnum):
 
     COOKIE and ACCESS_TOKEN are short-lived JWE tokens whose ``exp`` is synced
     to the backing IdP access-token row; they are validated against the user
-    row only. API_KEY is a long-lived, user-managed service credential backed
-    by an ``api_keys`` row. IDP_REFRESH_TOKEN is an exchange-only credential
-    backed by an ``idp_refresh_tokens`` row; it is never accepted as a bearer
-    token by :meth:`TokenService.authenticate` and is rotated only by the auth
-    refresh endpoint (the IdP refresh grant).
+    row only. API_KEY marks an :class:`AuthToken` resolved from an opaque
+    (non-JWE) API key presented via the ``X-API-Key`` header; the plaintext is
+    never stored, only its sha256 hash, and the row backs revocation. IDP_REFRESH_TOKEN
+    is an exchange-only credential backed by an ``idp_refresh_tokens`` row; it is
+    never accepted as a bearer token by :meth:`TokenService.authenticate` and is
+    rotated only by the auth refresh endpoint (the IdP refresh grant).
 
     REFRESH_TOKEN is a legacy self-issued type retained for the
     ``refresh_tokens`` table schema; it is no longer minted by the app server
@@ -93,11 +94,15 @@ class AuthToken(BaseModel):
 
 
 class ApiKey(Base):
-    """A revocable backing row for an API-key credential.
+    """A revocable backing row for an opaque API-key credential.
 
-    The row shares its ``jti`` with the API-key JWE token minted for it; a
-    token whose jti has no live row is rejected even if the JWE itself is
-    decryptable and unexpired.
+    The plaintext key is never persisted: only its ``api_key_hash``
+    (``sha256(key).hexdigest()``) is stored, so a DB leak alone cannot recover
+    usable credentials. Authentication hashes the presented key and looks the
+    row up by hash; a row that is missing, disabled, or past ``expires_at`` is
+    rejected. ``key_prefix`` is a short, non-sensitive slice of the plaintext
+    kept for UI display (e.g. "ohev_abc…") so a user can recognize a key
+    without exposing it.
     """
 
     __tablename__ = "api_keys"
@@ -107,12 +112,15 @@ class ApiKey(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    jti: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    # sha256(plaintext_key).hexdigest() — the lookup key for authentication.
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
     name: Mapped[str | None] = mapped_column(default=None, nullable=True)
+    # Non-sensitive prefix of the plaintext key for display only.
+    key_prefix: Mapped[str] = mapped_column(String(32), default="", server_default="")
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
     expires_at: Mapped[datetime | None] = mapped_column(
         _TZ,

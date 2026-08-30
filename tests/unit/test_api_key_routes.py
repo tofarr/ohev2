@@ -28,9 +28,9 @@ class TestCreateApiKeyRoute:
         assert body["enabled"] is True
         assert body["expires_at"] is None
         assert uuid.UUID(body["id"])
-        assert uuid.UUID(body["jti"])
+        assert body["key_prefix"]
         assert body["token"]
-        # The token is a JWE that authenticates as an API_KEY for the user.
+        # The opaque plaintext authenticates via X-API-Key for the user.
         auth = await client.get("/users", headers={"X-API-Key": body["token"]})
         assert auth.status_code == 200
 
@@ -365,12 +365,12 @@ class TestPermissionEnforcement:
         await session.commit()
         token = create_auth_token(principal.id)
 
-        resp = await client.get("/api-keys", headers={"X-API-Key": token})
+        resp = await client.get("/api-keys", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 403
         resp = await client.post(
             "/api-keys",
             json={"name": "x"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403
 
@@ -382,7 +382,7 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/api-keys", headers={"X-API-Key": token})
+        resp = await client.get("/api-keys", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
     async def test_partial_permission_denies_other_action(
@@ -395,11 +395,11 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/api-keys", headers={"X-API-Key": token})
+        resp = await client.get("/api-keys", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         resp = await client.post(
             "/api-keys",
             json={"name": "new"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403

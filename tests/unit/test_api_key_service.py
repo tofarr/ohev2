@@ -23,8 +23,8 @@ from openhands.ev2.api_key.api_key_service import (
     ApiKeyService,
     BatchPermissionDeniedError,
 )
-from openhands.ev2.auth.auth_models import ApiKey
-from openhands.ev2.auth.auth_tokens import TokenService
+from openhands.ev2.auth.auth_models import ApiKey, TokenType
+from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import (
     AllSearchFilter,
@@ -85,11 +85,14 @@ class TestCreateApiKey:
         assert key.name == "ci"
         assert key.enabled is True
         assert key.expires_at is None
-        assert key.jti is not None
-        assert token  # JWE secret surfaced
-        # The token authenticates as an API_KEY for the user.
-        auth = await TokenService(session).authenticate(token)
+        assert key.api_key_hash
+        assert len(key.api_key_hash) == 64
+        assert key.key_prefix == token[:12]
+        assert token  # plaintext surfaced once
+        # The plaintext authenticates as an API_KEY for the user.
+        auth = await TokenService(session).authenticate_api_key(token)
         assert auth.user_id == uid
+        assert auth.token_type is TokenType.API_KEY
 
     async def test_create_with_expiry(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
@@ -103,9 +106,9 @@ class TestCreateApiKey:
         await _seed_user(session, uid)
         token, key = await service.create(ApiKeyCreate(enabled=False), user_id=uid)
         assert key.enabled is False
-        # A disabled key does not authenticate as enabled.
-        auth = await TokenService(session).authenticate(token)
-        assert auth.enabled is False
+        # A disabled key does not authenticate.
+        with pytest.raises(InvalidTokenError):
+            await TokenService(session).authenticate_api_key(token)
 
     async def test_create_outside_scope_raises(self, session: AsyncSession) -> None:
         uid = uuid.uuid4()
@@ -258,8 +261,8 @@ class TestUpdateApiKey:
         token, key = await service.create(ApiKeyCreate(), user_id=uid)
         updated = await service.update(key.id, ApiKeyUpdate(enabled=False))
         assert updated.enabled is False
-        auth = await TokenService(session).authenticate(token)
-        assert auth.enabled is False
+        with pytest.raises(InvalidTokenError):
+            await TokenService(session).authenticate_api_key(token)
 
     async def test_update_no_fields(self, service: ApiKeyService, session: AsyncSession) -> None:
         uid = uuid.uuid4()
@@ -281,9 +284,9 @@ class TestDeleteApiKey:
         await service.delete(key.id)
         with pytest.raises(ApiKeyNotFoundError):
             await service.get(key.id)
-        # Row gone: token no longer authenticates.
-        auth = await TokenService(session).authenticate(token)
-        assert auth.enabled is False
+        # Row gone: plaintext no longer authenticates.
+        with pytest.raises(InvalidTokenError):
+            await TokenService(session).authenticate_api_key(token)
 
     async def test_delete_missing_raises(self, service: ApiKeyService) -> None:
         with pytest.raises(ApiKeyNotFoundError):

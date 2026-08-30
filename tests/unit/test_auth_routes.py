@@ -317,7 +317,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -412,7 +412,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -463,7 +463,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -515,7 +515,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -588,7 +588,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -611,7 +611,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -634,7 +634,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -695,7 +695,7 @@ class TestFullOAuthFlowRoute:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -815,7 +815,7 @@ class TestIdTokenIssuance:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -874,7 +874,7 @@ class TestIdTokenIssuance:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -925,7 +925,7 @@ class TestIdTokenIssuance:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -1011,7 +1011,7 @@ class TestUserInfo:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -1079,7 +1079,7 @@ class TestLogout:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(
@@ -1140,7 +1140,7 @@ class TestLogout:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             from openhands.ev2.util.auth_token import create_auth_token
 
-            c.headers["X-API-Key"] = create_auth_token(
+            c.headers["Authorization"] = "Bearer " + create_auth_token(
                 uuid.UUID("12345678-1234-5678-1234-456789abcdef")
             )
             await c.post(

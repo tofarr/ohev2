@@ -5,8 +5,10 @@ JWE-encoded token string into an :class:`AuthToken`. Per-type validity:
 
 * COOKIE / ACCESS_TOKEN — derived from the JWE claims alone; ``enabled`` is
   the user row's ``enabled`` flag (a disabled user cannot use any token).
-* API_KEY — the token's ``jti`` must match a live ``api_keys`` row, and the
-  user must be enabled.
+* API_KEY — resolved by :meth:`TokenService.authenticate_api_key` from an
+  opaque plaintext presented via the ``X-API-Key`` header; the row is looked
+  up by ``sha256(key)`` and must be live (enabled, not expired), and the user
+  must be enabled.
 * IDP_REFRESH_TOKEN — the token's ``rid`` must match a live
   ``idp_refresh_tokens`` row, and the user must be enabled. (Refresh tokens
   are not accepted by ``authenticate`` for general requests; they are
@@ -25,6 +27,8 @@ service only mints and validates.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -59,6 +63,16 @@ _ROW_ID_CLAIM = "rid"  # idp_refresh_tokens row id
 # next authenticate because its exp is in the past). Keeps create_jwe_token's
 # expires_in positive.
 _FLOOR_TTL = timedelta(seconds=1)
+
+
+def _hash_api_key(plaintext: str) -> str:
+    """The sha256 hex digest of an API-key plaintext — the persisted lookup key.
+
+    Keys are 256-bit random (``secrets.token_urlsafe(32)``), so an unsalted
+    sha256 is not brute-forceable; salting is unnecessary for high-entropy
+    secrets and would break constant-time hash lookup by index.
+    """
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
 class InvalidTokenError(Exception):
@@ -151,38 +165,29 @@ class TokenService:
         enabled: bool = True,
         expires_at: datetime | None = None,
     ) -> tuple[str, ApiKey]:
-        """Mint a long-lived API_KEY token and persist its backing row.
+        """Mint a long-lived opaque API key and persist its backing row.
 
-        Returns (token, row). API keys are the one credential whose lifetime
-        is *not* IdP-synced: they are user-managed service credentials. The
-        token's JWE ``exp`` mirrors the row's ``expires_at`` (or is omitted
-        entirely when the key never expires).
+        Returns (plaintext, row). The plaintext is a high-entropy
+        ``secrets.token_urlsafe(32)`` string shown to the client exactly once;
+        only its sha256 hash (``api_key_hash``) is persisted, so the key is not
+        recoverable from the database. ``key_prefix`` stores a short, non-
+        sensitive slice of the plaintext for UI display. API keys are the one
+        credential whose lifetime is *not* IdP-synced (unless
+        ``idp.sync_api_keys`` is set): they are user-managed service
+        credentials; ``expires_at`` (if set) is the only cap.
         """
-        jti = uuid.uuid4()
+        plaintext = secrets.token_urlsafe(32)
         row = ApiKey(
-            jti=jti,
+            api_key_hash=_hash_api_key(plaintext),
             user_id=user_id,
             name=name,
+            key_prefix=plaintext[:12],
             enabled=enabled,
             expires_at=expires_at,
         )
         self._session.add(row)
         await self._session.flush()
-        ttl = None
-        if expires_at is not None:
-            ttl = expires_at - _now()
-            if ttl.total_seconds() <= 0:
-                ttl = None
-        token = self._enc.create_jwe_token(
-            {
-                _SUB_CLAIM: str(user_id),
-                _TYP_CLAIM: TokenType.API_KEY.value,
-                _JTI_CLAIM: str(jti),
-                **({"name": name} if name is not None else {}),
-            },
-            expires_in=ttl,
-        )
-        return token, row
+        return plaintext, row
 
     # ------------------------------------------------------------------ #
     # Authentication (token string -> AuthToken)
@@ -205,6 +210,10 @@ class TokenService:
         if token_type is TokenType.IDP_REFRESH_TOKEN and not allow_refresh:
             # Refresh tokens are exchange-only credentials, not bearer tokens.
             raise InvalidTokenError("refresh token not valid for this endpoint")
+        if token_type is TokenType.API_KEY:
+            # Opaque API keys are resolved via authenticate_api_key, not the
+            # JWE path. A JWE claiming ttyp=api_key is not a valid credential.
+            raise InvalidTokenError("api key tokens are not JWE-encrypted")
         user_id = self._user_id(payload)
         jti = self._jti(payload)
         iat = self._iat(payload)
@@ -218,9 +227,7 @@ class TokenService:
             raise InvalidTokenError("token expired")
 
         enabled = True
-        if token_type is TokenType.API_KEY:
-            enabled = await self._api_key_live(jti)
-        elif token_type is TokenType.IDP_REFRESH_TOKEN:
+        if token_type is TokenType.IDP_REFRESH_TOKEN:
             enabled = await self._idp_refresh_token_live(self._row_id(payload))
 
         return AuthToken(
@@ -232,6 +239,38 @@ class TokenService:
             expires_at=exp,
             token_type=token_type,
             scopes=_scopes_from_payload(payload),
+        )
+
+    async def authenticate_api_key(self, plaintext: str) -> AuthToken:
+        """Resolve an opaque API-key *plaintext* into an :class:`AuthToken`.
+
+        Hashes the plaintext and looks the backing ``api_keys`` row up by
+        ``api_key_hash``. Raises :class:`InvalidTokenError` if the key is
+        unknown, disabled, or past its ``expires_at``. Unlike the JWE path,
+        there is nothing to decrypt: the plaintext is the credential. Whether
+        the resolved token's lifetime is gated by a federated session is
+        decided by the auth dependency (``idp.sync_api_keys``), not here.
+        """
+        row = await self._load_api_key(plaintext)
+        if row is None:
+            raise InvalidTokenError("api key not recognized")
+        if not row.enabled:
+            raise InvalidTokenError("api key disabled")
+        if row.expires_at is not None and row.expires_at <= _now():
+            raise InvalidTokenError("api key expired")
+        user = await self._load_user(row.user_id)
+        if user is None or not user.enabled:
+            raise InvalidTokenError("user not found or disabled")
+        expires_at = row.expires_at or datetime.max.replace(tzinfo=UTC)
+        return AuthToken(
+            id=row.id,
+            user_id=row.user_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            enabled=True,
+            expires_at=expires_at,
+            token_type=TokenType.API_KEY,
+            scopes=frozenset(),
         )
 
     # ------------------------------------------------------------------ #
@@ -387,14 +426,12 @@ class TokenService:
             raise InvalidTokenError("no federated refresh token for user")
         return row
 
-    async def _api_key_live(self, jti: uuid.UUID) -> bool:
+    async def _load_api_key(self, plaintext: str) -> ApiKey | None:
+        """Look up the live ``api_keys`` row by sha256(plaintext)."""
         result = await self._session.execute(
-            select(ApiKey).where(ApiKey.jti == jti, ApiKey.enabled.is_(True))
+            select(ApiKey).where(ApiKey.api_key_hash == _hash_api_key(plaintext))
         )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return False
-        return not (row.expires_at is not None and row.expires_at <= _now())
+        return result.scalar_one_or_none()
 
     async def _idp_refresh_token_live(self, row_id: uuid.UUID) -> bool:
         row = await self._session.get(IdpRefreshToken, row_id)

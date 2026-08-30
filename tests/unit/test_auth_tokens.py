@@ -182,10 +182,13 @@ class TestApiKeys:
     async def test_create_and_authenticate_api_key(self, session) -> None:
         await _seed_user(session)
         svc = _seeded_service(session)
-        token, row = await svc.create_api_key(_TEST_USER_ID, name="ci-key")
+        plaintext, row = await svc.create_api_key(_TEST_USER_ID, name="ci-key")
         assert isinstance(row, ApiKey)
         assert row.name == "ci-key"
-        auth = await svc.authenticate(token)
+        assert row.api_key_hash  # persisted, not the plaintext
+        assert len(row.api_key_hash) == 64
+        assert row.key_prefix == plaintext[:12]
+        auth = await svc.authenticate_api_key(plaintext)
         assert auth.token_type is TokenType.API_KEY
         assert auth.user_id == _TEST_USER_ID
         assert auth.enabled is True
@@ -194,27 +197,51 @@ class TestApiKeys:
         await _seed_user(session)
         svc = _seeded_service(session)
         expires = datetime.now(UTC) + timedelta(hours=1)
-        token, _row = await svc.create_api_key(_TEST_USER_ID, expires_at=expires)
-        auth = await svc.authenticate(token)
+        plaintext, _row = await svc.create_api_key(_TEST_USER_ID, expires_at=expires)
+        auth = await svc.authenticate_api_key(plaintext)
         assert auth.enabled is True
 
     async def test_disabled_api_key_row_rejected(self, session) -> None:
         await _seed_user(session)
         svc = _seeded_service(session)
-        token, row = await svc.create_api_key(_TEST_USER_ID)
+        plaintext, row = await svc.create_api_key(_TEST_USER_ID)
         row.enabled = False
         await session.flush()
-        auth = await svc.authenticate(token)
-        assert auth.enabled is False
+        with pytest.raises(InvalidTokenError):
+            await svc.authenticate_api_key(plaintext)
 
     async def test_deleted_api_key_row_rejected(self, session) -> None:
         await _seed_user(session)
         svc = _seeded_service(session)
-        token, row = await svc.create_api_key(_TEST_USER_ID)
+        plaintext, row = await svc.create_api_key(_TEST_USER_ID)
         await session.delete(row)
         await session.flush()
-        auth = await svc.authenticate(token)
-        assert auth.enabled is False
+        with pytest.raises(InvalidTokenError):
+            await svc.authenticate_api_key(plaintext)
+
+    async def test_unknown_api_key_rejected(self, session) -> None:
+        await _seed_user(session)
+        svc = _seeded_service(session)
+        with pytest.raises(InvalidTokenError):
+            await svc.authenticate_api_key("not-a-real-key")
+
+    async def test_api_key_jwe_not_accepted_by_authenticate(self, session) -> None:
+        """A JWE claiming ttyp=api_key is not a valid credential (opaque path only)."""
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        await _seed_user(session)
+        enc = get_encryption_service()
+        bogus = enc.create_jwe_token(
+            {
+                "sub": str(_TEST_USER_ID),
+                "ttyp": TokenType.API_KEY.value,
+                "jti": str(uuid.uuid4()),
+            },
+            expires_in=timedelta(hours=1),
+        )
+        svc = _seeded_service(session)
+        with pytest.raises(InvalidTokenError):
+            await svc.authenticate(bogus)
 
 
 # --------------------------------------------------------------------------- #
@@ -253,16 +280,18 @@ class TestRefreshMinting:
 
 
 class TestBackingRows:
-    async def test_api_key_live_checks_row(self, session) -> None:
+    async def test_load_api_key_by_plaintext(self, session) -> None:
         await _seed_user(session)
         svc = _seeded_service(session)
-        _, row = await svc.create_api_key(_TEST_USER_ID)
-        assert await svc._api_key_live(row.jti) is True
+        plaintext, row = await svc.create_api_key(_TEST_USER_ID)
+        loaded = await svc._load_api_key(plaintext)
+        assert loaded is not None
+        assert loaded.id == row.id
 
-    async def test_api_key_live_false_for_missing(self, session) -> None:
+    async def test_load_api_key_false_for_missing(self, session) -> None:
         await _seed_user(session)
         svc = _seeded_service(session)
-        assert await svc._api_key_live(uuid.uuid4()) is False
+        assert await svc._load_api_key("not-a-real-key") is None
 
     async def test_idp_refresh_token_live_checks_row(self, session) -> None:
         await _seed_user(session)

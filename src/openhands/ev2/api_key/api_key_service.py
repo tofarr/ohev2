@@ -70,10 +70,12 @@ class ApiKeyService:
         # Validate scope before minting: the perm_filter is the principal's
         # create grant reduced to a row predicate. Checked in-memory so a
         # principal scoped to their own keys cannot mint one for another user.
+        # The api_key_hash is a placeholder; the real hash is minted below.
         prospective = ApiKey(
-            jti=uuid.uuid4(),  # placeholder; the real jti is minted below
+            api_key_hash="x" * 64,
             user_id=user_id,
             name=payload.name,
+            key_prefix="",
             enabled=payload.enabled,
             expires_at=payload.expires_at,
         )
@@ -168,8 +170,8 @@ class ApiKeyService:
     async def delete(self, api_key_id: uuid.UUID) -> None:
         """Delete an API key. Raises ApiKeyNotFoundError if missing or out of scope.
 
-        Deleting the row revokes the key: ``TokenService.authenticate`` rejects
-        a token whose ``jti`` has no live backing row.
+        Deleting the row revokes the key: ``TokenService.authenticate_api_key``
+        rejects a plaintext whose hash has no live backing row.
         """
         api_key = await self.get(api_key_id)
         await self._session.delete(api_key)

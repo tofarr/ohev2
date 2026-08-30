@@ -238,13 +238,13 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/user-roles", headers={"X-API-Key": token})
+        resp = await client.get("/user-roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         # Create requires UPDATE on role; ReadOnly denies it.
         resp = await client.post(
             "/user-roles",
             json={"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403
 
@@ -256,7 +256,7 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/user-roles", headers={"X-API-Key": token})
+        resp = await client.get("/user-roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
 

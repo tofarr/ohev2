@@ -51,8 +51,8 @@ class ApiKeyCreate(BaseModel):
 class ApiKeyUpdate(BaseModel):
     """Payload to partially update an API key. All fields optional.
 
-    ``jti`` and ``user_id`` are immutable: the token's identity and subject
-    cannot change after minting.
+    ``api_key_hash`` and ``user_id`` are immutable: the key's identity and
+    subject cannot change after minting.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -78,16 +78,18 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyRead(BaseModel):
     """API key representation returned by the API.
 
-    The JWE token secret is never returned here; it is surfaced only once, on
-    the single-item create response (:class:`ApiKeyCreated`).
+    Neither the plaintext key nor its hash is returned here; the plaintext is
+    surfaced only once, on the single-item create response
+    (:class:`ApiKeyCreated`). ``key_prefix`` is a short, non-sensitive slice of
+    the plaintext for UI display.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    jti: uuid.UUID
     user_id: uuid.UUID
     name: str | None
+    key_prefix: str
     enabled: bool
     expires_at: datetime | None
     created_at: datetime
@@ -95,14 +97,14 @@ class ApiKeyRead(BaseModel):
 
 
 class ApiKeyCreated(ApiKeyRead):
-    """Single-item create response carrying the one-time JWE secret.
+    """Single-item create response carrying the one-time plaintext secret.
 
-    The ``token`` is the only time the raw credential is surfaced to a client;
-    it is not stored or recoverable. Batch creates do not return tokens
-    (AGENTS.md §3 — batch write returns ``Read`` for create/update).
+    The ``token`` is the only time the raw plaintext credential is surfaced to
+    a client; it is not stored or recoverable. Batch creates do not return
+    tokens (AGENTS.md §3 — batch write returns ``Read`` for create/update).
     """
 
-    token: str = Field(description="The JWE API-key token; shown only once.")
+    token: str = Field(description="The opaque API-key plaintext; shown only once.")
 
 
 class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):

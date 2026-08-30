@@ -32,6 +32,7 @@ from openhands.ev2.auth.auth_dependencies import (
 )
 from openhands.ev2.auth.auth_models import ApiKey, AuthToken, TokenType
 from openhands.ev2.auth.auth_tokens import TokenService
+from openhands.ev2.config import get_config
 from openhands.ev2.role.role_models import Role, UserRole
 from openhands.ev2.security.security_models import (
     Action,
@@ -413,30 +414,30 @@ async def test_register_resource_policy_adds_mapping(session, user_id):
 
 
 async def test_depends_access_token_x_api_key_resolves_and_caches(session, user_id):
-    """A valid X-API-Key header token resolves to an AuthToken and is cached."""
+    """A valid opaque X-API-Key resolves to an AuthToken and is cached."""
     await _seed_user(session, user_id, "apikey-user")
-    await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    access = await service.create_access_token(user_id)
+    plaintext, _row = await service.create_api_key(user_id, name="ci")
     request = _make_request()
 
     token = await depends_access_token(
-        request, _NoopResponse(), session, x_api_key=access, bearer=None
+        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
     )
 
     assert token is not None
     assert token.user_id == user_id
+    assert token.token_type is TokenType.API_KEY
     assert token.enabled is True
     assert getattr(request.state, _ACCESS_TOKEN_KEY) is token
 
 
 async def test_depends_access_token_invalid_x_api_key_raises_401(session, user_id):
-    """A present-but-invalid X-API-Key token raises 401."""
+    """A present-but-unrecognized X-API-Key raises 401 (no JWE fallback)."""
     request = _make_request()
 
     with pytest.raises(HTTPException) as exc:
         await depends_access_token(
-            request, _NoopResponse(), session, x_api_key="not-a-jwe", bearer=None
+            request, _NoopResponse(), session, x_api_key="not-an-api-key", bearer=None
         )
 
     assert exc.value.status_code == 401
@@ -447,19 +448,24 @@ async def test_depends_access_token_x_api_key_takes_priority_over_bearer(session
     await _seed_user(session, user_id, "prio-user")
     await _seed_idp_rows(session, user_id)
     service = TokenService(session)
-    api_key_token = await service.create_access_token(user_id)
+    plaintext, _row = await service.create_api_key(user_id)
+    # A valid bearer that would resolve to a different token type; ignored.
+    bearer = await service.create_access_token(user_id)
 
     request = _make_request()
+    from fastapi.security import HTTPAuthorizationCredentials
+
     token = await depends_access_token(
         request,
         _NoopResponse(),
         session,
-        x_api_key=api_key_token,
-        bearer=None,
+        x_api_key=plaintext,
+        bearer=HTTPAuthorizationCredentials(scheme="Bearer", credentials=bearer),
     )
 
     assert token is not None
     assert token.user_id == user_id
+    assert token.token_type is TokenType.API_KEY
 
 
 async def test_depends_permissions_uses_entity_column(session, user_id):
@@ -537,3 +543,64 @@ class _NoopResponse:
 
     def set_cookie(self, key: str, value: str, **kwargs: Any) -> None:
         self.cookies[key] = value
+
+
+# ---------------------------------------------------------------------- #
+# sync_api_keys — API keys gated by a live federated session.
+# ---------------------------------------------------------------------- #
+
+
+async def test_api_key_sync_rejects_when_no_idp_session(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys on, an API key whose user has no IdP row is rejected."""
+    get_config.cache_clear()
+    monkeypatch.setenv("OHE_IDP_SYNC_API_KEYS", "true")
+    await _seed_user(session, user_id, "sync-noidp-user")
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    with pytest.raises(HTTPException) as exc:
+        await depends_access_token(
+            request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+        )
+    assert exc.value.status_code == 401
+
+
+async def test_api_key_sync_accepts_when_idp_session_live(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys on, a live (non-imminent) IdP session admits the key."""
+    get_config.cache_clear()
+    monkeypatch.setenv("OHE_IDP_SYNC_API_KEYS", "true")
+    await _seed_user(session, user_id, "sync-live-user")
+    await _seed_idp_rows(session, user_id)
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+    )
+    assert token is not None
+    assert token.user_id == user_id
+    assert token.token_type is TokenType.API_KEY
+
+
+async def test_api_key_sync_off_allows_no_idp_session(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys off (default), no IdP row is required for an API key."""
+    get_config.cache_clear()
+    monkeypatch.delenv("OHE_IDP_SYNC_API_KEYS", raising=False)
+    await _seed_user(session, user_id, "nosync-user")
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+    )
+    assert token is not None
+    assert token.user_id == user_id

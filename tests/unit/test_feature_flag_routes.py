@@ -470,13 +470,13 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/feature-flags", headers={"X-API-Key": token})
+        resp = await client.get("/feature-flags", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         # Create requires CREATE; ReadOnly denies it.
         resp = await client.post(
             "/feature-flags",
             json={"id": "RO_FLAG"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 403
 
@@ -492,12 +492,12 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/feature-flags", headers={"X-API-Key": token})
+        resp = await client.get("/feature-flags", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         resp = await client.post(
             "/feature-flags",
             json={"id": "PERM_FLAG"},
-            headers={"X-API-Key": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 201
 
@@ -514,7 +514,7 @@ class TestPermissionEnforcement:
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/feature-flag-roles", headers={"X-API-Key": token})
+        resp = await client.get("/feature-flag-roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
 
@@ -540,7 +540,9 @@ class TestGetEnabledFeatureFlags:
         await client.post("/feature-flags", json={"id": "ON_B", "enabled": True})
         await client.post("/feature-flags", json={"id": "OFF_C", "enabled": False})
 
-        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 200, resp.text
         flags = set(resp.json()["flags"])
         assert flags == {"ON_A", "ON_B"}
@@ -568,7 +570,9 @@ class TestGetEnabledFeatureFlags:
         await client.post("/feature-flags", json={"id": "GLOBAL_ON", "enabled": True})
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 200, resp.text
         flags = set(resp.json()["flags"])
         # Override flips the disabled flag on; the global one stays on too.
@@ -596,7 +600,9 @@ class TestGetEnabledFeatureFlags:
         )
 
         token_b = create_auth_token(principal_b.id)
-        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token_b})
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token_b}"}
+        )
         assert resp.status_code == 200
         assert "ONLY_FOR_A" not in resp.json()["flags"]
 
@@ -605,7 +611,9 @@ class TestGetEnabledFeatureFlags:
         await session.commit()
         token = create_auth_token(principal.id)
 
-        resp = await client.get("/feature-flags/enabled", headers={"X-API-Key": token})
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 200
         assert resp.json()["flags"] == []
 

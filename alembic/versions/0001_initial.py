@@ -13,7 +13,7 @@ legacy ``permissions`` table or its enum types.
 Tables:
 
 * ``users``                  — local users, with federated IdP subject link.
-* ``api_keys``               — revocable backing rows for API-key JWEs.
+* ``api_keys``               — revocable backing rows for opaque API keys (sha256 hash).
 * ``refresh_tokens``         — backing rows for OAuth2 refresh tokens (rotation).
 * ``idp_refresh_tokens``     — encrypted IdP refresh tokens (federated auth).
 * ``idp_access_tokens``     — encrypted IdP access tokens (1:1 with refresh).
@@ -90,9 +90,10 @@ def upgrade() -> None:
             server_default=sa.text("gen_random_uuid()"),
             nullable=False,
         ),
-        sa.Column("jti", sa.Uuid(), nullable=False),
+        sa.Column("api_key_hash", sa.String(length=64), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(), nullable=True),
+        sa.Column("key_prefix", sa.String(length=32), nullable=False, server_default=""),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
@@ -109,9 +110,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint("jti", name="uq_api_keys_jti"),
+        sa.UniqueConstraint("api_key_hash", name="uq_api_keys_api_key_hash"),
     )
-    op.create_index("ix_api_keys_jti", "api_keys", ["jti"], unique=True)
+    op.create_index("ix_api_keys_api_key_hash", "api_keys", ["api_key_hash"], unique=True)
     op.create_index("ix_api_keys_user_id", "api_keys", ["user_id"])
 
     # ------------------------------------------------------------------ #
@@ -686,7 +687,7 @@ def downgrade() -> None:
     op.drop_index("ix_refresh_tokens_jti", table_name="refresh_tokens")
     op.drop_table("refresh_tokens")
     op.drop_index("ix_api_keys_user_id", table_name="api_keys")
-    op.drop_index("ix_api_keys_jti", table_name="api_keys")
+    op.drop_index("ix_api_keys_api_key_hash", table_name="api_keys")
     op.drop_table("api_keys")
     op.drop_index("ix_users_idp_user_id", table_name="users")
     op.drop_index("ix_users_username", table_name="users")
