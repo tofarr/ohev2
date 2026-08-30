@@ -46,7 +46,7 @@ def _set_dev_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Select the built-in dev identity provider.
     monkeypatch.setenv("OHE_IDP_URL", "/auth/dev")
     monkeypatch.setenv("OHE_IDP_CLIENT_ID", "ohe")
-    monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "change-me")
+    monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "changeme")
     monkeypatch.setenv("OHE_BASE_URL", "http://test")
     monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
 
@@ -324,7 +324,7 @@ class TestDevToken:
                 "code": code,
                 "redirect_uri": _expected_callback(),
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 200, resp.text
@@ -365,7 +365,7 @@ class TestDevToken:
                 "code": code,
                 "redirect_uri": "https://evil.example.com/cb",
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 400
@@ -378,7 +378,7 @@ class TestDevToken:
                 "code": "not-a-real-code",
                 "redirect_uri": _expected_callback(),
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 400
@@ -389,7 +389,7 @@ class TestDevToken:
             data={
                 "grant_type": "password",
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 400
@@ -415,7 +415,7 @@ class TestDevRefresh:
                 "code": code,
                 "redirect_uri": _expected_callback(),
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert tok.status_code == 200, tok.text
@@ -429,7 +429,7 @@ class TestDevRefresh:
                 "grant_type": "refresh_token",
                 "refresh_token": tokens["refresh_token"],
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 200, resp.text
@@ -445,7 +445,7 @@ class TestDevRefresh:
             data={
                 "refresh_token": tokens["refresh_token"],
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 200, resp.text
@@ -471,7 +471,7 @@ class TestDevRefresh:
             data={
                 "refresh_token": "not-a-real-refresh-token",
                 "client_id": "ohe",
-                "client_secret": "change-me",
+                "client_secret": "changeme",
             },
         )
         assert resp.status_code == 400
@@ -515,7 +515,7 @@ class TestDevIdpServicePkce:
                 code=code,
                 redirect_uri=_expected_callback(),
                 client_id="ohe",
-                client_secret="change-me",
+                client_secret="changeme",
                 code_verifier=verifier,
             )
             assert resp["access_token"]
@@ -558,7 +558,7 @@ class TestDevIdpServicePkce:
                     code=code,
                     redirect_uri=_expected_callback(),
                     client_id="ohe",
-                    client_secret="change-me",
+                    client_secret="changeme",
                     code_verifier="wrong-verifier",
                 )
 

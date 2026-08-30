@@ -212,7 +212,7 @@ class TestAuthConfig:
         idp = IdpConfig()
         assert idp.url == "/auth/dev"
         assert idp.client_id == "ohe"
-        assert idp.client_secret.get_secret_value() == "change-me"
+        assert idp.client_secret.get_secret_value() == "changeme"
 
     def test_appconfig_constructs_with_only_encryption_key(self) -> None:
         """The default IdP + DB config let AppConfig load with just an encryption key."""
