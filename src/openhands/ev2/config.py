@@ -57,15 +57,15 @@ class LlmConfig(BaseModel):
     When a :class:`StoredProviderConnection` has ``enable_proxy`` set, the
     effective ``base_url`` handed to the SDK is built from
     :attr:`AppConfig.base_url` plus :attr:`completion_path` so LLM traffic is
-    routed through this service's ``POST /llm/completion/{id}`` endpoint.
+    routed through this service's ``POST /llm/completion/{llm_id}`` endpoint.
     """
 
     completion_path: str = Field(
         default="/llm/completion",
         description=(
             "Path (relative to AppConfig.base_url) of the proxy completion "
-            "endpoint. A provider connection id is appended to form the full "
-            "proxy URL handed to the SDK when enable_proxy is set."
+            "endpoint. An LLM id is appended to form the full proxy URL "
+            "handed to the SDK when enable_proxy is set."
         ),
     )
 

@@ -149,33 +149,25 @@ class TestLLMCrud:
 
 
 class TestCompletion:
-    async def test_missing_connection_returns_404(self, client: AsyncClient) -> None:
+    async def test_missing_llm_returns_404(self, client: AsyncClient) -> None:
         resp = await client.post(
             f"/llm/completion/{uuid.uuid4()}",
             json={"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]},
         )
         assert resp.status_code == 404
 
-    async def test_no_llm_returns_404(self, client: AsyncClient) -> None:
-        conn = await _create_connection(client)
-        resp = await client.post(
-            f"/llm/completion/{conn['id']}",
-            json={"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]},
-        )
-        assert resp.status_code == 404
-
     async def test_invalid_messages_returns_422(self, client: AsyncClient) -> None:
         conn = await _create_connection(client)
-        await _create_llm(client, conn["id"])
+        llm = await _create_llm(client, conn["id"])
         resp = await client.post(
-            f"/llm/completion/{conn['id']}",
+            f"/llm/completion/{llm['id']}",
             json={"messages": [{"role": "not-a-role"}]},
         )
         assert resp.status_code == 422
 
     async def test_completion_proxies_to_sdk(self, client: AsyncClient) -> None:
         conn = await _create_connection(client)
-        await _create_llm(client, conn["id"])
+        llm = await _create_llm(client, conn["id"])
 
         from unittest.mock import MagicMock
 
@@ -198,7 +190,7 @@ class TestCompletion:
             new=_fake_acompletion,
         ):
             resp = await client.post(
-                f"/llm/completion/{conn['id']}",
+                f"/llm/completion/{llm['id']}",
                 json={
                     "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                 },

@@ -3,9 +3,9 @@
 Uniform REST surface (AGENTS.md §3): the collections are
 ``/provider-connections`` and ``/llms`` with cursor pagination; create is
 ``POST``, retrieve is ``GET``, update is ``PATCH``, remove is ``DELETE``.
-A ``POST /llm/completion/{provider_connection_id}`` action endpoint proxies a
-completion request through a stored LLM, sourcing credentials from the named
-provider connection.
+A ``POST /llm/completion/{llm_id}`` action endpoint proxies a completion
+request through a stored LLM profile, inferring the provider connection from
+the LLM.
 
 The ``api_key`` on a provider connection is write-only: it appears in
 ``ProviderConnectionCreate``/``ProviderConnectionUpdate`` (plaintext over the
@@ -313,19 +313,17 @@ class LLMBatchWriteRequest(BaseModel):
 
 
 class CompletionRequest(BaseModel):
-    """Body for ``POST /llm/completion/{provider_connection_id}``.
+    """Body for ``POST /llm/completion/{llm_id}``.
+
+    The LLM profile to run is named by the path ``llm_id`` (the ``USE``
+    permission is checked on that LLM). The provider connection is inferred
+    from the LLM and used only to source credentials.
 
     ``messages`` are OpenHands SDK :class:`Message` dicts (role + content).
-    ``llm_id`` selects which stored LLM profile to run; when omitted the
-    request runs against the first LLM profile owned by the principal that
-    points at the named provider connection. Any ``params`` are forwarded as
-    overrides to the SDK :class:`LLM.completion` call.
+    Any ``params`` are forwarded as overrides to the SDK :class:`LLM.completion`
+    call.
     """
 
-    llm_id: uuid.UUID | None = Field(
-        default=None,
-        description="Stored LLM id to use; omitted = first LLM on the connection.",
-    )
     messages: list[dict[str, Any]] = Field(
         min_length=1,
         description="OpenHands SDK Message dicts (role + content).",
