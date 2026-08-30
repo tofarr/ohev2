@@ -400,14 +400,10 @@ class TestAttributeFilter:
         assert f_gt.matches(user_old) is False
         assert f_gt.matches(user_new) is True
 
-        f_lte = AttributeFilter[User](
-            attribute="created_at", value=cutoff, condition=Condition.LTE
-        )
+        f_lte = AttributeFilter[User](attribute="created_at", value=cutoff, condition=Condition.LTE)
         assert f_lte.matches(user_old) is True
 
-        f_gte = AttributeFilter[User](
-            attribute="created_at", value=cutoff, condition=Condition.GTE
-        )
+        f_gte = AttributeFilter[User](attribute="created_at", value=cutoff, condition=Condition.GTE)
         assert f_gte.matches(user_new) is True
 
     def test_sql_condition_requires_entity(self) -> None:
