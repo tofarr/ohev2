@@ -92,7 +92,7 @@ class IdpConfig(BaseModel):
         description="Client id registered at the identity provider.",
     )
     client_secret: SecretStr = Field(
-        default=SecretStr("change-me"),
+        default=SecretStr("changeme"),
         description="Client secret registered at the identity provider.",
     )
     expire_drift_tolerance: int = Field(
