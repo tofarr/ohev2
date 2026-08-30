@@ -18,12 +18,18 @@ from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import UserCreate, UserSearchFilter
 from openhands.ev2.user.user_service import UserService
 from openhands.ev2.util.search_filter import (
+    ALL,
+    NONE,
     AllSearchFilter,
     AndSearchFilter,
+    AttributeFilter,
     BaseSearchFilter,
+    Condition,
     NoneSearchFilter,
     OrSearchFilter,
     SearchFilter,
+    and_filter,
+    or_filter,
 )
 
 
@@ -341,3 +347,202 @@ class TestCompositeFilters:
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
         assert len(rows) == 2
+
+
+class TestSingletons:
+    """ALL and NONE are module-level singletons."""
+
+    def test_all_is_singleton(self) -> None:
+        assert ALL is ALL
+        assert isinstance(ALL, AllSearchFilter)
+
+    def test_none_is_singleton(self) -> None:
+        assert NONE is NONE
+        assert isinstance(NONE, NoneSearchFilter)
+
+    def test_all_matches_everything(self) -> None:
+        assert ALL.matches(new_user("a@x.com")) is True
+
+    def test_none_matches_nothing(self) -> None:
+        assert NONE.matches(new_user("a@x.com")) is False
+
+
+class TestAttributeFilter:
+    """Generic runtime-specified attribute filter."""
+
+    def test_eq_condition(self) -> None:
+        f = AttributeFilter[User](attribute="email", value="alice@x.com", condition=Condition.EQ)
+        assert f.matches(new_user("alice@x.com")) is True
+        assert f.matches(new_user("bob@x.com")) is False
+
+    def test_ne_condition(self) -> None:
+        f = AttributeFilter[User](attribute="email", value="alice@x.com", condition=Condition.NE)
+        assert f.matches(new_user("alice@x.com")) is False
+        assert f.matches(new_user("bob@x.com")) is True
+
+    def test_contains_condition(self) -> None:
+        f = AttributeFilter[User](attribute="email", value="alice", condition=Condition.CONTAINS)
+        assert f.matches(new_user("alice@x.com")) is True
+        assert f.matches(new_user("bob@x.com")) is False
+
+    def test_comparison_conditions(self) -> None:
+        user_old = new_user("old@x.com")
+        user_old.created_at = datetime(2020, 1, 1)
+        user_new = new_user("new@x.com")
+        user_new.created_at = datetime(2025, 1, 1)
+        cutoff = datetime(2023, 1, 1)
+
+        f_lt = AttributeFilter[User](attribute="created_at", value=cutoff, condition=Condition.LT)
+        assert f_lt.matches(user_old) is True
+        assert f_lt.matches(user_new) is False
+
+        f_gt = AttributeFilter[User](attribute="created_at", value=cutoff, condition=Condition.GT)
+        assert f_gt.matches(user_old) is False
+        assert f_gt.matches(user_new) is True
+
+        f_lte = AttributeFilter[User](
+            attribute="created_at", value=cutoff, condition=Condition.LTE
+        )
+        assert f_lte.matches(user_old) is True
+
+        f_gte = AttributeFilter[User](
+            attribute="created_at", value=cutoff, condition=Condition.GTE
+        )
+        assert f_gte.matches(user_new) is True
+
+    def test_sql_condition_requires_entity(self) -> None:
+        # Unparameterized AttributeFilter cannot produce SQL.
+        f = AttributeFilter(attribute="email", value="x", condition=Condition.EQ)
+        with pytest.raises(TypeError, match="not parameterized"):
+            f.sql_condition()
+
+    def test_sql_condition_for_parameterized_filter(self) -> None:
+        f = AttributeFilter[User](attribute="email", value="alice@x.com", condition=Condition.EQ)
+        cond = f.sql_condition()
+        assert cond is not None
+        compiled = str(cond)
+        assert "email" in compiled.lower()
+
+
+class TestNeOperator:
+    """Tests for the ne (not equals) operator in BaseSearchFilter."""
+
+    def test_ne_in_base_filter(self) -> None:
+        # Add an ne field dynamically for testing.
+        class UserFilterWithNe(BaseSearchFilter[User]):
+            enabled__ne: bool | None = None
+
+        user_enabled = new_user("a@x.com")
+        user_enabled.enabled = True
+        user_disabled = new_user("b@x.com")
+        user_disabled.enabled = False
+
+        f = UserFilterWithNe(enabled__ne=True)
+        assert f.matches(user_enabled) is False
+        assert f.matches(user_disabled) is True
+
+    def test_ne_sql_condition(self) -> None:
+        class UserFilterWithNe(BaseSearchFilter[User]):
+            enabled__ne: bool | None = None
+
+        f = UserFilterWithNe(enabled__ne=True)
+        cond = f.sql_condition()
+        assert cond is not None
+        compiled = str(cond)
+        assert "!=" in compiled or "<>" in compiled or "NOT" in compiled.upper()
+
+
+class TestFactoryFunctions:
+    """and_filter() and or_filter() normalize composite filters."""
+
+    # --- and_filter tests ---
+
+    def test_and_filter_empty_returns_all(self) -> None:
+        result = and_filter()
+        assert result is ALL
+
+    def test_and_filter_single_returns_unwrapped(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = and_filter(f)
+        assert result is f
+
+    def test_and_filter_with_none_returns_none(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = and_filter(f, NONE)
+        assert result is NONE
+
+    def test_and_filter_with_all_skips_all(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = and_filter(f, ALL)
+        assert result is f  # Unwrapped singleton
+
+    def test_and_filter_flattens_nested_and(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="example")
+        nested = AndSearchFilter[User](filters=[f1, f2])
+        f3 = UserSearchFilter(email__contains="com")
+        result = and_filter(nested, f3)
+        assert isinstance(result, AndSearchFilter)
+        # Should be flattened to 3 children, not nested.
+        assert len(result.filters) == 3
+
+    def test_and_filter_with_none_in_nested_returns_none(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        nested = AndSearchFilter[User](filters=[f, NONE])
+        result = and_filter(nested)
+        assert result is NONE
+
+    # --- or_filter tests ---
+
+    def test_or_filter_empty_returns_none(self) -> None:
+        result = or_filter()
+        assert result is NONE
+
+    def test_or_filter_single_returns_unwrapped(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = or_filter(f)
+        assert result is f
+
+    def test_or_filter_with_all_returns_all(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = or_filter(f, ALL)
+        assert result is ALL
+
+    def test_or_filter_with_none_skips_none(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        result = or_filter(f, NONE)
+        assert result is f  # Unwrapped singleton
+
+    def test_or_filter_flattens_nested_or(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="bob")
+        nested = OrSearchFilter[User](filters=[f1, f2])
+        f3 = UserSearchFilter(email__contains="carol")
+        result = or_filter(nested, f3)
+        assert isinstance(result, OrSearchFilter)
+        # Should be flattened to 3 children, not nested.
+        assert len(result.filters) == 3
+
+    def test_or_filter_with_all_in_nested_returns_all(self) -> None:
+        f = UserSearchFilter(email__contains="alice")
+        nested = OrSearchFilter[User](filters=[f, ALL])
+        result = or_filter(nested)
+        assert result is ALL
+
+    # --- Semantic correctness ---
+
+    def test_and_filter_semantics_match(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="example")
+        combined = and_filter(f1, f2)
+        user = new_user("alice@example.com")
+        assert combined.matches(user) is True
+        assert combined.matches(new_user("bob@example.com")) is False
+
+    def test_or_filter_semantics_match(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="bob")
+        combined = or_filter(f1, f2)
+        assert combined.matches(new_user("alice@x.com")) is True
+        assert combined.matches(new_user("bob@x.com")) is True
+        assert combined.matches(new_user("carol@x.com")) is False

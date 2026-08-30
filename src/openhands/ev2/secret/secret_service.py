@@ -33,7 +33,7 @@ from openhands.ev2.secret.secret_schemas import (
     SecretUpdate,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
 class SecretNotFoundError(Exception):
@@ -63,7 +63,7 @@ class SecretService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[Secret] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[Secret] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
     ) -> None:

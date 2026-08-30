@@ -30,7 +30,7 @@ from openhands.ev2.api_key.api_key_schemas import (
 from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_tokens import TokenService
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL_SEARCH_FILTER, SearchFilter
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
 class ApiKeyNotFoundError(Exception):
@@ -55,7 +55,7 @@ class ApiKeyService:
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[ApiKey] = ALL_SEARCH_FILTER,
+        perm_filter: SearchFilter[ApiKey] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter

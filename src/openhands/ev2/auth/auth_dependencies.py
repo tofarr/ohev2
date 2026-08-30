@@ -42,7 +42,7 @@ from openhands.ev2.db import SessionDep
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.security.security_models import Action, Permission
 from openhands.ev2.util.search_filter import (
-    ALL_SEARCH_FILTER,
+    ALL,
     AllSearchFilter,
     NoneSearchFilter,
     OrSearchFilter,
@@ -662,7 +662,7 @@ UserId = Annotated[uuid.UUID | None, Depends(depends_user_id)]
 
 
 __all__ = [
-    "ALL_SEARCH_FILTER",
+    "ALL",
     "AccessToken",
     "AllSearchFilter",
     "NoneSearchFilter",
