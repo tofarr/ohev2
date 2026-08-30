@@ -187,6 +187,18 @@ class IdpConfig(BaseModel):
             "error so the client can retry / re-authenticate."
         ),
     )
+    # Whether API-key authentication is gated by a live federated session.
+    sync_api_keys: bool = Field(
+        default=False,
+        description=(
+            "When true, an API key presented via X-API-Key is only accepted if "
+            "the user has a live IdP access/refresh token pair; if that pair is "
+            "imminent/expired the dependency refreshes it server-side exactly as "
+            "the cookie flow does (no cookie is re-minted). When false (default) "
+            "API keys are long-lived, user-managed service credentials whose "
+            "lifetime is independent of any federated session."
+        ),
+    )
     # Background cleanup of expired IdP refresh tokens.
     delete_expired_seconds: int = Field(
         default=86_400,

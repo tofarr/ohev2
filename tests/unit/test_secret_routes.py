@@ -148,7 +148,9 @@ class TestSecretAccessPolicy:
         await session.commit()
         token = create_auth_token(principal.id)
         resp = await client.post(
-            "/secrets", json=_create_payload("SA_CREATE"), headers={"X-API-Key": token}
+            "/secrets",
+            json=_create_payload("SA_CREATE"),
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 201, resp.text
 
@@ -160,7 +162,7 @@ class TestSecretAccessPolicy:
         await _assign_role(session, principal.id, {"secret_permission": SecretAccess()})
         await session.commit()
         token = create_auth_token(principal.id)
-        resp = await client.get(f"/secrets/{sid}", headers={"X-API-Key": token})
+        resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 404
 
     async def test_read_allowed_with_grant(self, client: AsyncClient, session) -> None:
@@ -177,6 +179,6 @@ class TestSecretAccessPolicy:
         )
         assert grant.status_code == 201, grant.text
         token = create_auth_token(principal.id)
-        resp = await client.get(f"/secrets/{sid}", headers={"X-API-Key": token})
+        resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         assert resp.json()["value"] == "hunter2"

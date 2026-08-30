@@ -191,8 +191,9 @@ async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncCl
     """An async HTTP client authenticated as the test principal.
 
     Mints a JWE cookie token for the seeded test user and sends it via the
-    X-API-Key header (the highest-priority auth source) so permission
-    dependencies see a real principal.
+    ``Authorization: Bearer`` header (the cookie/ACCESS_TOKEN JWE path) so
+    permission dependencies see a real principal. The ``X-API-Key`` header is
+    reserved for opaque API keys and is not used by the default test client.
     """
     from openhands.ev2.util.auth_token import create_auth_token
 
@@ -202,7 +203,7 @@ async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncCl
     async with AsyncClient(
         transport=transport,
         base_url="http://test",
-        headers={"X-API-Key": token},
+        headers={"Authorization": f"Bearer {token}"},
     ) as ac:
         yield ac
 

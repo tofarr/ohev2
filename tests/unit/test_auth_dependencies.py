@@ -32,6 +32,7 @@ from openhands.ev2.auth.auth_dependencies import (
 )
 from openhands.ev2.auth.auth_models import ApiKey, AuthToken, TokenType
 from openhands.ev2.auth.auth_tokens import TokenService
+from openhands.ev2.config import get_config
 from openhands.ev2.role.role_models import Role, UserRole
 from openhands.ev2.security.security_models import (
     Action,
@@ -537,3 +538,64 @@ class _NoopResponse:
 
     def set_cookie(self, key: str, value: str, **kwargs: Any) -> None:
         self.cookies[key] = value
+
+
+# ---------------------------------------------------------------------- #
+# sync_api_keys — API keys gated by a live federated session.
+# ---------------------------------------------------------------------- #
+
+
+async def test_api_key_sync_rejects_when_no_idp_session(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys on, an API key whose user has no IdP row is rejected."""
+    get_config.cache_clear()
+    monkeypatch.setenv("OHE_IDP_SYNC_API_KEYS", "true")
+    await _seed_user(session, user_id, "sync-noidp-user")
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    with pytest.raises(HTTPException) as exc:
+        await depends_access_token(
+            request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+        )
+    assert exc.value.status_code == 401
+
+
+async def test_api_key_sync_accepts_when_idp_session_live(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys on, a live (non-imminent) IdP session admits the key."""
+    get_config.cache_clear()
+    monkeypatch.setenv("OHE_IDP_SYNC_API_KEYS", "true")
+    await _seed_user(session, user_id, "sync-live-user")
+    await _seed_idp_rows(session, user_id)
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+    )
+    assert token is not None
+    assert token.user_id == user_id
+    assert token.token_type is TokenType.API_KEY
+
+
+async def test_api_key_sync_off_allows_no_idp_session(
+    session, user_id, monkeypatch: pytest.MonkeyPatch
+):
+    """With sync_api_keys off (default), no IdP row is required for an API key."""
+    get_config.cache_clear()
+    monkeypatch.delenv("OHE_IDP_SYNC_API_KEYS", raising=False)
+    await _seed_user(session, user_id, "nosync-user")
+    service = TokenService(session)
+    plaintext, _row = await service.create_api_key(user_id)
+
+    request = _make_request()
+    token = await depends_access_token(
+        request, _NoopResponse(), session, x_api_key=plaintext, bearer=None
+    )
+    assert token is not None
+    assert token.user_id == user_id
