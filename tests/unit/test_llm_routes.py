@@ -6,6 +6,10 @@ import uuid
 from unittest.mock import patch
 
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from openhands.ev2.llm.llm_models import LlmUsage
 
 
 def _conn_payload(**overrides) -> dict:
@@ -165,8 +169,16 @@ class TestCompletion:
         )
         assert resp.status_code == 422
 
-    async def test_completion_proxies_to_sdk(self, client: AsyncClient) -> None:
-        conn = await _create_connection(client)
+    async def test_completion_proxies_to_sdk(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ) -> None:
+        conn = await _create_connection(
+            client,
+            enable_proxy=True,
+            base_url="https://real.example.com",
+        )
         llm = await _create_llm(client, conn["id"])
 
         from unittest.mock import MagicMock
@@ -175,7 +187,15 @@ class TestCompletion:
         fake_message = MagicMock()
         fake_message.model_dump.return_value = {"role": "assistant", "content": []}
         fake_metrics = MagicMock()
-        fake_metrics.model_dump.return_value = {"tokens": 1}
+        fake_metrics.model_name = "gpt-4o"
+        fake_metrics.model_dump.return_value = {
+            "model_name": "gpt-4o",
+            "accumulated_cost": 0.1,
+            "accumulated_token_usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 5,
+            },
+        }
 
         fake_response = MagicMock()
         fake_response.id = "resp-123"
@@ -183,6 +203,7 @@ class TestCompletion:
         fake_response.metrics = fake_metrics
 
         async def _fake_acompletion(self, messages, tools=None, **kwargs):
+            assert self.base_url == "https://real.example.com"
             return fake_response
 
         with patch(
@@ -197,8 +218,66 @@ class TestCompletion:
             )
         assert resp.status_code == 200, resp.text
         body = resp.json()
+        usage = (await session.execute(select(LlmUsage))).scalar_one()
+        assert usage.llm_id == uuid.UUID(llm["id"])
+        assert usage.provider_connection_id == uuid.UUID(conn["id"])
+        assert usage.response_id == "resp-123"
+        assert usage.model == "gpt-4o"
+        assert usage.prompt_tokens == 3
+        assert usage.completion_tokens == 5
+
         assert body["id"] == "resp-123"
         fake_message.model_dump.assert_called_once()
+
+    async def test_completion_streams_chunks_and_records_usage(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ) -> None:
+        conn = await _create_connection(client, base_url="https://real.example.com")
+        llm = await _create_llm(client, conn["id"])
+
+        from unittest.mock import MagicMock
+
+        fake_message = MagicMock()
+        fake_message.model_dump.return_value = {"role": "assistant", "content": []}
+        fake_metrics = MagicMock()
+        fake_metrics.model_name = "gpt-4o"
+        fake_metrics.model_dump.return_value = {
+            "model_name": "gpt-4o",
+            "accumulated_cost": 0.2,
+            "accumulated_token_usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        }
+        fake_response = MagicMock()
+        fake_response.id = "resp-stream"
+        fake_response.message = fake_message
+        fake_response.metrics = fake_metrics
+
+        async def _fake_acompletion(self, messages, tools=None, on_token=None, **kwargs):
+            assert kwargs["stream"] is True
+            assert on_token is not None
+            await on_token({"choices": [{"delta": {"content": "hi"}}]})
+            return fake_response
+
+        with patch("openhands.sdk.llm.llm.LLM.acompletion", new=_fake_acompletion):
+            async with client.stream(
+                "POST",
+                f"/llm/completion/{llm['id']}",
+                json={
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                    "params": {"stream": True},
+                },
+            ) as resp:
+                body = await resp.aread()
+
+        assert resp.status_code == 200, body
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert b'"content": "hi"' in body
+        assert b"data: [DONE]" in body
+        usage = (await session.execute(select(LlmUsage))).scalar_one()
+        assert usage.response_id == "resp-stream"
+        assert usage.prompt_tokens == 2
+        assert usage.completion_tokens == 1
 
 
 # ====================================================================== #

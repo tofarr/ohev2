@@ -5,9 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import make_principal
 
+from openhands.ev2.config import AppConfig, EncryptionKeyConfig
 from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection
 from openhands.ev2.llm.llm_schemas import (
     LLMCreate,
@@ -212,6 +214,9 @@ class TestLLMService:
         # enable_proxy -> base_url is the proxy URL, keyed on the LLM id.
         assert str(llm.id) in sdk_llm.base_url
 
+        direct_llm = await llm_service.materialize_llm(llm, use_proxy=False)
+        assert direct_llm.base_url == "https://real.example.com"
+
     async def test_connection_for_llm(
         self,
         conn_service: ProviderConnectionService,
@@ -250,5 +255,9 @@ class TestLLMService:
 
 class TestProxyUrl:
     def test_built_from_config(self) -> None:
-        url = proxy_url_for(uuid.UUID("00000000-0000-0000-0000-000000000000"))
+        config = AppConfig(encryption_key=EncryptionKeyConfig(value=SecretStr("x" * 32)))
+        url = proxy_url_for(
+            uuid.UUID("00000000-0000-0000-0000-000000000000"),
+            config=config,
+        )
         assert url.endswith("/llm/completion/00000000-0000-0000-0000-000000000000")

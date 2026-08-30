@@ -115,14 +115,14 @@ class StoredProviderConnection(Base):
         enc: EncryptionService,
         *,
         proxy_url: str | None = None,
+        use_proxy: bool = True,
     ) -> ProviderConnection:
         """Materialize the SDK :class:`ProviderConnection` for this row.
 
         ``api_key`` is decrypted via *enc* (returns ``None`` when unset). When
-        ``enable_proxy`` is ``True`` the effective ``base_url`` is *proxy_url*
-        (the caller builds it from :attr:`AppConfig.base_url`); otherwise the
-        stored ``base_url`` is used. ``id`` is stringified (the SDK type is
-        ``str``). Timestamps are emitted as Unix epoch seconds (the SDK shape).
+        ``enable_proxy`` and ``use_proxy`` are ``True`` the effective
+        ``base_url`` is *proxy_url*; otherwise the stored ``base_url`` is used.
+        ``id`` is stringified and timestamps are Unix epoch seconds.
         """
         from openhands.sdk.llm.provider_connection_store import ProviderConnection
 
@@ -130,7 +130,7 @@ class StoredProviderConnection(Base):
         if self.api_key is not None:
             api_key_plaintext = enc.decrypt_value(self.api_key)
 
-        effective_base_url = proxy_url if self.enable_proxy else self.base_url
+        effective_base_url = proxy_url if self.enable_proxy and use_proxy else self.base_url
 
         now = int(time.time())
         created = int(self.created_at.timestamp()) if self.created_at is not None else now
