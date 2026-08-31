@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import assign_role, make_principal
 
@@ -21,7 +22,10 @@ from openhands.ev2.mcp_server_config.mcp_server_config_service import (
     MCPServerConfigValidationError,
 )
 from openhands.ev2.mcp_server_config.role_mcp_server_config_permission_service import (
+    RoleMCPServerConfigPermissionConflictError,
+    RoleMCPServerConfigPermissionOrphanError,
     RoleMCPServerConfigPermissionService,
+    _classify_integrity_error,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import AllSearchFilter
@@ -78,6 +82,12 @@ class TestMCPServerConfigService:
         read = service.to_read(config)
         assert read.env == {"TOKEN": "**********"}
         assert read.auth == {"strategy": "bearer", "value": "**********"}
+
+    async def test_blank_display_name_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MCPServerConfigCreate(display_name="   ", transport="http", url="https://mcp.test")
+        with pytest.raises(ValidationError):
+            MCPServerConfigUpdate(display_name="   ")
 
     async def test_create_invalid_config_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -149,3 +159,38 @@ class TestMCPServerConfigAccess:
         assert [row.id for row in rows] == [visible.id]
         with pytest.raises(MCPServerConfigNotFoundError):
             await scoped.get(hidden.id)
+
+
+class TestRoleMCPServerConfigPermissionErrors:
+    def test_classifies_unique_constraint(self) -> None:
+        role_id = uuid.uuid4()
+        config_id = uuid.uuid4()
+        exc = IntegrityError(
+            "stmt",
+            {},
+            Exception("unique constraint role_mcp_server_config_permissions"),
+        )
+
+        result = _classify_integrity_error(exc, role_id, config_id)
+
+        assert isinstance(result, RoleMCPServerConfigPermissionConflictError)
+
+    def test_classifies_missing_mcp_config_foreign_key(self) -> None:
+        role_id = uuid.uuid4()
+        config_id = uuid.uuid4()
+        exc = IntegrityError("stmt", {}, Exception("foreign key mcp_server_config_id"))
+
+        result = _classify_integrity_error(exc, role_id, config_id)
+
+        assert isinstance(result, RoleMCPServerConfigPermissionOrphanError)
+        assert str(config_id) in str(result)
+
+    def test_classifies_missing_role_foreign_key(self) -> None:
+        role_id = uuid.uuid4()
+        config_id = uuid.uuid4()
+        exc = IntegrityError("stmt", {}, Exception("foreign key role_id"))
+
+        result = _classify_integrity_error(exc, role_id, config_id)
+
+        assert isinstance(result, RoleMCPServerConfigPermissionOrphanError)
+        assert str(role_id) in str(result)

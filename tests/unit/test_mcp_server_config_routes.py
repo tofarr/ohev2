@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from httpx import AsyncClient
 
 
@@ -64,14 +66,68 @@ class TestMCPServerConfigRoutes:
         delete_response = await client.delete(f"/mcp-server-configs/{config_id}")
         assert delete_response.status_code == 204, delete_response.text
 
-    async def test_batch_write(self, client: AsyncClient) -> None:
+    async def test_search_and_batch_limits(self, client: AsyncClient) -> None:
+        display_name = f"search-{uuid.uuid4()}"
+        create_response = await client.post(
+            "/mcp-server-configs", json=_stdio_payload(display_name)
+        )
+        assert create_response.status_code == 201, create_response.text
+        created = create_response.json()
+
+        search_response = await client.get(
+            "/mcp-server-configs",
+            params={"limit": 1, "display_name__contains": display_name},
+        )
+        assert search_response.status_code == 200, search_response.text
+        assert search_response.json()["items"][0]["id"] == created["id"]
+
+        invalid_cursor = await client.get("/mcp-server-configs", params={"cursor": "bad"})
+        assert invalid_cursor.status_code == 400
+
+        too_many_ids = await client.get(
+            "/mcp-server-configs/batch",
+            params=[("ids", str(uuid.uuid4())) for _ in range(101)],
+        )
+        assert too_many_ids.status_code == 422
+
+    async def test_batch_write_update_delete_and_not_found(self, client: AsyncClient) -> None:
         response = await client.post(
             "/mcp-server-configs/batch",
             json={"operations": [{"op": "create", "data": _stdio_payload("batch")}]},
         )
         assert response.status_code == 200, response.text
         item = response.json()["items"][0]
+        config_id = item["id"]
         assert item["display_name"] == "batch"
+
+        update_delete = await client.post(
+            "/mcp-server-configs/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": config_id, "data": {"display_name": "batched"}},
+                    {"op": "delete", "id": config_id},
+                ]
+            },
+        )
+        assert update_delete.status_code == 200, update_delete.text
+        items = update_delete.json()["items"]
+        assert items[0]["display_name"] == "batched"
+        assert items[1] is None
+
+        missing = str(uuid.uuid4())
+        missing_update = await client.post(
+            "/mcp-server-configs/batch",
+            json={"operations": [{"op": "update", "id": missing, "data": {"enabled": False}}]},
+        )
+        assert missing_update.status_code == 404
+
+    async def test_missing_config_returns_404(self, client: AsyncClient) -> None:
+        missing = str(uuid.uuid4())
+        assert (await client.get(f"/mcp-server-configs/{missing}")).status_code == 404
+        assert (
+            await client.patch(f"/mcp-server-configs/{missing}", json={"display_name": "missing"})
+        ).status_code == 404
+        assert (await client.delete(f"/mcp-server-configs/{missing}")).status_code == 404
 
     async def test_invalid_config_returns_422(self, client: AsyncClient) -> None:
         response = await client.post(
@@ -123,7 +179,7 @@ class TestRoleMCPServerConfigPermissionRoutes:
         delete_response = await client.delete(f"/role-mcp-server-config-permissions/{grant_id}")
         assert delete_response.status_code == 204, delete_response.text
 
-    async def test_batch_write(self, client: AsyncClient) -> None:
+    async def test_batch_write_update_and_delete(self, client: AsyncClient) -> None:
         config = await _create_config(client)
         role_id = await _test_admin_role_id(client)
         response = await client.post(
@@ -144,4 +200,82 @@ class TestRoleMCPServerConfigPermissionRoutes:
         )
         assert response.status_code == 200, response.text
         item = response.json()["items"][0]
+        grant_id = item["id"]
         assert item["delete_enabled"] is True
+
+        update_delete = await client.post(
+            "/role-mcp-server-config-permissions/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": grant_id, "data": {"update_enabled": True}},
+                    {"op": "delete", "id": grant_id},
+                ]
+            },
+        )
+        assert update_delete.status_code == 200, update_delete.text
+        items = update_delete.json()["items"]
+        assert items[0]["update_enabled"] is True
+        assert items[1] is None
+
+        missing = str(uuid.uuid4())
+        missing_update = await client.post(
+            "/role-mcp-server-config-permissions/batch",
+            json={"operations": [{"op": "update", "id": missing, "data": {"read_enabled": True}}]},
+        )
+        assert missing_update.status_code == 404
+
+    async def test_search_limits_conflict_orphan_and_missing(self, client: AsyncClient) -> None:
+        config = await _create_config(client)
+        role_id = await _test_admin_role_id(client)
+        payload = {
+            "role_id": role_id,
+            "mcp_server_config_id": str(config["id"]),
+            "read_enabled": True,
+            "update_enabled": True,
+            "delete_enabled": True,
+        }
+        create_response = await client.post("/role-mcp-server-config-permissions", json=payload)
+        assert create_response.status_code == 201, create_response.text
+        grant_id = create_response.json()["id"]
+
+        search_response = await client.get(
+            "/role-mcp-server-config-permissions",
+            params={"limit": 1, "role_id__eq": role_id},
+        )
+        assert search_response.status_code == 200, search_response.text
+        assert search_response.json()["items"][0]["id"] == grant_id
+
+        invalid_cursor = await client.get(
+            "/role-mcp-server-config-permissions",
+            params={"cursor": "bad"},
+        )
+        assert invalid_cursor.status_code == 400
+
+        duplicate = await client.post("/role-mcp-server-config-permissions", json=payload)
+        assert duplicate.status_code == 409
+
+        orphan = await client.post(
+            "/role-mcp-server-config-permissions",
+            json={**payload, "mcp_server_config_id": str(uuid.uuid4())},
+        )
+        assert orphan.status_code == 404
+
+        too_many_ids = await client.get(
+            "/role-mcp-server-config-permissions/batch",
+            params=[("ids", str(uuid.uuid4())) for _ in range(101)],
+        )
+        assert too_many_ids.status_code == 422
+
+        missing = str(uuid.uuid4())
+        assert (
+            await client.get(f"/role-mcp-server-config-permissions/{missing}")
+        ).status_code == 404
+        assert (
+            await client.patch(
+                f"/role-mcp-server-config-permissions/{missing}",
+                json={"read_enabled": True},
+            )
+        ).status_code == 404
+        assert (
+            await client.delete(f"/role-mcp-server-config-permissions/{missing}")
+        ).status_code == 404
