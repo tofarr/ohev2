@@ -30,12 +30,17 @@ from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
     FeatureFlagRoleAssignment,
+    FeatureFlagUserAssignment,
 )
 from openhands.ev2.llm.llm_models import (  # noqa: F401
     LlmAggregatedUsage,
     LlmUsage,
     StoredLLM,
     StoredProviderConnection,
+)
+from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: F401
+    MCPServerConfig,
+    RoleMCPServerConfigPermission,
 )
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.secret.secret_models import (  # noqa: F401
@@ -49,10 +54,11 @@ from openhands.ev2.user.user_models import User  # noqa: F401
 # Detect a running postgres socket dir set up by the dev environment; fall back
 # to the default localhost DSN used by docker-compose.
 _PGSOCK = os.environ.get("OHE_PGSOCK", "")
-_TEST_DB_URL = (
+_TEST_DB_URL = os.environ.get(
+    "OHE_TEST_DB_URL",
     f"postgresql+asyncpg://ohev@/ohev?host={_PGSOCK}"
     if _PGSOCK
-    else "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev"
+    else "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev",
 )
 
 # Default test principal — authenticated via a JWE cookie token minted in the
