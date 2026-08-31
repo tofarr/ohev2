@@ -194,6 +194,15 @@ module role {
       })
   }
 
+  run canSetFeatureFlagUserAssignmentPermission = {
+    init.then(create({ id: "r1", name: "admin", permissions: Map(), createdAt: 0, updatedAt: 0 }))
+      .then(setPermission("r1", "feature_flag_user_assignment", Permitted, 1))
+      .then(all {
+        assert(roles.exists(r => r.id == "r1" and getPermission(r, "feature_flag_user_assignment") == Permitted)),
+        roles' = roles,
+      })
+  }
+
   run missingPermissionIsDenied = {
     init.then(create({ id: "r1", name: "admin", permissions: Map(), createdAt: 0, updatedAt: 0 }))
       .then(all {

@@ -1,8 +1,8 @@
 """Service layer for the feature_flag feature.
 
 CRUD over :class:`FeatureFlag` (governed by the ``feature_flag_permission``
-role column) and :class:`FeatureFlagRoleAssignment` (the per-role override link table,
-governed by the ``feature_flag_role_assignment_permission`` role column). Services contain
+role column), :class:`FeatureFlagRoleAssignment` (the per-role override link table),
+and :class:`FeatureFlagUserAssignment` (the per-user override link table). Services contain
 business logic; the effective ``perm_filter`` is held as a field, set at
 construction, so search/update/delete SQL and create payloads are scoped to the
 principal (AGENTS.md §9 — authorization enforced in services, not just routers).
@@ -19,7 +19,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
+from openhands.ev2.feature_flag.feature_flag_models import (
+    FeatureFlag,
+    FeatureFlagRoleAssignment,
+    FeatureFlagUserAssignment,
+)
 from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagBatchCreate,
     FeatureFlagBatchDelete,
@@ -33,8 +37,17 @@ from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagRoleAssignmentSearchFilter,
     FeatureFlagSearchFilter,
     FeatureFlagUpdate,
+    FeatureFlagUserAssignmentBatchCreate,
+    FeatureFlagUserAssignmentBatchDelete,
+    FeatureFlagUserAssignmentBatchOp,
+    FeatureFlagUserAssignmentCreate,
+    FeatureFlagUserAssignmentSearchFilter,
 )
+from openhands.ev2.role.role_models import Role
+from openhands.ev2.role.role_service import RoleNotFoundError, RoleService
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.user.user_models import User
+from openhands.ev2.user.user_service import UserNotFoundError, UserService
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 # ---------------------------------------------------------------------- #
@@ -63,7 +76,19 @@ class FeatureFlagRoleAssignmentConflictError(Exception):
 
 
 class FeatureFlagRoleAssignmentOrphanError(Exception):
-    """Raised when the referenced feature flag or role does not exist."""
+    """Raised when the referenced feature flag or role does not exist or is unreadable."""
+
+
+class FeatureFlagUserAssignmentNotFoundError(Exception):
+    """Raised when a feature-flag user override id does not exist."""
+
+
+class FeatureFlagUserAssignmentConflictError(Exception):
+    """Raised when an override already exists for the (feature_flag_id, user_id) pair."""
+
+
+class FeatureFlagUserAssignmentOrphanError(Exception):
+    """Raised when the referenced feature flag or user does not exist or is unreadable."""
 
 
 class BatchPermissionDeniedError(Exception):
@@ -178,7 +203,7 @@ class FeatureFlagService:
         return flag
 
     async def delete(self, flag_id: str) -> None:
-        """Delete a feature flag. Cascades to its role overrides.
+        """Delete a feature flag. Cascades to role and user overrides.
 
         Raises :class:`FeatureFlagNotFoundError` if missing or out of scope.
         """
@@ -196,27 +221,40 @@ class FeatureFlagService:
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 
-    async def enabled_for_roles(self, role_ids: list[uuid.UUID]) -> list[str]:
-        """Ids of feature flags enabled for a principal holding *role_ids*.
+    async def enabled_for_roles(
+        self,
+        role_ids: list[uuid.UUID],
+        *,
+        user_id: uuid.UUID | None = None,
+    ) -> list[str]:
+        """Ids of feature flags enabled for a principal.
 
-        A flag is enabled for the principal when it is globally enabled OR when
-        the principal holds a role with an override row for that flag (the
-        override forces the flag on regardless of the global ``enabled`` value).
-        Not scoped by ``perm_filter``: every authenticated user may see which
-        flags are on for them.
+        A flag is enabled when globally enabled, assigned to any held role, or
+        assigned directly to the principal's user id. Not scoped by
+        ``perm_filter``: every authenticated user may see which flags are on for
+        them.
         """
-        globally_enabled = self._perm_filter.filter_sql(
+        stmt = self._perm_filter.filter_sql(
             select(FeatureFlag.id).where(FeatureFlag.enabled.is_(True))
         )
-        if not role_ids:
-            result = await self._session.execute(globally_enabled)
-            return [row[0] for row in result.all()]
-        overridden = select(FeatureFlagRoleAssignment.feature_flag_id).where(
-            FeatureFlagRoleAssignment.role_id.in_(role_ids)
-        )
-        stmt = globally_enabled.union(overridden)
         result = await self._session.execute(stmt)
-        return [row[0] for row in result.all()]
+        flag_ids = {row[0] for row in result.all()}
+
+        if role_ids:
+            role_stmt = select(FeatureFlagRoleAssignment.feature_flag_id).where(
+                FeatureFlagRoleAssignment.role_id.in_(role_ids)
+            )
+            result = await self._session.execute(role_stmt)
+            flag_ids.update(row[0] for row in result.all())
+
+        if user_id is not None:
+            user_stmt = select(FeatureFlagUserAssignment.feature_flag_id).where(
+                FeatureFlagUserAssignment.user_id == user_id
+            )
+            result = await self._session.execute(user_stmt)
+            flag_ids.update(row[0] for row in result.all())
+
+        return sorted(flag_ids)
 
     async def apply_batch(
         self,
@@ -284,6 +322,46 @@ def _classify_flag_integrity_error(exc: IntegrityError, flag_id: str) -> Excepti
     return FeatureFlagConflictError(flag_id)
 
 
+async def _ensure_feature_flag_readable(
+    session: AsyncSession,
+    feature_flag_id: str,
+    read_filter: SearchFilter[FeatureFlag] | None,
+    error_type: type[Exception],
+) -> None:
+    if read_filter is None:
+        return
+    try:
+        await FeatureFlagService(session, read_filter).get(feature_flag_id)
+    except FeatureFlagNotFoundError as exc:
+        raise error_type(f"feature flag {feature_flag_id} does not exist") from exc
+
+
+async def _ensure_role_readable(
+    session: AsyncSession,
+    role_id: uuid.UUID,
+    read_filter: SearchFilter[Role] | None,
+) -> None:
+    if read_filter is None:
+        return
+    try:
+        await RoleService(session, read_filter).get(role_id)
+    except RoleNotFoundError as exc:
+        raise FeatureFlagRoleAssignmentOrphanError(f"role {role_id} does not exist") from exc
+
+
+async def _ensure_user_readable(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    read_filter: SearchFilter[User] | None,
+) -> None:
+    if read_filter is None:
+        return
+    try:
+        await UserService(session, read_filter).get(user_id)
+    except UserNotFoundError as exc:
+        raise FeatureFlagUserAssignmentOrphanError(f"user {user_id} does not exist") from exc
+
+
 # ---------------------------------------------------------------------- #
 # Feature flag role override service
 # ---------------------------------------------------------------------- #
@@ -306,14 +384,27 @@ class FeatureFlagRoleAssignmentService:
         self._session = session
         self._perm_filter = perm_filter
 
-    async def create(self, payload: FeatureFlagRoleAssignmentCreate) -> FeatureFlagRoleAssignment:
+    async def create(
+        self,
+        payload: FeatureFlagRoleAssignmentCreate,
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None = None,
+        role_read_filter: SearchFilter[Role] | None = None,
+    ) -> FeatureFlagRoleAssignment:
         """Attach a role override to a feature flag.
 
         Raises :class:`FeatureFlagRoleAssignmentConflictError` on a duplicate
         ``(feature_flag_id, role_id)`` pair, and
         :class:`FeatureFlagRoleAssignmentOrphanError` if the feature flag or role does
-        not exist.
+        not exist or is not readable by the principal.
         """
+        await _ensure_feature_flag_readable(
+            self._session,
+            payload.feature_flag_id,
+            feature_flag_read_filter,
+            FeatureFlagRoleAssignmentOrphanError,
+        )
+        await _ensure_role_readable(self._session, payload.role_id, role_read_filter)
         link = FeatureFlagRoleAssignment(
             feature_flag_id=payload.feature_flag_id,
             role_id=payload.role_id,
@@ -415,6 +506,9 @@ class FeatureFlagRoleAssignmentService:
         self,
         operations: list[FeatureFlagRoleAssignmentBatchOp],
         perm_filters: dict[Action, SearchFilter[FeatureFlagRoleAssignment] | None],
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None = None,
+        role_read_filter: SearchFilter[Role] | None = None,
     ) -> list[FeatureFlagRoleAssignment | None]:
         """Apply a mix of create/delete operations in one transaction.
 
@@ -428,7 +522,14 @@ class FeatureFlagRoleAssignmentService:
         results: list[FeatureFlagRoleAssignment | None] = []
         for op in operations:
             if isinstance(op, FeatureFlagRoleAssignmentBatchCreate):
-                results.append(await self._batch_create(op, perm_filters))
+                results.append(
+                    await self._batch_create(
+                        op,
+                        perm_filters,
+                        feature_flag_read_filter=feature_flag_read_filter,
+                        role_read_filter=role_read_filter,
+                    )
+                )
             elif isinstance(op, FeatureFlagRoleAssignmentBatchDelete):
                 await self._batch_delete(op, perm_filters)
                 results.append(None)
@@ -438,11 +539,22 @@ class FeatureFlagRoleAssignmentService:
         self,
         op: FeatureFlagRoleAssignmentBatchCreate,
         perm_filters: dict[Action, SearchFilter[FeatureFlagRoleAssignment] | None],
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None,
+        role_read_filter: SearchFilter[Role] | None,
     ) -> FeatureFlagRoleAssignment:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
-        return await FeatureFlagRoleAssignmentService(self._session, filt).create(op.data)
+        if feature_flag_read_filter is None:
+            raise BatchPermissionDeniedError("read feature_flag")
+        if role_read_filter is None:
+            raise BatchPermissionDeniedError("read role")
+        return await FeatureFlagRoleAssignmentService(self._session, filt).create(
+            op.data,
+            feature_flag_read_filter=feature_flag_read_filter,
+            role_read_filter=role_read_filter,
+        )
 
     async def _batch_delete(
         self,
@@ -484,6 +596,196 @@ def _classify_override_integrity_error(
     return FeatureFlagRoleAssignmentConflictError(f"{feature_flag_id}/{role_id}")
 
 
+# ---------------------------------------------------------------------- #
+# Feature flag user override service
+# ---------------------------------------------------------------------- #
+
+
+class FeatureFlagUserAssignmentService:
+    """CRUD over the ``feature_flag_user_assignments`` link table."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        perm_filter: SearchFilter[FeatureFlagUserAssignment] = ALL,
+    ) -> None:
+        self._session = session
+        self._perm_filter = perm_filter
+
+    async def create(
+        self,
+        payload: FeatureFlagUserAssignmentCreate,
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None = None,
+        user_read_filter: SearchFilter[User] | None = None,
+    ) -> FeatureFlagUserAssignment:
+        """Attach a user override to a feature flag."""
+        await _ensure_feature_flag_readable(
+            self._session,
+            payload.feature_flag_id,
+            feature_flag_read_filter,
+            FeatureFlagUserAssignmentOrphanError,
+        )
+        await _ensure_user_readable(self._session, payload.user_id, user_read_filter)
+        link = FeatureFlagUserAssignment(
+            feature_flag_id=payload.feature_flag_id,
+            user_id=payload.user_id,
+        )
+        if not self._perm_filter.matches(link):
+            raise FeatureFlagUserAssignmentOrphanError(str(payload.feature_flag_id))
+        self._session.add(link)
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise _classify_user_assignment_integrity_error(
+                exc, payload.feature_flag_id, payload.user_id
+            ) from exc
+        await self._session.refresh(link)
+        return link
+
+    async def get(self, override_id: uuid.UUID) -> FeatureFlagUserAssignment:
+        """Retrieve a user override by id, scoped by ``perm_filter``."""
+        stmt = self._perm_filter.filter_sql(
+            select(FeatureFlagUserAssignment).where(FeatureFlagUserAssignment.id == override_id)
+        )
+        result = await self._session.execute(stmt)
+        link = result.scalar_one_or_none()
+        if link is None:
+            raise FeatureFlagUserAssignmentNotFoundError(str(override_id))
+        return link
+
+    async def get_many(
+        self, override_ids: list[uuid.UUID]
+    ) -> list[FeatureFlagUserAssignment | None]:
+        """Retrieve user overrides by ids in a single query, scoped by ``perm_filter``."""
+        if not override_ids:
+            return []
+        stmt = self._perm_filter.filter_sql(
+            select(FeatureFlagUserAssignment).where(FeatureFlagUserAssignment.id.in_(override_ids))
+        )
+        result = await self._session.execute(stmt)
+        by_id: dict[uuid.UUID, FeatureFlagUserAssignment] = {
+            link.id: link for link in result.scalars().all()
+        }
+        return [by_id.get(oid) for oid in override_ids]
+
+    async def search(
+        self,
+        *,
+        cursor: uuid.UUID | None = None,
+        limit: int = 50,
+        search_filter: FeatureFlagUserAssignmentSearchFilter | None = None,
+    ) -> tuple[list[FeatureFlagUserAssignment], uuid.UUID | None]:
+        """Search user overrides ordered by id, keyed-pagination via cursor."""
+        stmt = self._perm_filter.filter_sql(
+            select(FeatureFlagUserAssignment).order_by(FeatureFlagUserAssignment.id)
+        )
+        if search_filter is not None:
+            stmt = search_filter.filter_sql(stmt)
+        if cursor is not None:
+            stmt = stmt.where(FeatureFlagUserAssignment.id > cursor)
+        stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        links = list(result.scalars().all())
+        next_cursor = links[-1].id if len(links) == limit else None
+        return links, next_cursor
+
+    async def delete(self, override_id: uuid.UUID) -> None:
+        """Delete a user override. Raises if missing or out of scope."""
+        link = await self.get(override_id)
+        await self._session.delete(link)
+        await self._session.flush()
+
+    async def count(
+        self, search_filter: FeatureFlagUserAssignmentSearchFilter | None = None
+    ) -> int:
+        """Total user override count, scoped by ``perm_filter`` and optional filter."""
+        stmt = self._perm_filter.filter_sql(
+            select(func.count()).select_from(FeatureFlagUserAssignment)
+        )
+        if search_filter is not None:
+            stmt = search_filter.filter_sql(stmt)
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def apply_batch(
+        self,
+        operations: list[FeatureFlagUserAssignmentBatchOp],
+        perm_filters: dict[Action, SearchFilter[FeatureFlagUserAssignment] | None],
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None = None,
+        user_read_filter: SearchFilter[User] | None = None,
+    ) -> list[FeatureFlagUserAssignment | None]:
+        """Apply a mix of create/delete operations in one transaction."""
+        results: list[FeatureFlagUserAssignment | None] = []
+        for op in operations:
+            if isinstance(op, FeatureFlagUserAssignmentBatchCreate):
+                results.append(
+                    await self._batch_create(
+                        op,
+                        perm_filters,
+                        feature_flag_read_filter=feature_flag_read_filter,
+                        user_read_filter=user_read_filter,
+                    )
+                )
+            elif isinstance(op, FeatureFlagUserAssignmentBatchDelete):
+                await self._batch_delete(op, perm_filters)
+                results.append(None)
+        return results
+
+    async def _batch_create(
+        self,
+        op: FeatureFlagUserAssignmentBatchCreate,
+        perm_filters: dict[Action, SearchFilter[FeatureFlagUserAssignment] | None],
+        *,
+        feature_flag_read_filter: SearchFilter[FeatureFlag] | None,
+        user_read_filter: SearchFilter[User] | None,
+    ) -> FeatureFlagUserAssignment:
+        filt = perm_filters.get(Action.CREATE)
+        if filt is None:
+            raise BatchPermissionDeniedError("create")
+        if feature_flag_read_filter is None:
+            raise BatchPermissionDeniedError("read feature_flag")
+        if user_read_filter is None:
+            raise BatchPermissionDeniedError("read user")
+        return await FeatureFlagUserAssignmentService(self._session, filt).create(
+            op.data,
+            feature_flag_read_filter=feature_flag_read_filter,
+            user_read_filter=user_read_filter,
+        )
+
+    async def _batch_delete(
+        self,
+        op: FeatureFlagUserAssignmentBatchDelete,
+        perm_filters: dict[Action, SearchFilter[FeatureFlagUserAssignment] | None],
+    ) -> None:
+        filt = perm_filters.get(Action.DELETE)
+        if filt is None:
+            raise BatchPermissionDeniedError("delete")
+        await FeatureFlagUserAssignmentService(self._session, filt).delete(op.id)
+
+
+def _classify_user_assignment_integrity_error(
+    exc: IntegrityError,
+    feature_flag_id: str,
+    user_id: uuid.UUID,
+) -> Exception:
+    """Map an IntegrityError to a duplicate vs orphan failure."""
+    message = str(getattr(exc, "orig", exc)).lower()
+    if "uq_feature_flag_user_assignments_flag_id_user_id" in message or (
+        "unique constraint" in message and "feature_flag_user_assignments" in message
+    ):
+        return FeatureFlagUserAssignmentConflictError(f"{feature_flag_id}/{user_id}")
+    if "foreign key" in message or "fk_" in message:
+        if "user_id" in message and "feature_flag_id" not in message:
+            return FeatureFlagUserAssignmentOrphanError(f"user {user_id} does not exist")
+        return FeatureFlagUserAssignmentOrphanError(
+            f"feature flag {feature_flag_id} does not exist"
+        )
+    return FeatureFlagUserAssignmentConflictError(f"{feature_flag_id}/{user_id}")
+
+
 __all__ = [
     "BatchPermissionDeniedError",
     "FeatureFlagConflictError",
@@ -494,4 +796,8 @@ __all__ = [
     "FeatureFlagRoleAssignmentOrphanError",
     "FeatureFlagRoleAssignmentService",
     "FeatureFlagService",
+    "FeatureFlagUserAssignmentConflictError",
+    "FeatureFlagUserAssignmentNotFoundError",
+    "FeatureFlagUserAssignmentOrphanError",
+    "FeatureFlagUserAssignmentService",
 ]

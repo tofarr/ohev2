@@ -450,9 +450,165 @@ class TestDeleteFeatureFlagRoleAssignmentRoute:
         assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------- #
+# Feature flag user overrides
+# ---------------------------------------------------------------------- #
+
+
+class TestCreateFeatureFlagUserAssignmentRoute:
+    async def test_create_user_override(self, client: AsyncClient, session) -> None:
+        flag_id = "USER_OVR_FLAG"
+        target = await _make_principal(
+            session, email="ff-user-target@example.com", username="ff-user-target"
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": flag_id})
+        resp = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target.id)},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["feature_flag_id"] == flag_id
+        assert body["user_id"] == str(target.id)
+        assert "id" in body
+        assert "created_at" in body
+
+    async def test_create_duplicate_returns_409(self, client: AsyncClient, session) -> None:
+        flag_id = "DUP_USER_OVR_FLAG"
+        target = await _make_principal(
+            session, email="dup-ff-user-target@example.com", username="dup-ff-user-target"
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": flag_id})
+        payload = {"feature_flag_id": flag_id, "user_id": str(target.id)}
+        first = await client.post("/feature-flag-user-assignments", json=payload)
+        assert first.status_code == 201
+        second = await client.post("/feature-flag-user-assignments", json=payload)
+        assert second.status_code == 409
+
+    async def test_create_missing_flag_returns_404(self, client: AsyncClient, session) -> None:
+        target = await _make_principal(
+            session, email="missing-ff-user-target@example.com", username="missing-ff-user-target"
+        )
+        await session.commit()
+        resp = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "NO_SUCH_FLAG", "user_id": str(target.id)},
+        )
+        assert resp.status_code == 404
+
+    async def test_create_missing_user_returns_404(self, client: AsyncClient) -> None:
+        await client.post("/feature-flags", json={"id": "ORPHAN_USER_FLAG"})
+        resp = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "ORPHAN_USER_FLAG", "user_id": str(uuid.uuid4())},
+        )
+        assert resp.status_code == 404
+
+
+class TestGetFeatureFlagUserAssignmentRoute:
+    async def test_get_existing(self, client: AsyncClient, session) -> None:
+        flag_id = "GET_USER_OVR_FLAG"
+        target = await _make_principal(
+            session, email="get-ff-user-target@example.com", username="get-ff-user-target"
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": flag_id})
+        create = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target.id)},
+        )
+        lid = create.json()["id"]
+        resp = await client.get(f"/feature-flag-user-assignments/{lid}")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == lid
+
+    async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.get(f"/feature-flag-user-assignments/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+
+class TestListFeatureFlagUserAssignmentsRoute:
+    async def test_search_user_id_filter(self, client: AsyncClient, session) -> None:
+        target = await _make_principal(
+            session, email="filter-ff-user-target@example.com", username="filter-ff-user-target"
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": "USER_FILTER_A"})
+        await client.post("/feature-flags", json={"id": "USER_FILTER_B"})
+        await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "USER_FILTER_A", "user_id": str(target.id)},
+        )
+        await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "USER_FILTER_B", "user_id": str(target.id)},
+        )
+        resp = await client.get(f"/feature-flag-user-assignments?user_id__eq={target.id}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert all(i["user_id"] == str(target.id) for i in items)
+
+
+class TestFeatureFlagUserAssignmentBatchWrite:
+    async def test_batch_mix_cd_returns_positional(self, client: AsyncClient, session) -> None:
+        target_a = await _make_principal(
+            session, email="bw-user-a@example.com", username="bw-user-a"
+        )
+        target_b = await _make_principal(
+            session, email="bw-user-b@example.com", username="bw-user-b"
+        )
+        await session.commit()
+        flag_id = "BW_USER_OVR_FLAG"
+        await client.post("/feature-flags", json={"id": flag_id})
+        a = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target_a.id)},
+        )
+        resp = await client.post(
+            "/feature-flag-user-assignments/batch",
+            json={
+                "operations": [
+                    {"op": "delete", "id": a.json()["id"]},
+                    {
+                        "op": "create",
+                        "data": {"feature_flag_id": flag_id, "user_id": str(target_b.id)},
+                    },
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0] is None
+        assert items[1]["user_id"] == str(target_b.id)
+        assert (
+            await client.get(f"/feature-flag-user-assignments/{a.json()['id']}")
+        ).status_code == 404
+
+
+class TestDeleteFeatureFlagUserAssignmentRoute:
+    async def test_delete_user_override(self, client: AsyncClient, session) -> None:
+        target = await _make_principal(
+            session, email="del-ff-user-target@example.com", username="del-ff-user-target"
+        )
+        await session.commit()
+        flag_id = "DEL_USER_OVR_FLAG"
+        await client.post("/feature-flags", json={"id": flag_id})
+        create = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target.id)},
+        )
+        lid = create.json()["id"]
+        resp = await client.delete(f"/feature-flag-user-assignments/{lid}")
+        assert resp.status_code == 204
+        assert (await client.get(f"/feature-flag-user-assignments/{lid}")).status_code == 404
+
+
 class TestPermissionEnforcement:
-    """The feature_flag and feature_flag_role_assignment resources are governed by their
-    own role permission columns."""
+    """Feature flag resources are governed by their own role permission columns."""
 
     async def test_missing_auth_token_anonymous_denied(self, app) -> None:
         from httpx import ASGITransport, AsyncClient
@@ -529,10 +685,121 @@ class TestPermissionEnforcement:
         )
         assert resp.status_code == 200
 
+    async def test_role_assignment_create_requires_feature_flag_read(
+        self, client: AsyncClient, session
+    ) -> None:
+        role_id = await _seed_role(client, name="create-needs-flag-read-role")
+        await client.post("/feature-flags", json={"id": "NEEDS_FLAG_READ"})
+        principal = await _make_principal(
+            session, email="needs-flag-read@example.com", username="needs-flag-read"
+        )
+        await _assign_role(
+            session,
+            principal.id,
+            {
+                "role_permission": ReadOnly(),
+                "feature_flag_role_assignment_permission": Permitted(),
+            },
+        )
+        await session.commit()
+
+        token = create_auth_token(principal.id)
+        resp = await client.post(
+            "/feature-flag-role-assignments",
+            json={"feature_flag_id": "NEEDS_FLAG_READ", "role_id": role_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
+    async def test_role_assignment_create_requires_role_read(
+        self, client: AsyncClient, session
+    ) -> None:
+        role_id = await _seed_role(client, name="create-needs-role-read-target")
+        await client.post("/feature-flags", json={"id": "NEEDS_ROLE_READ"})
+        principal = await _make_principal(
+            session, email="needs-role-read@example.com", username="needs-role-read"
+        )
+        await _assign_role(
+            session,
+            principal.id,
+            {
+                "feature_flag_permission": ReadOnly(),
+                "feature_flag_role_assignment_permission": Permitted(),
+            },
+        )
+        await session.commit()
+
+        token = create_auth_token(principal.id)
+        resp = await client.post(
+            "/feature-flag-role-assignments",
+            json={"feature_flag_id": "NEEDS_ROLE_READ", "role_id": role_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
+    async def test_user_assignment_create_requires_user_read(
+        self, client: AsyncClient, session
+    ) -> None:
+        target = await _make_principal(
+            session, email="needs-user-read-target@example.com", username="needs-user-read-target"
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": "NEEDS_USER_READ"})
+        principal = await _make_principal(
+            session, email="needs-user-read@example.com", username="needs-user-read"
+        )
+        await _assign_role(
+            session,
+            principal.id,
+            {
+                "feature_flag_permission": ReadOnly(),
+                "feature_flag_user_assignment_permission": Permitted(),
+            },
+        )
+        await session.commit()
+
+        token = create_auth_token(principal.id)
+        resp = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "NEEDS_USER_READ", "user_id": str(target.id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
+    async def test_user_assignment_create_requires_feature_flag_read(
+        self, client: AsyncClient, session
+    ) -> None:
+        target = await _make_principal(
+            session,
+            email="needs-user-flag-read-target@example.com",
+            username="needs-user-flag-read-target",
+        )
+        await session.commit()
+        await client.post("/feature-flags", json={"id": "NEEDS_USER_FLAG_READ"})
+        principal = await _make_principal(
+            session, email="needs-user-flag-read@example.com", username="needs-user-flag-read"
+        )
+        await _assign_role(
+            session,
+            principal.id,
+            {
+                "user_permission": ReadOnly(),
+                "feature_flag_user_assignment_permission": Permitted(),
+            },
+        )
+        await session.commit()
+
+        token = create_auth_token(principal.id)
+        resp = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "NEEDS_USER_FLAG_READ", "user_id": str(target.id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
 
 class TestGetEnabledFeatureFlags:
-    """``GET /feature-flags/enabled`` returns the flags enabled for the current
-    user (globally enabled OR overridden on via a role the user holds)."""
+    """``GET /feature-flags/enabled`` returns global, role, and user assignments."""
 
     async def test_anonymous_denied_401(self, app) -> None:
         from httpx import ASGITransport, AsyncClient
@@ -617,6 +884,45 @@ class TestGetEnabledFeatureFlags:
         )
         assert resp.status_code == 200
         assert "ONLY_FOR_A" not in resp.json()["flags"]
+
+    async def test_user_assignment_enables_flag_for_that_user(
+        self, client: AsyncClient, session
+    ) -> None:
+        principal = await _make_principal(session, email="du@example.com", username="du")
+        await session.commit()
+
+        await client.post("/feature-flags", json={"id": "DIRECT_USER", "enabled": False})
+        await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "DIRECT_USER", "user_id": str(principal.id)},
+        )
+
+        token = create_auth_token(principal.id)
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert "DIRECT_USER" in resp.json()["flags"]
+
+    async def test_user_assignment_does_not_leak_to_other_users(
+        self, client: AsyncClient, session
+    ) -> None:
+        principal_a = await _make_principal(session, email="dua@example.com", username="dua")
+        principal_b = await _make_principal(session, email="dub@example.com", username="dub")
+        await session.commit()
+
+        await client.post("/feature-flags", json={"id": "DIRECT_USER_A", "enabled": False})
+        await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": "DIRECT_USER_A", "user_id": str(principal_a.id)},
+        )
+
+        token_b = create_auth_token(principal_b.id)
+        resp = await client.get(
+            "/feature-flags/enabled", headers={"Authorization": f"Bearer {token_b}"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert "DIRECT_USER_A" not in resp.json()["flags"]
 
     async def test_no_flags_returns_empty_list(self, client: AsyncClient, session) -> None:
         principal = await _make_principal(session, email="nf@example.com", username="nf")
