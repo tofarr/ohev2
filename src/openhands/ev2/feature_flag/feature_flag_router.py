@@ -1,12 +1,14 @@
 """HTTP routes for the feature_flag feature.
 
-Uniform REST surface (AGENTS.md §3). Two collections:
+Uniform REST surface (AGENTS.md §3). Three collections:
 
 * ``/feature-flags`` — full CRUD (GET paginated, POST, GET/{id}, PATCH/{id},
   DELETE/{id}) plus batch read/write and count. The ``id`` path param is the
   caller-supplied string primary key.
 * ``/feature-flag-role-assignments`` — immutable link rows (GET paginated, POST, GET/{id},
   DELETE/{id}) plus batch read/write and count; no ``PATCH``.
+* ``/feature-flag-user-assignments`` — immutable link rows with the same shape,
+  assigning a flag directly to one user; no ``PATCH``.
 
 Handlers validate, call a service, and serialize — no business logic here.
 Every endpoint is guarded by the centralized permission checker (AGENTS.md §9);
@@ -31,7 +33,11 @@ from openhands.ev2.auth.auth_dependencies import (
     depends_user_id,
 )
 from openhands.ev2.db import SessionDep
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
+from openhands.ev2.feature_flag.feature_flag_models import (
+    FeatureFlag,
+    FeatureFlagRoleAssignment,
+    FeatureFlagUserAssignment,
+)
 from openhands.ev2.feature_flag.feature_flag_schemas import (
     EnabledFeatureFlags,
     FeatureFlagBatchWriteRequest,
@@ -45,6 +51,11 @@ from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagSearchFilter,
     FeatureFlagSearchResult,
     FeatureFlagUpdate,
+    FeatureFlagUserAssignmentBatchWriteRequest,
+    FeatureFlagUserAssignmentCreate,
+    FeatureFlagUserAssignmentRead,
+    FeatureFlagUserAssignmentSearchFilter,
+    FeatureFlagUserAssignmentSearchResult,
 )
 from openhands.ev2.feature_flag.feature_flag_service import (
     BatchPermissionDeniedError,
@@ -56,14 +67,23 @@ from openhands.ev2.feature_flag.feature_flag_service import (
     FeatureFlagRoleAssignmentOrphanError,
     FeatureFlagRoleAssignmentService,
     FeatureFlagService,
+    FeatureFlagUserAssignmentConflictError,
+    FeatureFlagUserAssignmentNotFoundError,
+    FeatureFlagUserAssignmentOrphanError,
+    FeatureFlagUserAssignmentService,
 )
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.user.user_models import User
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/feature-flags", tags=["feature-flags"])
 overrides_router = APIRouter(
     prefix="/feature-flag-role-assignments", tags=["feature-flag-role-assignments"]
+)
+user_overrides_router = APIRouter(
+    prefix="/feature-flag-user-assignments", tags=["feature-flag-user-assignments"]
 )
 
 
@@ -144,7 +164,7 @@ async def get_enabled_feature_flags(
             detail="Authentication required.",
         )
     service = FeatureFlagService(session)
-    flag_ids = await service.enabled_for_roles(role_ids)
+    flag_ids = await service.enabled_for_roles(role_ids, user_id=user_id)
     return EnabledFeatureFlags(flags=flag_ids)
 
 
@@ -392,10 +412,22 @@ async def create_feature_flag_role_assignment(
         SearchFilter[FeatureFlagRoleAssignment],
         Depends(depends_permissions(FeatureFlagRoleAssignment, Action.CREATE)),
     ],
+    feature_flag_read_filter: Annotated[
+        SearchFilter[FeatureFlag],
+        Depends(depends_permissions(FeatureFlag, Action.READ)),
+    ],
+    role_read_filter: Annotated[
+        SearchFilter[Role],
+        Depends(depends_permissions(Role, Action.READ)),
+    ],
 ) -> FeatureFlagRoleAssignmentRead:
     service = FeatureFlagRoleAssignmentService(session, perm_filter)
     try:
-        link = await service.create(payload)
+        link = await service.create(
+            payload,
+            feature_flag_read_filter=feature_flag_read_filter,
+            role_read_filter=role_read_filter,
+        )
     except FeatureFlagRoleAssignmentConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -458,6 +490,14 @@ async def write_feature_flag_role_assignments_batch(
         SearchFilter[FeatureFlagRoleAssignment] | None,
         Depends(depends_permissions_or_none(FeatureFlagRoleAssignment, Action.DELETE)),
     ],
+    feature_flag_read_filter: Annotated[
+        SearchFilter[FeatureFlag] | None,
+        Depends(depends_permissions_or_none(FeatureFlag, Action.READ)),
+    ],
+    role_read_filter: Annotated[
+        SearchFilter[Role] | None,
+        Depends(depends_permissions_or_none(Role, Action.READ)),
+    ],
 ) -> BatchWriteResult[FeatureFlagRoleAssignmentRead]:
     service = FeatureFlagRoleAssignmentService(session)
     perm_filters = {
@@ -465,7 +505,12 @@ async def write_feature_flag_role_assignments_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters)
+        results = await service.apply_batch(
+            payload.operations,
+            perm_filters,
+            feature_flag_read_filter=feature_flag_read_filter,
+            role_read_filter=role_read_filter,
+        )
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -516,6 +561,236 @@ async def get_feature_flag_role_assignment(
             detail=f"Override not found: {exc}",
         ) from exc
     return FeatureFlagRoleAssignmentRead.model_validate(link)
+
+
+# ====================================================================== #
+# Feature flag user overrides
+# ====================================================================== #
+
+
+@user_overrides_router.get(
+    "",
+    response_model=FeatureFlagUserAssignmentSearchResult,
+)
+async def search_feature_flag_user_assignments(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.SEARCH)),
+    ],
+    search_filter: FeatureFlagUserAssignmentSearchFilter = Depends(),  # noqa: B008
+    cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> FeatureFlagUserAssignmentSearchResult:
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    cur = _uuid_cursor(cursor) if cursor is not None else None
+    links, next_cursor = await service.search(
+        cursor=cur,
+        limit=limit,
+        search_filter=search_filter,
+    )
+    return FeatureFlagUserAssignmentSearchResult(
+        items=[FeatureFlagUserAssignmentRead.model_validate(link) for link in links],
+        next_cursor=str(next_cursor) if next_cursor is not None else None,
+        limit=limit,
+    )
+
+
+@user_overrides_router.get(
+    "/count",
+    response_model=CountResult,
+)
+async def count_feature_flag_user_assignments(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.SEARCH)),
+    ],
+    search_filter: FeatureFlagUserAssignmentSearchFilter = Depends(),  # noqa: B008
+) -> CountResult:
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    total = await service.count(search_filter=search_filter)
+    return CountResult(count=total)
+
+
+@user_overrides_router.post(
+    "",
+    response_model=FeatureFlagUserAssignmentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_feature_flag_user_assignment(
+    payload: FeatureFlagUserAssignmentCreate,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.CREATE)),
+    ],
+    feature_flag_read_filter: Annotated[
+        SearchFilter[FeatureFlag],
+        Depends(depends_permissions(FeatureFlag, Action.READ)),
+    ],
+    user_read_filter: Annotated[
+        SearchFilter[User],
+        Depends(depends_permissions(User, Action.READ)),
+    ],
+) -> FeatureFlagUserAssignmentRead:
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    try:
+        link = await service.create(
+            payload,
+            feature_flag_read_filter=feature_flag_read_filter,
+            user_read_filter=user_read_filter,
+        )
+    except FeatureFlagUserAssignmentConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Override already exists: {exc}",
+        ) from exc
+    except FeatureFlagUserAssignmentOrphanError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Referenced feature flag or user not found: {exc}",
+        ) from exc
+    await session.commit()
+    return FeatureFlagUserAssignmentRead.model_validate(link)
+
+
+@user_overrides_router.get(
+    "/batch",
+    response_model=BatchReadResult[FeatureFlagUserAssignmentRead],
+)
+async def get_feature_flag_user_assignments_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.READ)),
+    ],
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[FeatureFlagUserAssignmentRead]:
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    links = await service.get_many(ids)
+    return BatchReadResult(
+        items=[
+            FeatureFlagUserAssignmentRead.model_validate(link) if link is not None else None
+            for link in links
+        ],
+    )
+
+
+@user_overrides_router.post(
+    "/batch",
+    response_model=BatchWriteResult[FeatureFlagUserAssignmentRead],
+)
+async def write_feature_flag_user_assignments_batch(
+    payload: FeatureFlagUserAssignmentBatchWriteRequest,
+    session: SessionDep,
+    create_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment] | None,
+        Depends(depends_permissions_or_none(FeatureFlagUserAssignment, Action.CREATE)),
+    ],
+    delete_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment] | None,
+        Depends(depends_permissions_or_none(FeatureFlagUserAssignment, Action.DELETE)),
+    ],
+    feature_flag_read_filter: Annotated[
+        SearchFilter[FeatureFlag] | None,
+        Depends(depends_permissions_or_none(FeatureFlag, Action.READ)),
+    ],
+    user_read_filter: Annotated[
+        SearchFilter[User] | None,
+        Depends(depends_permissions_or_none(User, Action.READ)),
+    ],
+) -> BatchWriteResult[FeatureFlagUserAssignmentRead]:
+    service = FeatureFlagUserAssignmentService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.DELETE: delete_filter,
+    }
+    try:
+        results = await service.apply_batch(
+            payload.operations,
+            perm_filters,
+            feature_flag_read_filter=feature_flag_read_filter,
+            user_read_filter=user_read_filter,
+        )
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except FeatureFlagUserAssignmentConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Override already exists: {exc}",
+        ) from exc
+    except FeatureFlagUserAssignmentOrphanError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Referenced feature flag or user not found: {exc}",
+        ) from exc
+    except FeatureFlagUserAssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Override not found: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(
+        items=[
+            FeatureFlagUserAssignmentRead.model_validate(link) if link is not None else None
+            for link in results
+        ],
+    )
+
+
+@user_overrides_router.get(
+    "/{override_id}",
+    response_model=FeatureFlagUserAssignmentRead,
+)
+async def get_feature_flag_user_assignment(
+    override_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.READ)),
+    ],
+) -> FeatureFlagUserAssignmentRead:
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    try:
+        link = await service.get(override_id)
+    except FeatureFlagUserAssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Override not found: {exc}",
+        ) from exc
+    return FeatureFlagUserAssignmentRead.model_validate(link)
+
+
+@user_overrides_router.delete(
+    "/{override_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_feature_flag_user_assignment(
+    override_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[FeatureFlagUserAssignment],
+        Depends(depends_permissions(FeatureFlagUserAssignment, Action.DELETE)),
+    ],
+) -> None:
+    service = FeatureFlagUserAssignmentService(session, perm_filter)
+    try:
+        await service.delete(override_id)
+    except FeatureFlagUserAssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Override not found: {exc}",
+        ) from exc
+    await session.commit()
 
 
 @overrides_router.delete(

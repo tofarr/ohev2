@@ -14,6 +14,7 @@
 //   batch.qnt        — batch write semantics: atomicity, authorization, CUD mix
 //   cors.qnt         — CORS allow-list: add/remove origins
 //   encryption.qnt   — encryption key config + encryptionKeyInDecryptionKeys invariant
+//   feature_flag.qnt — feature flags: global, role, and user-specific assignments
 //   rbac.qnt         — RBAC evaluation: permission-union, filter disjunction
 //   rest.qnt         — uniform REST route/verb mapping (review guard)
 //   role.qnt         — role entity: name uniqueness, per-entity permissions
@@ -32,5 +33,5 @@
 
 module ohev {
   // Index of available spec modules. See header comment for invocation.
-  pure val specModules: str = "api_key, auth, batch, cors, encryption, rbac, rest, role, sandbox, search_filter, user"
+  pure val specModules: str = "api_key, auth, batch, cors, encryption, feature_flag, rbac, rest, role, sandbox, search_filter, user"
 }

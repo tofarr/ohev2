@@ -30,6 +30,9 @@ from openhands.ev2.feature_flag.feature_flag_router import (
 from openhands.ev2.feature_flag.feature_flag_router import (
     router as feature_flag_router,
 )
+from openhands.ev2.feature_flag.feature_flag_router import (
+    user_overrides_router as feature_flag_user_assignment_router,
+)
 from openhands.ev2.llm.llm_router import router as llm_router
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
@@ -179,6 +182,7 @@ def create_app() -> FastAPI:
     app.include_router(cors_router)
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)
+    app.include_router(feature_flag_user_assignment_router)
     app.include_router(llm_router)
     app.include_router(role_router)
     app.include_router(user_role_router)

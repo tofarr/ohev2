@@ -387,6 +387,12 @@ def upgrade() -> None:
             comment="Permission policy for feature_flag_role_assignment resources; null = deny.",
         ),
         sa.Column(
+            "feature_flag_user_assignment_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for feature_flag_user_assignment resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -667,6 +673,51 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
+    # feature_flag_user_assignments
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "feature_flag_user_assignments",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("feature_flag_id", sa.String(length=128), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["feature_flag_id"],
+            ["feature_flags.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_user_assignments_feature_flag_id_feature_flags",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_feature_flag_user_assignments_user_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "feature_flag_id", "user_id", name="uq_feature_flag_user_assignments_flag_id_user_id"
+        ),
+        comment="Per-user overrides of feature flags",
+    )
+    op.create_index(
+        "ix_feature_flag_user_assignments_feature_flag_id",
+        "feature_flag_user_assignments",
+        ["feature_flag_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_feature_flag_user_assignments_user_id",
+        "feature_flag_user_assignments",
+        ["user_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
     # llm_usage (range-partitioned parent by created_at; partitions are
     # created by the background partition manager at runtime — see README
     # 'LLM usage logging'. A DEFAULT partition is created here so inserts
@@ -837,6 +888,14 @@ def downgrade() -> None:
     op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
     op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
     op.drop_table("llm_usage")
+    op.drop_index(
+        "ix_feature_flag_user_assignments_user_id", table_name="feature_flag_user_assignments"
+    )
+    op.drop_index(
+        "ix_feature_flag_user_assignments_feature_flag_id",
+        table_name="feature_flag_user_assignments",
+    )
+    op.drop_table("feature_flag_user_assignments")
     op.drop_index(
         "ix_feature_flag_role_assignments_role_id", table_name="feature_flag_role_assignments"
     )
