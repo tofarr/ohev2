@@ -114,10 +114,14 @@ module rest {
     assert(isStandard(batchRoute("user-roles"))),
     assert(isStandard(batchRoute("cors-origins"))),
     assert(isStandard(batchRoute("auth-clients"))),
+    assert(isStandard(batchRoute("mcp-server-configs"))),
+    assert(isStandard(batchRoute("role-mcp-server-config-permissions"))),
     assert(isStandard(batchWriteRoute("users"))),
     assert(isStandard(batchWriteRoute("roles"))),
     assert(isStandard(batchWriteRoute("user-roles"))),
     assert(isStandard(batchWriteRoute("cors-origins"))),
     assert(isStandard(batchWriteRoute("auth-clients"))),
+    assert(isStandard(batchWriteRoute("mcp-server-configs"))),
+    assert(isStandard(batchWriteRoute("role-mcp-server-config-permissions"))),
   }
 }

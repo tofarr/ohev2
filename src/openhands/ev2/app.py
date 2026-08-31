@@ -31,6 +31,12 @@ from openhands.ev2.feature_flag.feature_flag_router import (
     router as feature_flag_router,
 )
 from openhands.ev2.llm.llm_router import router as llm_router
+from openhands.ev2.mcp_server_config.mcp_server_config_router import (
+    router as mcp_server_config_router,
+)
+from openhands.ev2.mcp_server_config.role_mcp_server_config_permission_router import (
+    router as role_mcp_server_config_permission_router,
+)
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
 from openhands.ev2.secret.role_secret_permission_router import (
@@ -180,6 +186,8 @@ def create_app() -> FastAPI:
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)
     app.include_router(llm_router)
+    app.include_router(mcp_server_config_router)
+    app.include_router(role_mcp_server_config_permission_router)
     app.include_router(role_router)
     app.include_router(user_role_router)
     app.include_router(secret_router)
