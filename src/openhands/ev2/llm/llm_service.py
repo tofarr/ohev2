@@ -513,18 +513,19 @@ class LLMService:
         llm: StoredLLM,
         *,
         config: AppConfig | None = None,
+        use_proxy: bool = True,
     ) -> LLM:
         """Materialize the SDK :class:`LLM` for a stored profile.
 
         Resolves the linked provider connection (scoped to the profile owner),
-        builds the SDK :class:`ProviderConnection` (with the proxy URL — keyed
-        on the LLM id — when ``enable_proxy`` is set), and returns
-        ``llm.to_llm(connection)``.
+        builds the SDK :class:`ProviderConnection`, and returns
+        ``llm.to_llm(connection)``. Set ``use_proxy=False`` when serving the
+        proxy endpoint itself so forwarding goes to the stored provider URL.
         """
         cfg = config or self._cfg
         conn = await self.connection_for_llm(llm)
-        proxy = proxy_url_for(llm.id, config=cfg) if conn.enable_proxy else None
-        sdk_conn = conn.to_provider_connection(self._enc, proxy_url=proxy)
+        proxy = proxy_url_for(llm.id, config=cfg) if use_proxy and conn.enable_proxy else None
+        sdk_conn = conn.to_provider_connection(self._enc, proxy_url=proxy, use_proxy=use_proxy)
         return llm.to_llm(sdk_conn)
 
 

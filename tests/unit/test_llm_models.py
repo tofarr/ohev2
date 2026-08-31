@@ -74,6 +74,16 @@ class TestStoredProviderConnectionToSDK:
         sdk = conn.to_provider_connection(enc, proxy_url="https://proxy.example.com/x")
         assert sdk.base_url == "https://proxy.example.com/x"
 
+    def test_base_url_stored_when_proxy_bypassed(self, enc: EncryptionService) -> None:
+        conn = _conn(enable_proxy=True, base_url="https://real.example.com")
+        object.__setattr__(conn, "id", uuid.uuid4())
+        sdk = conn.to_provider_connection(
+            enc,
+            proxy_url="https://proxy.example.com/x",
+            use_proxy=False,
+        )
+        assert sdk.base_url == "https://real.example.com"
+
     def test_timestamps_unix_seconds(self, enc: EncryptionService) -> None:
         conn = _conn()
         object.__setattr__(conn, "id", uuid.uuid4())

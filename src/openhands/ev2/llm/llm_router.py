@@ -18,10 +18,18 @@ provider connection is resolved from the LLM purely to source credentials.
 
 from __future__ import annotations
 
+import asyncio
+import hmac
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
@@ -29,8 +37,15 @@ from openhands.ev2.auth.auth_dependencies import (
     depends_user_id,
 )
 from openhands.ev2.db import SessionDep
-from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection
+from openhands.ev2.llm.llm_models import (
+    LlmAggregatedUsage,
+    StoredLLM,
+    StoredProviderConnection,
+)
 from openhands.ev2.llm.llm_schemas import (
+    AggregatedUsageRead,
+    AggregatedUsageSearchFilter,
+    AggregatedUsageSearchResult,
     CompletionRequest,
     CompletionResponse,
     LLMBatchWriteRequest,
@@ -557,7 +572,7 @@ async def completion(
         Depends(depends_permissions(StoredLLM, Action.USE)),
     ],
     user_id: Annotated[uuid.UUID, Depends(depends_user_id)],
-) -> CompletionResponse:
+) -> CompletionResponse | StreamingResponse:
     """Proxy a completion through a stored LLM profile.
 
     Authorizes ``USE`` on the named stored LLM (must be in the principal's
@@ -604,21 +619,375 @@ async def completion(
             ) from exc
 
     try:
-        sdk_llm = await llm_service.materialize_llm(llm)
+        sdk_llm = await llm_service.materialize_llm(llm, use_proxy=False)
     except LLMNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"LLM not found: {exc}",
         ) from exc
 
+    params = dict(payload.params)
+    if params.get("stream") is True:
+        return StreamingResponse(
+            _stream_completion(
+                session,
+                user_id,
+                llm.provider_connection_id,
+                llm.id,
+                sdk_llm,
+                messages,
+                tools,
+                params,
+            ),
+            media_type="text/event-stream",
+        )
+
     try:
-        response = await sdk_llm.acompletion(messages=messages, tools=tools, **payload.params)
+        response = await sdk_llm.acompletion(messages=messages, tools=tools, **params)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM completion failed: {exc}",
         ) from exc
+    # Record raw usage (best-effort; never fails the already-succeeded completion).
+    await _record_usage(session, user_id, llm.provider_connection_id, llm.id, response)
     return _to_completion_response(response)
+
+
+@router.post(
+    "/completion/{llm_id}/chat/completions",
+    response_model=None,
+    include_in_schema=False,
+)
+async def chat_completions_proxy(
+    llm_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+) -> Response | StreamingResponse:
+    """OpenAI-compatible passthrough for SDK clients using the proxy base URL."""
+    llm_service = LLMService(session)
+    try:
+        llm = await llm_service.get(llm_id)
+        conn = await llm_service.connection_for_llm(llm)
+    except LLMNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"LLM not found: {exc}",
+        ) from exc
+
+    provider_key = _provider_api_key(conn)
+    if provider_key is None or not _proxy_auth_matches(request, provider_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid proxy credentials.",
+        )
+    if conn.base_url is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Provider connection has no base_url to proxy.",
+        )
+
+    body = await request.body()
+    target = f"{conn.base_url.rstrip('/')}/chat/completions"
+    headers = _proxy_headers(request, provider_key)
+    if _body_requests_stream(body):
+        client = httpx.AsyncClient(timeout=None)
+        upstream = await client.send(
+            client.build_request(
+                "POST",
+                target,
+                content=body,
+                headers=headers,
+                params=request.query_params,
+            ),
+            stream=True,
+        )
+        if upstream.status_code >= 400:
+            content = await upstream.aread()
+            await upstream.aclose()
+            await client.aclose()
+            return Response(
+                content=content,
+                status_code=upstream.status_code,
+                media_type=upstream.headers.get("content-type"),
+            )
+        return StreamingResponse(
+            _proxy_stream_response(
+                session,
+                llm.user_id,
+                conn.id,
+                llm.id,
+                client,
+                upstream,
+                llm.model,
+            ),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "text/event-stream"),
+        )
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        upstream = await client.post(
+            target,
+            content=body,
+            headers=headers,
+            params=request.query_params,
+        )
+    if 200 <= upstream.status_code < 300:
+        await _record_openai_usage(session, llm.user_id, conn.id, llm.id, llm.model, upstream)
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+def _provider_api_key(conn: StoredProviderConnection) -> str | None:
+    if conn.api_key is None:
+        return None
+    from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+    return get_encryption_service().decrypt_value(conn.api_key)
+
+
+def _proxy_auth_matches(request: Request, expected_api_key: str) -> bool:
+    supplied = request.headers.get("x-api-key")
+    auth_header = request.headers.get("authorization", "")
+    if supplied is None and auth_header.lower().startswith("bearer "):
+        supplied = auth_header[7:].strip()
+    return supplied is not None and hmac.compare_digest(supplied, expected_api_key)
+
+
+def _proxy_headers(request: Request, provider_key: str) -> dict[str, str]:
+    headers = {"authorization": f"Bearer {provider_key}"}
+    for name in ("accept", "content-type"):
+        value = request.headers.get(name)
+        if value is not None:
+            headers[name] = value
+    return headers
+
+
+def _body_requests_stream(body: bytes) -> bool:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("stream") is True
+
+
+async def _proxy_stream_response(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
+    client: httpx.AsyncClient,
+    upstream: httpx.Response,
+    fallback_model: str,
+) -> AsyncIterator[bytes]:
+    usage_payload: dict[str, Any] | None = None
+    buffer = ""
+    try:
+        async for chunk in upstream.aiter_bytes():
+            buffer, parsed_usage = _parse_stream_usage(buffer, chunk)
+            if parsed_usage is not None:
+                usage_payload = parsed_usage
+            yield chunk
+        if usage_payload is not None:
+            await _record_usage_from_openai_payload(
+                session,
+                user_id,
+                provider_connection_id,
+                llm_id,
+                fallback_model,
+                usage_payload,
+            )
+    finally:
+        await upstream.aclose()
+        await client.aclose()
+
+
+def _parse_stream_usage(
+    buffer: str,
+    chunk: bytes,
+) -> tuple[str, dict[str, Any] | None]:
+    buffer += chunk.decode(errors="ignore")
+    lines = buffer.splitlines(keepends=True)
+    buffer = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+    usage_payload: dict[str, Any] | None = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        raw = stripped.removeprefix("data:").strip()
+        if raw == "[DONE]":
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
+            usage_payload = payload
+    return buffer, usage_payload
+
+
+async def _record_openai_usage(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
+    fallback_model: str,
+    response: httpx.Response,
+) -> None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return
+    if isinstance(payload, dict):
+        await _record_usage_from_openai_payload(
+            session,
+            user_id,
+            provider_connection_id,
+            llm_id,
+            fallback_model,
+            payload,
+        )
+
+
+async def _record_usage_from_openai_payload(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
+    fallback_model: str,
+    payload: dict[str, Any],
+) -> None:
+    usage = payload.get("usage") or {}
+    if not isinstance(usage, dict):
+        return
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    metrics = {
+        "model_name": payload.get("model") or fallback_model,
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+            "model": payload.get("model") or fallback_model,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "cache_read_tokens": prompt_details.get("cached_tokens", 0)
+            if isinstance(prompt_details, dict)
+            else 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": completion_details.get("reasoning_tokens", 0)
+            if isinstance(completion_details, dict)
+            else 0,
+            "context_window": 0,
+            "per_turn_token": usage.get("total_tokens", 0),
+        },
+    }
+    from openhands.ev2.llm.llm_usage_service import LlmUsageService
+
+    row = await LlmUsageService(session).record_usage(
+        user_id=user_id,
+        provider_connection_id=provider_connection_id,
+        llm_id=llm_id,
+        response_id=payload.get("id") if isinstance(payload.get("id"), str) else None,
+        model=str(payload.get("model") or fallback_model),
+        sdk_metrics=metrics,
+    )
+    if row is not None:
+        await session.commit()
+
+
+async def _stream_completion(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
+    sdk_llm: Any,
+    messages: list[Any],
+    tools: list[Any] | None,
+    params: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Stream SDK chunks as SSE and record final usage."""
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _on_token(chunk: Any) -> None:
+        await queue.put(_completion_chunk_to_sse(chunk))
+
+    async def _run_completion() -> None:
+        try:
+            response = await sdk_llm.acompletion(
+                messages=messages,
+                tools=tools,
+                on_token=_on_token,
+                **params,
+            )
+            await _record_usage(session, user_id, provider_connection_id, llm_id, response)
+            await queue.put(b"data: [DONE]\n\n")
+        except Exception as exc:
+            error = json.dumps({"detail": f"LLM completion failed: {exc}"})
+            await queue.put(f"event: error\ndata: {error}\n\n".encode())
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(_run_completion())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+def _completion_chunk_to_sse(chunk: Any) -> bytes:
+    """Serialize one LiteLLM stream chunk as an SSE data event."""
+    if hasattr(chunk, "model_dump"):
+        data = chunk.model_dump(mode="json")
+    elif hasattr(chunk, "to_dict"):
+        data = chunk.to_dict()
+    elif isinstance(chunk, dict):
+        data = chunk
+    else:
+        data = str(chunk)
+    return f"data: {json.dumps(data)}\n\n".encode()
+
+
+async def _record_usage(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    provider_connection_id: uuid.UUID,
+    llm_id: uuid.UUID,
+    response: Any,
+) -> None:
+    """Append a raw LlmUsage row for a completed call.
+
+    Best-effort: a logging failure is swallowed so it cannot fail a completion
+    that already succeeded. The usage insert is committed in its own transaction
+    after the response is built (the caller has not committed the request
+    session at this point, but usage recording is independent of the request's
+    own transactional work, which is read-only here).
+    """
+    from openhands.ev2.llm.llm_usage_service import LlmUsageService
+
+    try:
+        service = LlmUsageService(session)
+        await service.record_usage(
+            user_id=user_id,
+            provider_connection_id=provider_connection_id,
+            llm_id=llm_id,
+            response_id=getattr(response, "id", None),
+            model=getattr(getattr(response, "metrics", None), "model_name", "")
+            or getattr(response, "model", "")
+            or "",
+            sdk_metrics=getattr(response, "metrics", None),
+        )
+        await session.commit()
+    except Exception:
+        # Roll back the usage insert only; the completion response is already
+        # built and returned regardless. Logged in the service on rollback.
+        await session.rollback()
 
 
 def _to_completion_response(response) -> CompletionResponse:  # type: ignore[no-untyped-def]
@@ -628,3 +997,116 @@ def _to_completion_response(response) -> CompletionResponse:  # type: ignore[no-
         message=response.message.model_dump(mode="json"),
         metrics=response.metrics.model_dump(mode="json"),
     )
+
+
+# ====================================================================== #
+# Aggregated usage (read-only)
+# ====================================================================== #
+#
+# The raw ``llm_usage`` table is intentionally not exposed: it is a
+# high-volume, daily-partitioned append-only log. Usage queries go through the
+# ``llm_aggregated_usage`` projection (per-minute, per-user rollups) exposed
+# read-only here. Only SEARCH / READ / batch-read are wired — there is no
+# create/update/delete (the projection is populated by the background
+# aggregator), so per AGENTS.md §3 no batch write endpoint is required.
+
+
+@router.get(
+    "/aggregated-usage",
+    response_model=AggregatedUsageSearchResult,
+)
+async def search_aggregated_usage(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[LlmAggregatedUsage],
+        Depends(depends_permissions(LlmAggregatedUsage, Action.SEARCH)),
+    ],
+    search_filter: AggregatedUsageSearchFilter = Depends(),  # noqa: B008
+    cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> AggregatedUsageSearchResult:
+    """List per-minute, per-user usage rollups (paginated, scoped by permissions)."""
+    cursor_uuid = _cursor(cursor) if cursor is not None else None
+    stmt = perm_filter.filter_sql(select(LlmAggregatedUsage).order_by(LlmAggregatedUsage.id))
+    if search_filter is not None:
+        stmt = search_filter.filter_sql(stmt)
+    if cursor_uuid is not None:
+        stmt = stmt.where(LlmAggregatedUsage.id > cursor_uuid)
+    stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    rows = list(result.scalars().all())
+    next_cursor = rows[-1].id if len(rows) == limit else None
+    return AggregatedUsageSearchResult(
+        items=[AggregatedUsageRead.model_validate(r) for r in rows],
+        next_cursor=str(next_cursor) if next_cursor is not None else None,
+        limit=limit,
+    )
+
+
+@router.get("/aggregated-usage/count", response_model=CountResult)
+async def count_aggregated_usage(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[LlmAggregatedUsage],
+        Depends(depends_permissions(LlmAggregatedUsage, Action.SEARCH)),
+    ],
+    search_filter: AggregatedUsageSearchFilter = Depends(),  # noqa: B008
+) -> CountResult:
+    """Count per-minute, per-user usage rollups in the principal's scope."""
+    stmt = perm_filter.filter_sql(select(func.count()).select_from(LlmAggregatedUsage))
+    if search_filter is not None:
+        stmt = search_filter.filter_sql(stmt)
+    result = await session.execute(stmt)
+    return CountResult(count=int(result.scalar_one()))
+
+
+@router.get(
+    "/aggregated-usage/batch",
+    response_model=BatchReadResult[AggregatedUsageRead],
+)
+async def get_aggregated_usage_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[LlmAggregatedUsage],
+        Depends(depends_permissions(LlmAggregatedUsage, Action.READ)),
+    ],
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[AggregatedUsageRead]:
+    """Batch read aggregated-usage rows by id (positional, null for missing)."""
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    if not ids:
+        return BatchReadResult(items=[])
+    stmt = perm_filter.filter_sql(select(LlmAggregatedUsage).where(LlmAggregatedUsage.id.in_(ids)))
+    result = await session.execute(stmt)
+    by_id: dict[uuid.UUID, LlmAggregatedUsage] = {row.id: row for row in result.scalars().all()}
+    return BatchReadResult(
+        items=[AggregatedUsageRead.model_validate(by_id[i]) if i in by_id else None for i in ids],
+    )
+
+
+@router.get(
+    "/aggregated-usage/{row_id}",
+    response_model=AggregatedUsageRead,
+)
+async def get_aggregated_usage(
+    row_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[LlmAggregatedUsage],
+        Depends(depends_permissions(LlmAggregatedUsage, Action.READ)),
+    ],
+) -> AggregatedUsageRead:
+    """Retrieve one aggregated-usage rollup by id."""
+    stmt = perm_filter.filter_sql(select(LlmAggregatedUsage).where(LlmAggregatedUsage.id == row_id))
+    result = await session.execute(stmt)
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Aggregated usage not found: {row_id}",
+        )
+    return AggregatedUsageRead.model_validate(row)
