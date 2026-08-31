@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.role.role_models import Role, UserRole
+from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.security.security_models import Permitted, ReadOnly
 from openhands.ev2.user.user_models import User
 
@@ -41,15 +41,7 @@ class TestRoleModel:
         session.add(role)
         await session.flush()
         await session.refresh(role)
-        for column in (
-            "user_permission",
-            "role_permission",
-            "user_role_permission",
-            "api_key_permission",
-            "oauth_client_permission",
-            "cors_origin_permission",
-            "secret_permission",
-        ):
+        for column in ROLE_ENTITY_COLUMNS:
             assert getattr(role, column) is None
 
     async def test_role_permission_round_trips_concrete_subclass(

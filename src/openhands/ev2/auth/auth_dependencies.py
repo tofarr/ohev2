@@ -569,6 +569,12 @@ from openhands.ev2.llm.llm_models import StoredLLM as _StoredLLM  # noqa: E402
 from openhands.ev2.llm.llm_models import (  # noqa: E402
     StoredProviderConnection as _StoredProviderConnection,
 )
+from openhands.ev2.mcp_server_config import (  # noqa: E402,F401
+    mcp_server_config_security as _mcp_server_config_security,
+)
+from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: E402
+    MCPServerConfig as _MCPServerConfig,
+)
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.secret import (  # noqa: E402,F401
@@ -584,6 +590,7 @@ register_resource_policy(_ApiKey, "api_key_permission")
 register_resource_policy(_OAuthClient, "oauth_client_permission")
 register_resource_policy(_AllowedOrigin, "cors_origin_permission")
 register_resource_policy(_Secret, "secret_permission")
+register_resource_policy(_MCPServerConfig, "mcp_server_config_permission")
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
 register_resource_policy(_LlmAggregatedUsage, "llm_aggregated_usage_permission")

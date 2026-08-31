@@ -117,6 +117,8 @@ module rest {
     assert(isStandard(batchRoute("feature-flags"))),
     assert(isStandard(batchRoute("feature-flag-role-assignments"))),
     assert(isStandard(batchRoute("feature-flag-user-assignments"))),
+    assert(isStandard(batchRoute("mcp-server-configs"))),
+    assert(isStandard(batchRoute("role-mcp-server-config-permissions"))),
     assert(isStandard(batchWriteRoute("users"))),
     assert(isStandard(batchWriteRoute("roles"))),
     assert(isStandard(batchWriteRoute("user-roles"))),
@@ -125,5 +127,7 @@ module rest {
     assert(isStandard(batchWriteRoute("feature-flags"))),
     assert(isStandard(batchWriteRoute("feature-flag-role-assignments"))),
     assert(isStandard(batchWriteRoute("feature-flag-user-assignments"))),
+    assert(isStandard(batchWriteRoute("mcp-server-configs"))),
+    assert(isStandard(batchWriteRoute("role-mcp-server-config-permissions"))),
   }
 }
