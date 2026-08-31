@@ -1,6 +1,6 @@
-"""Pydantic schemas for the role-secret grant feature.
+"""Pydantic schemas for the role-secret-permission grant feature.
 
-Uniform REST surface (AGENTS.md §3): the collection is ``/role-secrets`` with
+Uniform REST surface (AGENTS.md §3): the collection is ``/role-secret-permissions`` with
 cursor pagination; create is ``POST``, update is ``PATCH`` (the grant is
 mutable — toggle the read/update/delete flags), retrieve is ``GET``, remove
 is ``DELETE``, plus batch read/write.
@@ -14,11 +14,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.ev2.secret.secret_models import RoleSecret
+from openhands.ev2.secret.secret_models import RoleSecretPermission
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
-class RoleSecretCreate(BaseModel):
+class RoleSecretPermissionCreate(BaseModel):
     """Payload to grant a role access to a secret."""
 
     model_config = ConfigDict(populate_by_name=True)
@@ -30,8 +30,8 @@ class RoleSecretCreate(BaseModel):
     delete_enabled: bool = False
 
 
-class RoleSecretUpdate(BaseModel):
-    """Partial update of a role-secret grant. All flags optional."""
+class RoleSecretPermissionUpdate(BaseModel):
+    """Partial update of a role-secret-permission grant. All flags optional."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -40,7 +40,7 @@ class RoleSecretUpdate(BaseModel):
     delete_enabled: bool | None = None
 
 
-class RoleSecretRead(BaseModel):
+class RoleSecretPermissionRead(BaseModel):
     """Role-secret grant representation returned by the API."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -55,8 +55,8 @@ class RoleSecretRead(BaseModel):
     updated_at: datetime
 
 
-class RoleSecretSearchFilter(BaseSearchFilter[RoleSecret]):
-    """Optional filter clauses for ``GET /role-secrets``."""
+class RoleSecretPermissionSearchFilter(BaseSearchFilter[RoleSecretPermission]):
+    """Optional filter clauses for ``GET /role-secret-permissions``."""
 
     role_id__eq: uuid.UUID | None = Field(default=None, description="Exact role id match.")
     secret_id__eq: uuid.UUID | None = Field(default=None, description="Exact secret id match.")
@@ -75,10 +75,10 @@ class RoleSecretSearchFilter(BaseSearchFilter[RoleSecret]):
     )
 
 
-class RoleSecretSearchResult(BaseModel):
-    """Paginated collection of role-secret grants."""
+class RoleSecretPermissionSearchResult(BaseModel):
+    """Paginated collection of role-secret-permission grants."""
 
-    items: list[RoleSecretRead]
+    items: list[RoleSecretPermissionRead]
     next_cursor: str | None = Field(
         default=None,
         description="Opaque cursor for the next page; null when no more results.",
@@ -86,41 +86,43 @@ class RoleSecretSearchResult(BaseModel):
     limit: int
 
 
-# Batch write: POST /role-secrets/batch applies create/update/delete atomically.
+# Batch write: POST /role-secret-permissions/batch applies create/update/delete atomically.
 
 
-class RoleSecretBatchCreate(BaseModel):
-    """Create operation within a role-secret batch write."""
+class RoleSecretPermissionBatchCreate(BaseModel):
+    """Create operation within a role-secret-permission batch write."""
 
     op: Literal["create"] = "create"
-    data: RoleSecretCreate
+    data: RoleSecretPermissionCreate
 
 
-class RoleSecretBatchUpdate(BaseModel):
-    """Update operation within a role-secret batch write."""
+class RoleSecretPermissionBatchUpdate(BaseModel):
+    """Update operation within a role-secret-permission batch write."""
 
     op: Literal["update"] = "update"
     id: uuid.UUID
-    data: RoleSecretUpdate
+    data: RoleSecretPermissionUpdate
 
 
-class RoleSecretBatchDelete(BaseModel):
-    """Delete operation within a role-secret batch write."""
+class RoleSecretPermissionBatchDelete(BaseModel):
+    """Delete operation within a role-secret-permission batch write."""
 
     op: Literal["delete"] = "delete"
     id: uuid.UUID
 
 
-RoleSecretBatchOp = Annotated[
-    RoleSecretBatchCreate | RoleSecretBatchUpdate | RoleSecretBatchDelete,
+RoleSecretPermissionBatchOp = Annotated[
+    RoleSecretPermissionBatchCreate
+    | RoleSecretPermissionBatchUpdate
+    | RoleSecretPermissionBatchDelete,
     Field(discriminator="op"),
 ]
 
 
-class RoleSecretBatchWriteRequest(BaseModel):
-    """Request body for ``POST /role-secrets/batch``."""
+class RoleSecretPermissionBatchWriteRequest(BaseModel):
+    """Request body for ``POST /role-secret-permissions/batch``."""
 
-    operations: list[RoleSecretBatchOp] = Field(
+    operations: list[RoleSecretPermissionBatchOp] = Field(
         min_length=1,
         max_length=100,
         description="Operations to apply atomically; create/update/delete mixed.",

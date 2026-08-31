@@ -1,4 +1,4 @@
-"""Unit tests for the Secret and RoleSecret ORM models (DB-backed)."""
+"""Unit tests for the Secret and RoleSecretPermission ORM models (DB-backed)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.secret.secret_models import RoleSecret, Secret
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret
 from openhands.ev2.user.user_models import User
 
 
@@ -70,8 +70,10 @@ class TestSecretModel:
         assert found is None
 
 
-class TestRoleSecretModel:
-    async def _seed_role_secret_user(self, session: AsyncSession) -> tuple[Role, Secret, User]:
+class TestRoleSecretPermissionModel:
+    async def _seed_role_secret_permission_user(
+        self, session: AsyncSession
+    ) -> tuple[Role, Secret, User]:
         user = await _seed_user(session)
         role = Role(name="r-" + uuid.uuid4().hex[:8])
         secret = Secret(code="S_" + uuid.uuid4().hex[:6], value="v", user_id=user.id)
@@ -81,8 +83,8 @@ class TestRoleSecretModel:
         return role, secret, user
 
     async def test_create_grant_defaults(self, session: AsyncSession) -> None:
-        role, secret, _ = await self._seed_role_secret_user(session)
-        link = RoleSecret(role_id=role.id, secret_id=secret.id)
+        role, secret, _ = await self._seed_role_secret_permission_user(session)
+        link = RoleSecretPermission(role_id=role.id, secret_id=secret.id)
         session.add(link)
         await session.flush()
         await session.refresh(link)
@@ -95,8 +97,8 @@ class TestRoleSecretModel:
         assert link.created_at is not None
 
     async def test_grant_flags_round_trip(self, session: AsyncSession) -> None:
-        role, secret, _ = await self._seed_role_secret_user(session)
-        link = RoleSecret(
+        role, secret, _ = await self._seed_role_secret_permission_user(session)
+        link = RoleSecretPermission(
             role_id=role.id,
             secret_id=secret.id,
             read_enabled=True,
@@ -110,24 +112,26 @@ class TestRoleSecretModel:
         assert link.update_enabled is True
         assert link.delete_enabled is False
 
-    async def test_role_secret_pair_is_unique(self, session: AsyncSession) -> None:
-        role, secret, _ = await self._seed_role_secret_user(session)
-        session.add(RoleSecret(role_id=role.id, secret_id=secret.id, read_enabled=True))
+    async def test_role_secret_permission_pair_is_unique(self, session: AsyncSession) -> None:
+        role, secret, _ = await self._seed_role_secret_permission_user(session)
+        session.add(RoleSecretPermission(role_id=role.id, secret_id=secret.id, read_enabled=True))
         await session.flush()
-        session.add(RoleSecret(role_id=role.id, secret_id=secret.id, read_enabled=False))
+        session.add(RoleSecretPermission(role_id=role.id, secret_id=secret.id, read_enabled=False))
         with pytest.raises(IntegrityError):
             await session.flush()
         await session.rollback()
 
     async def test_cascade_delete_secret_removes_grants(self, session: AsyncSession) -> None:
-        role, secret, _ = await self._seed_role_secret_user(session)
-        link = RoleSecret(role_id=role.id, secret_id=secret.id, read_enabled=True)
+        role, secret, _ = await self._seed_role_secret_permission_user(session)
+        link = RoleSecretPermission(role_id=role.id, secret_id=secret.id, read_enabled=True)
         session.add(link)
         await session.flush()
         link_id = link.id
         await session.delete(secret)
         await session.flush()
         found = (
-            await session.execute(select(RoleSecret).where(RoleSecret.id == link_id))
+            await session.execute(
+                select(RoleSecretPermission).where(RoleSecretPermission.id == link_id)
+            )
         ).scalar_one_or_none()
         assert found is None

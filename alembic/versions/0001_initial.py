@@ -23,11 +23,11 @@ Tables:
 * ``roles``                  — named role bundling per-entity Permission policies.
 * ``user_roles``             — role-to-user assignments.
 * ``secrets``                — named secrets with encrypted values.
-* ``role_secrets``           — per-role grants of access to secrets.
+* ``role_secret_permissions``           — per-role grants of access to secrets.
 * ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
-* ``feature_flag_roles``     — per-role overrides of feature flags.
+* ``feature_flag_role_assignments``     — per-role overrides of feature flags.
 """
 
 from __future__ import annotations
@@ -381,10 +381,10 @@ def upgrade() -> None:
             comment="Permission policy for feature_flag resources; null = deny.",
         ),
         sa.Column(
-            "feature_flag_role_permission",
+            "feature_flag_role_assignment_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Permission policy for feature_flag_role resources; null = deny.",
+            comment="Permission policy for feature_flag_role_assignment resources; null = deny.",
         ),
         sa.Column(
             "created_at",
@@ -460,10 +460,10 @@ def upgrade() -> None:
     op.create_index("ix_secrets_user_id", "secrets", ["user_id"], unique=False)
 
     # ------------------------------------------------------------------ #
-    # role_secrets
+    # role_secret_permissions
     # ------------------------------------------------------------------ #
     op.create_table(
-        "role_secrets",
+        "role_secret_permissions",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("role_id", sa.Uuid(), nullable=False),
         sa.Column("secret_id", sa.Uuid(), nullable=False),
@@ -483,20 +483,32 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["role_id"], ["roles.id"], ondelete="CASCADE", name="fk_role_secrets_role_id_roles"
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_role_secret_permissions_role_id_roles",
         ),
         sa.ForeignKeyConstraint(
             ["secret_id"],
             ["secrets.id"],
             ondelete="CASCADE",
-            name="fk_role_secrets_secret_id_secrets",
+            name="fk_role_secret_permissions_secret_id_secrets",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("role_id", "secret_id", name="uq_role_secrets_role_id_secret_id"),
+        sa.UniqueConstraint(
+            "role_id", "secret_id", name="uq_role_secret_permissions_role_id_secret_id"
+        ),
         comment="Per-role grants of access to secrets",
     )
-    op.create_index("ix_role_secrets_role_id", "role_secrets", ["role_id"], unique=False)
-    op.create_index("ix_role_secrets_secret_id", "role_secrets", ["secret_id"], unique=False)
+    op.create_index(
+        "ix_role_secret_permissions_role_id", "role_secret_permissions", ["role_id"], unique=False
+    )
+    op.create_index(
+        "ix_role_secret_permissions_secret_id",
+        "role_secret_permissions",
+        ["secret_id"],
+        unique=False,
+    )
 
     # ------------------------------------------------------------------ #
     # provider_connections
@@ -610,10 +622,10 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # feature_flag_roles
+    # feature_flag_role_assignments
     # ------------------------------------------------------------------ #
     op.create_table(
-        "feature_flag_roles",
+        "feature_flag_role_assignments",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("feature_flag_id", sa.String(length=128), nullable=False),
         sa.Column("role_id", sa.Uuid(), nullable=False),
@@ -627,28 +639,31 @@ def upgrade() -> None:
             ["feature_flag_id"],
             ["feature_flags.id"],
             ondelete="CASCADE",
-            name="fk_feature_flag_roles_feature_flag_id_feature_flags",
+            name="fk_feature_flag_role_assignments_feature_flag_id_feature_flags",
         ),
         sa.ForeignKeyConstraint(
             ["role_id"],
             ["roles.id"],
             ondelete="CASCADE",
-            name="fk_feature_flag_roles_role_id_roles",
+            name="fk_feature_flag_role_assignments_role_id_roles",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
-            "feature_flag_id", "role_id", name="uq_feature_flag_roles_flag_id_role_id"
+            "feature_flag_id", "role_id", name="uq_feature_flag_role_assignments_flag_id_role_id"
         ),
         comment="Per-role overrides of feature flags",
     )
     op.create_index(
-        "ix_feature_flag_roles_feature_flag_id",
-        "feature_flag_roles",
+        "ix_feature_flag_role_assignments_feature_flag_id",
+        "feature_flag_role_assignments",
         ["feature_flag_id"],
         unique=False,
     )
     op.create_index(
-        "ix_feature_flag_roles_role_id", "feature_flag_roles", ["role_id"], unique=False
+        "ix_feature_flag_role_assignments_role_id",
+        "feature_flag_role_assignments",
+        ["role_id"],
+        unique=False,
     )
 
     # ------------------------------------------------------------------ #
@@ -822,18 +837,23 @@ def downgrade() -> None:
     op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
     op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
     op.drop_table("llm_usage")
-    op.drop_index("ix_feature_flag_roles_role_id", table_name="feature_flag_roles")
-    op.drop_index("ix_feature_flag_roles_feature_flag_id", table_name="feature_flag_roles")
-    op.drop_table("feature_flag_roles")
+    op.drop_index(
+        "ix_feature_flag_role_assignments_role_id", table_name="feature_flag_role_assignments"
+    )
+    op.drop_index(
+        "ix_feature_flag_role_assignments_feature_flag_id",
+        table_name="feature_flag_role_assignments",
+    )
+    op.drop_table("feature_flag_role_assignments")
     op.drop_table("feature_flags")
     op.drop_index("ix_llms_provider_connection_id", table_name="llms")
     op.drop_index("ix_llms_user_id", table_name="llms")
     op.drop_table("llms")
     op.drop_index("ix_provider_connections_user_id", table_name="provider_connections")
     op.drop_table("provider_connections")
-    op.drop_index("ix_role_secrets_secret_id", table_name="role_secrets")
-    op.drop_index("ix_role_secrets_role_id", table_name="role_secrets")
-    op.drop_table("role_secrets")
+    op.drop_index("ix_role_secret_permissions_secret_id", table_name="role_secret_permissions")
+    op.drop_index("ix_role_secret_permissions_role_id", table_name="role_secret_permissions")
+    op.drop_table("role_secret_permissions")
     op.drop_index("ix_secrets_user_id", table_name="secrets")
     op.drop_index("ix_secrets_code", table_name="secrets")
     op.drop_table("secrets")

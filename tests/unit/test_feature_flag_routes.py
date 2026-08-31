@@ -107,13 +107,15 @@ class TestDeleteFeatureFlagRoute:
         role_id = await _seed_role(client, name="casc-role")
         await client.post("/feature-flags", json={"id": flag_id})
         create = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
         assert create.status_code == 201
         override_id = create.json()["id"]
         await client.delete(f"/feature-flags/{flag_id}")
-        assert (await client.get(f"/feature-flag-roles/{override_id}")).status_code == 404
+        assert (
+            await client.get(f"/feature-flag-role-assignments/{override_id}")
+        ).status_code == 404
 
 
 class TestListFeatureFlagsRoute:
@@ -237,13 +239,13 @@ class TestFeatureFlagBatchWrite:
 # ---------------------------------------------------------------------- #
 
 
-class TestCreateFeatureFlagRoleRoute:
+class TestCreateFeatureFlagRoleAssignmentRoute:
     async def test_create_override(self, client: AsyncClient) -> None:
         flag_id = "OVR_FLAG"
         role_id = await _seed_role(client, name="ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         resp = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
         assert resp.status_code == 201, resp.text
@@ -258,15 +260,15 @@ class TestCreateFeatureFlagRoleRoute:
         role_id = await _seed_role(client, name="dup-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         payload = {"feature_flag_id": flag_id, "role_id": role_id}
-        first = await client.post("/feature-flag-roles", json=payload)
+        first = await client.post("/feature-flag-role-assignments", json=payload)
         assert first.status_code == 201
-        second = await client.post("/feature-flag-roles", json=payload)
+        second = await client.post("/feature-flag-role-assignments", json=payload)
         assert second.status_code == 409
 
     async def test_create_missing_flag_returns_404(self, client: AsyncClient) -> None:
         role_id = await _seed_role(client, name="orphan-role")
         resp = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "NO_SUCH_FLAG", "role_id": role_id},
         )
         assert resp.status_code == 404
@@ -274,48 +276,48 @@ class TestCreateFeatureFlagRoleRoute:
     async def test_create_missing_role_returns_404(self, client: AsyncClient) -> None:
         await client.post("/feature-flags", json={"id": "ORPHAN_FLAG"})
         resp = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "ORPHAN_FLAG", "role_id": str(uuid.uuid4())},
         )
         assert resp.status_code == 404
 
 
-class TestGetFeatureFlagRoleRoute:
+class TestGetFeatureFlagRoleAssignmentRoute:
     async def test_get_existing(self, client: AsyncClient) -> None:
         flag_id = "GET_OVR_FLAG"
         role_id = await _seed_role(client, name="get-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         create = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
         lid = create.json()["id"]
-        resp = await client.get(f"/feature-flag-roles/{lid}")
+        resp = await client.get(f"/feature-flag-role-assignments/{lid}")
         assert resp.status_code == 200
         assert resp.json()["id"] == lid
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get(f"/feature-flag-roles/{uuid.uuid4()}")
+        resp = await client.get(f"/feature-flag-role-assignments/{uuid.uuid4()}")
         assert resp.status_code == 404
 
 
-class TestListFeatureFlagRolesRoute:
+class TestListFeatureFlagRoleAssignmentsRoute:
     async def test_search_with_limit(self, client: AsyncClient) -> None:
         flag_id = "LIST_OVR_FLAG"
         await client.post("/feature-flags", json={"id": flag_id})
         for i in range(3):
             role_id = await _seed_role(client, name=f"list-ovr-role-{i}")
             await client.post(
-                "/feature-flag-roles",
+                "/feature-flag-role-assignments",
                 json={"feature_flag_id": flag_id, "role_id": role_id},
             )
-        resp = await client.get("/feature-flag-roles?limit=2")
+        resp = await client.get("/feature-flag-role-assignments?limit=2")
         body = resp.json()
         assert len(body["items"]) == 2
         assert body["next_cursor"] is not None
 
     async def test_search_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
-        resp = await client.get("/feature-flag-roles?cursor=not-a-uuid")
+        resp = await client.get("/feature-flag-role-assignments?cursor=not-a-uuid")
         assert resp.status_code == 400
 
     async def test_search_feature_flag_id_filter(self, client: AsyncClient) -> None:
@@ -323,44 +325,44 @@ class TestListFeatureFlagRolesRoute:
         await client.post("/feature-flags", json={"id": "FILTER_B"})
         role_id = await _seed_role(client, name="filter-role")
         await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "FILTER_A", "role_id": role_id},
         )
         await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "FILTER_B", "role_id": role_id},
         )
-        resp = await client.get("/feature-flag-roles?feature_flag_id__eq=FILTER_A")
+        resp = await client.get("/feature-flag-role-assignments?feature_flag_id__eq=FILTER_A")
         items = resp.json()["items"]
         assert all(i["feature_flag_id"] == "FILTER_A" for i in items)
 
 
-class TestCountFeatureFlagRolesRoute:
+class TestCountFeatureFlagRoleAssignmentsRoute:
     async def test_count_after_create(self, client: AsyncClient) -> None:
         flag_id = "CNT_OVR_FLAG"
         role_id = await _seed_role(client, name="cnt-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
-        resp = await client.get("/feature-flag-roles/count")
+        resp = await client.get("/feature-flag-role-assignments/count")
         assert resp.status_code == 200
         assert resp.json()["count"] >= 1
 
 
-class TestFeatureFlagRoleBatchRead:
+class TestFeatureFlagRoleAssignmentBatchRead:
     async def test_batch_aligned_with_nulls(self, client: AsyncClient) -> None:
         flag_id = "BR_OVR_FLAG"
         role_id = await _seed_role(client, name="br-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         create = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
         aid = create.json()["id"]
         missing = str(uuid.uuid4())
-        resp = await client.get(f"/feature-flag-roles/batch?ids={aid}&ids={missing}")
+        resp = await client.get(f"/feature-flag-role-assignments/batch?ids={aid}&ids={missing}")
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert len(items) == 2
@@ -368,18 +370,18 @@ class TestFeatureFlagRoleBatchRead:
         assert items[1] is None
 
 
-class TestFeatureFlagRoleBatchWrite:
+class TestFeatureFlagRoleAssignmentBatchWrite:
     async def test_batch_mix_cd_returns_positional(self, client: AsyncClient) -> None:
         flag_id = "BW_OVR_FLAG"
         role_a = await _seed_role(client, name="bw-ovr-role-a")
         role_b = await _seed_role(client, name="bw-ovr-role-b")
         await client.post("/feature-flags", json={"id": flag_id})
         a = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_a},
         )
         resp = await client.post(
-            "/feature-flag-roles/batch",
+            "/feature-flag-role-assignments/batch",
             json={
                 "operations": [
                     {"op": "delete", "id": a.json()["id"]},
@@ -395,14 +397,16 @@ class TestFeatureFlagRoleBatchWrite:
         assert len(items) == 2
         assert items[0] is None
         assert items[1]["role_id"] == role_b
-        assert (await client.get(f"/feature-flag-roles/{a.json()['id']}")).status_code == 404
+        assert (
+            await client.get(f"/feature-flag-role-assignments/{a.json()['id']}")
+        ).status_code == 404
 
     async def test_batch_atomic_rollback_on_missing_id(self, client: AsyncClient) -> None:
         flag_id = "RB_OVR_FLAG"
         role_id = await _seed_role(client, name="rb-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         resp = await client.post(
-            "/feature-flag-roles/batch",
+            "/feature-flag-role-assignments/batch",
             json={
                 "operations": [
                     {
@@ -415,39 +419,39 @@ class TestFeatureFlagRoleBatchWrite:
         )
         assert resp.status_code == 404
         # create rolled back
-        items = (await client.get("/feature-flag-roles?limit=100")).json()["items"]
+        items = (await client.get("/feature-flag-role-assignments?limit=100")).json()["items"]
         assert not any(i["role_id"] == role_id for i in items)
 
     async def test_batch_update_op_rejected(self, client: AsyncClient) -> None:
         # overrides are immutable; update op must be rejected by the discriminated union.
         resp = await client.post(
-            "/feature-flag-roles/batch",
+            "/feature-flag-role-assignments/batch",
             json={"operations": [{"op": "update", "id": str(uuid.uuid4()), "data": {}}]},
         )
         assert resp.status_code == 422
 
 
-class TestDeleteFeatureFlagRoleRoute:
+class TestDeleteFeatureFlagRoleAssignmentRoute:
     async def test_delete_override(self, client: AsyncClient) -> None:
         flag_id = "DEL_OVR_FLAG"
         role_id = await _seed_role(client, name="del-ovr-role")
         await client.post("/feature-flags", json={"id": flag_id})
         create = await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": flag_id, "role_id": role_id},
         )
         lid = create.json()["id"]
-        resp = await client.delete(f"/feature-flag-roles/{lid}")
+        resp = await client.delete(f"/feature-flag-role-assignments/{lid}")
         assert resp.status_code == 204
-        assert (await client.get(f"/feature-flag-roles/{lid}")).status_code == 404
+        assert (await client.get(f"/feature-flag-role-assignments/{lid}")).status_code == 404
 
     async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.delete(f"/feature-flag-roles/{uuid.uuid4()}")
+        resp = await client.delete(f"/feature-flag-role-assignments/{uuid.uuid4()}")
         assert resp.status_code == 404
 
 
 class TestPermissionEnforcement:
-    """The feature_flag and feature_flag_role resources are governed by their
+    """The feature_flag and feature_flag_role_assignment resources are governed by their
     own role permission columns."""
 
     async def test_missing_auth_token_anonymous_denied(self, app) -> None:
@@ -487,7 +491,10 @@ class TestPermissionEnforcement:
         await _assign_role(
             session,
             principal.id,
-            {"feature_flag_permission": Permitted(), "feature_flag_role_permission": Permitted()},
+            {
+                "feature_flag_permission": Permitted(),
+                "feature_flag_role_assignment_permission": Permitted(),
+            },
         )
         await session.commit()
 
@@ -501,20 +508,25 @@ class TestPermissionEnforcement:
         )
         assert resp.status_code == 201
 
-    async def test_feature_flag_role_permission_governs_overrides(
+    async def test_feature_flag_role_assignment_permission_governs_overrides(
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         principal = await _make_principal(session, email="ovr@example.com", username="ovr")
-        # Only feature_flag_role permission granted (read-only on feature_flag).
+        # Only feature_flag_role_assignment permission granted (read-only on feature_flag).
         await _assign_role(
             session,
             principal.id,
-            {"feature_flag_permission": ReadOnly(), "feature_flag_role_permission": Permitted()},
+            {
+                "feature_flag_permission": ReadOnly(),
+                "feature_flag_role_assignment_permission": Permitted(),
+            },
         )
         await session.commit()
 
         token = create_auth_token(principal.id)
-        resp = await client.get("/feature-flag-roles", headers={"Authorization": f"Bearer {token}"})
+        resp = await client.get(
+            "/feature-flag-role-assignments", headers={"Authorization": f"Bearer {token}"}
+        )
         assert resp.status_code == 200
 
 
@@ -563,7 +575,7 @@ class TestGetEnabledFeatureFlags:
         # Globally disabled flag + override row attaching the user's role.
         await client.post("/feature-flags", json={"id": "OVERRIDE_ME", "enabled": False})
         await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "OVERRIDE_ME", "role_id": str(role.id)},
         )
         # A globally-enabled flag is also present.
@@ -595,7 +607,7 @@ class TestGetEnabledFeatureFlags:
 
         await client.post("/feature-flags", json={"id": "ONLY_FOR_A", "enabled": False})
         await client.post(
-            "/feature-flag-roles",
+            "/feature-flag-role-assignments",
             json={"feature_flag_id": "ONLY_FOR_A", "role_id": str(role.id)},
         )
 

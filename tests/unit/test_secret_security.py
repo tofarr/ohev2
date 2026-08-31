@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role, UserRole
-from openhands.ev2.secret.secret_models import RoleSecret, Secret
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret
 from openhands.ev2.secret.secret_security import SecretAccess, SecretAccessFilter
 from openhands.ev2.security.security_models import Action, Permitted
 from openhands.ev2.user.user_models import User
@@ -32,7 +32,7 @@ async def _seed_grant(
     await session.flush()
     session.add(UserRole(role_id=role.id, user_id=user.id))
     session.add(
-        RoleSecret(
+        RoleSecretPermission(
             role_id=role.id,
             secret_id=secret.id,
             read_enabled=read,
@@ -121,6 +121,6 @@ class TestSecretAccessFilterSql:
 class TestPermittedBypassesGrants:
     async def test_permitted_sees_all_secrets(self, session: AsyncSession) -> None:
         # Permitted.to_search_filter returns AllSearchFilter for every action,
-        # so an admin role bypasses the role_secrets grant table entirely.
+        # so an admin role bypasses the role_secret_permissions grant table entirely.
         for action in (Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH, Action.CREATE):
             assert isinstance(Permitted().to_search_filter(uuid.uuid4(), action), AllSearchFilter)

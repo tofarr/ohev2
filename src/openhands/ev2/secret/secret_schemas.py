@@ -1,6 +1,6 @@
 """Pydantic schemas for the secret feature.
 
-Two resources share the ``/secrets`` and ``/role-secrets`` collections.
+Two resources share the ``/secrets`` and ``/role-secret-permissions`` collections.
 
 Uniform REST surface (AGENTS.md §3):
 
@@ -8,10 +8,10 @@ Uniform REST surface (AGENTS.md §3):
   batch read/write. The ``value`` is received as a :class:`SecretStr` on create
   /update (so it is never logged carelessly) and returned as a decrypted
   plaintext ``str`` on read, because the read grant *is* the authorization to
-  view the value — the per-secret ``role_secrets`` grant controls who may
+  view the value — the per-secret ``role_secret_permissions`` grant controls who may
   retrieve it. There is no separate "reveal" endpoint; GET /secrets/{id}
   returns the value.
-* ``/role-secrets`` — full CRUD (the link is mutable: PATCH toggles the
+* ``/role-secret-permissions`` — full CRUD (the link is mutable: PATCH toggles the
   read/update/delete flags) plus batch read/write.
 """
 
@@ -88,7 +88,7 @@ class SecretRead(BaseModel):
     """Secret representation returned by the API.
 
     The decrypted ``value`` is returned as a plaintext ``str``. The read grant
-    (``role_secrets.read_enabled`` for one of the principal's roles, or a
+    (``role_secret_permissions.read_enabled`` for one of the principal's roles, or a
     ``Permitted`` secret policy) *is* the authorization to view the value, so
     there is no separate reveal endpoint.
     """

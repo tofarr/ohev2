@@ -3,8 +3,8 @@
 Secrets use a custom permission policy, :class:`SecretAccess`, that differs
 from the simple :class:`Permitted` / :class:`Denied` / :class:`ReadOnly`
 policies: read, update, and delete are gated **per-secret** by the
-``role_secrets`` link table. A principal may perform one of those actions on a
-secret only when one of their roles has a :class:`RoleSecret` row for that
+``role_secret_permissions`` link table. A principal may perform one of those actions on a
+secret only when one of their roles has a :class:`RoleSecretPermission` row for that
 secret with the matching flag (``read_enabled`` / ``update_enabled`` /
 ``delete_enabled``) set. ``CREATE`` is gated by the policy alone — a role
 carrying :class:`SecretAccess` (or :class:`Permitted`) may create any secret;
@@ -21,7 +21,7 @@ Reduction to a :class:`SearchFilter` (AGENTS.md §11):
 * ``DELETE`` → :class:`SecretAccessFilter` keyed on ``delete_enabled``.
 
 :class:`SecretAccessFilter` admits a secret iff its id appears in
-``role_secrets`` for one of the principal's roles (joined via ``user_roles``)
+``role_secret_permissions`` for one of the principal's roles (joined via ``user_roles``)
 with the keyed flag enabled. The decision lives in SQL so it scales with the
 grant set; the in-memory ``matches`` is permissive (returns ``True``) because
 the grant data lives in the DB and is never materialized on a single item —
@@ -44,7 +44,7 @@ from sqlalchemy import select
 from sqlalchemy.sql.elements import ColumnElement
 
 from openhands.ev2.role.role_models import UserRole
-from openhands.ev2.secret.secret_models import RoleSecret, Secret
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret
 from openhands.ev2.security.security_models import Action, Permission
 from openhands.ev2.util.search_filter import (
     AllSearchFilter,
@@ -52,7 +52,7 @@ from openhands.ev2.util.search_filter import (
     T,
 )
 
-# Maps an action to the :class:`RoleSecret` flag column that admits it. CREATE
+# Maps an action to the :class:`RoleSecretPermission` flag column that admits it. CREATE
 # has no entry (it is gated by the policy alone). SEARCH is treated as READ so
 # listing a collection requires the read grant, consistent with single-item GET.
 _ACTION_FLAG: dict[Action, str] = {
@@ -64,11 +64,11 @@ _ACTION_FLAG: dict[Action, str] = {
 
 
 class SecretAccessFilter(SearchFilter[T]):
-    """Filter admitting secrets granted to the principal via ``role_secrets``.
+    """Filter admitting secrets granted to the principal via ``role_secret_permissions``.
 
     Admits a :class:`Secret` iff one of the principal's roles has a
-    :class:`RoleSecret` row for that secret with ``flag`` enabled. The check is
-    expressed in SQL (a ``secret.id IN (subquery)`` over ``role_secrets`` joined
+    :class:`RoleSecretPermission` row for that secret with ``flag`` enabled. The check is
+    expressed in SQL (a ``secret.id IN (subquery)`` over ``role_secret_permissions`` joined
     to ``user_roles``) so it scales with the grant set rather than materializing
     every grant in memory.
     """
@@ -87,10 +87,10 @@ class SecretAccessFilter(SearchFilter[T]):
         return True
 
     def sql_condition(self) -> ColumnElement[bool] | None:
-        flag_col = getattr(RoleSecret, self.flag)
+        flag_col = getattr(RoleSecretPermission, self.flag)
         granted = (
-            select(RoleSecret.secret_id)
-            .join(UserRole, UserRole.role_id == RoleSecret.role_id)
+            select(RoleSecretPermission.secret_id)
+            .join(UserRole, UserRole.role_id == RoleSecretPermission.role_id)
             .where(UserRole.user_id == self.user_id, flag_col.is_(True))
         )
         return Secret.id.in_(granted)
@@ -101,9 +101,9 @@ class SecretAccess(Permission):
 
     ``CREATE`` is unrestricted (any principal whose role carries this policy
     may create secrets). ``READ``/``SEARCH``, ``UPDATE``, and ``DELETE`` are
-    gated per-secret by the ``role_secrets`` link table — a principal may act
+    gated per-secret by the ``role_secret_permissions`` link table — a principal may act
     on a secret only when one of their roles has a matching enabled
-    :class:`RoleSecret` row. A role with ``secret_permission = Permitted()``
+    :class:`RoleSecretPermission` row. A role with ``secret_permission = Permitted()``
     bypasses the per-secret grants and gets full access (handled by
     :class:`Permitted`, not this policy).
     """
@@ -116,7 +116,7 @@ class SecretAccess(Permission):
         if action is Action.CREATE:
             return AllSearchFilter[Any]()
         if user_id is None:
-            # Anonymous principals have no roles and therefore no role_secrets
+            # Anonymous principals have no roles and therefore no role_secret_permissions
             # grants; deny read/update/delete.
             from openhands.ev2.util.search_filter import NoneSearchFilter
 

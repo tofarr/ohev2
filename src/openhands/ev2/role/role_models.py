@@ -45,7 +45,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "llm_permission",
     "llm_aggregated_usage_permission",
     "feature_flag_permission",
-    "feature_flag_role_permission",
+    "feature_flag_role_assignment_permission",
 )
 
 
@@ -122,10 +122,10 @@ class Role(Base):
         default=None,
         comment="Permission policy for feature_flag resources; null = deny.",
     )
-    feature_flag_role_permission: Mapped[Permission | None] = mapped_column(
+    feature_flag_role_assignment_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
         default=None,
-        comment="Permission policy for feature_flag_role resources; null = deny.",
+        comment="Permission policy for feature_flag_role_assignment resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,

@@ -8,21 +8,21 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRole
+from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
 from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagCreate,
-    FeatureFlagRoleCreate,
-    FeatureFlagRoleSearchFilter,
+    FeatureFlagRoleAssignmentCreate,
+    FeatureFlagRoleAssignmentSearchFilter,
     FeatureFlagSearchFilter,
     FeatureFlagUpdate,
 )
 from openhands.ev2.feature_flag.feature_flag_service import (
     FeatureFlagConflictError,
     FeatureFlagNotFoundError,
-    FeatureFlagRoleConflictError,
-    FeatureFlagRoleNotFoundError,
-    FeatureFlagRoleOrphanError,
-    FeatureFlagRoleService,
+    FeatureFlagRoleAssignmentConflictError,
+    FeatureFlagRoleAssignmentNotFoundError,
+    FeatureFlagRoleAssignmentOrphanError,
+    FeatureFlagRoleAssignmentService,
     FeatureFlagService,
 )
 from openhands.ev2.role.role_models import Role
@@ -35,9 +35,9 @@ def service(session: AsyncSession) -> FeatureFlagService:
 
 
 @pytest.fixture
-def override_service(session: AsyncSession) -> FeatureFlagRoleService:
+def override_service(session: AsyncSession) -> FeatureFlagRoleAssignmentService:
 
-    return FeatureFlagRoleService(session, AllSearchFilter[FeatureFlagRole]())
+    return FeatureFlagRoleAssignmentService(session, AllSearchFilter[FeatureFlagRoleAssignment]())
 
 
 class TestCreateFeatureFlag:
@@ -134,7 +134,7 @@ class TestEnabledForRoles:
     async def test_override_forces_flag_on(
         self,
         service: FeatureFlagService,
-        override_service: FeatureFlagRoleService,
+        override_service: FeatureFlagRoleAssignmentService,
         session: AsyncSession,
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_OVR")
@@ -144,7 +144,7 @@ class TestEnabledForRoles:
         ).scalar_one()
         flag.enabled = False
         await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         ids = await service.enabled_for_roles([role_id])
         assert flag_id in ids
@@ -152,12 +152,12 @@ class TestEnabledForRoles:
     async def test_override_does_not_apply_to_other_role(
         self,
         service: FeatureFlagService,
-        override_service: FeatureFlagRoleService,
+        override_service: FeatureFlagRoleAssignmentService,
         session: AsyncSession,
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_ISOLATE")
         await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         other = Role(name="ef-other-role")
         session.add(other)
@@ -170,13 +170,13 @@ class TestEnabledForRoles:
     async def test_union_of_global_and_override(
         self,
         service: FeatureFlagService,
-        override_service: FeatureFlagRoleService,
+        override_service: FeatureFlagRoleAssignmentService,
         session: AsyncSession,
     ) -> None:
         await service.create(FeatureFlagCreate(id="EF_GLOBAL", enabled=True))
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="EF_OVR2")
         await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         ids = set(await service.enabled_for_roles([role_id]))
         assert {"EF_GLOBAL", flag_id} <= ids
@@ -202,30 +202,30 @@ async def _seed_flag_and_role(
 
 class TestCreateOverride:
     async def test_create_override(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session)
         link = await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         assert isinstance(link.id, uuid.UUID)
         assert link.feature_flag_id == flag_id
         assert link.role_id == role_id
 
     async def test_create_duplicate_conflicts(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="DUP_OVR_SVC")
         await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
-        with pytest.raises(FeatureFlagRoleConflictError):
+        with pytest.raises(FeatureFlagRoleAssignmentConflictError):
             await override_service.create(
-                FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+                FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
             )
 
     async def test_create_missing_flag_raises_orphan(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         session.add(Role(name="orphan-flag-role"))
         await session.flush()
@@ -234,62 +234,68 @@ class TestCreateOverride:
             .scalar_one()
             .id
         )
-        with pytest.raises((FeatureFlagRoleOrphanError, Exception)):
+        with pytest.raises((FeatureFlagRoleAssignmentOrphanError, Exception)):
             await override_service.create(
-                FeatureFlagRoleCreate(feature_flag_id="NO_SUCH_FLAG", role_id=role_id)
+                FeatureFlagRoleAssignmentCreate(feature_flag_id="NO_SUCH_FLAG", role_id=role_id)
             )
 
 
 class TestGetOverride:
     async def test_get_existing(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="GET_OVR_SVC")
         link = await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         fetched = await override_service.get(link.id)
         assert fetched.id == link.id
 
-    async def test_get_missing_raises(self, override_service: FeatureFlagRoleService) -> None:
-        with pytest.raises(FeatureFlagRoleNotFoundError):
+    async def test_get_missing_raises(
+        self, override_service: FeatureFlagRoleAssignmentService
+    ) -> None:
+        with pytest.raises(FeatureFlagRoleAssignmentNotFoundError):
             await override_service.get(uuid.uuid4())
 
 
 class TestDeleteOverride:
     async def test_delete(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="DEL_OVR_SVC")
         link = await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         await override_service.delete(link.id)
-        with pytest.raises(FeatureFlagRoleNotFoundError):
+        with pytest.raises(FeatureFlagRoleAssignmentNotFoundError):
             await override_service.get(link.id)
 
 
 class TestSearchOverride:
     async def test_search_filter_by_flag(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         f1, r1 = await _seed_flag_and_role(session, flag_id="SF_A", role_name="sf-a-role")
         session.add(FeatureFlag(id="SF_B"))
         session.add(Role(name="sf-b-role"))
         await session.flush()
         r2 = (await session.execute(select(Role).where(Role.name == "sf-b-role"))).scalar_one().id
-        await override_service.create(FeatureFlagRoleCreate(feature_flag_id=f1, role_id=r1))
-        await override_service.create(FeatureFlagRoleCreate(feature_flag_id="SF_B", role_id=r2))
+        await override_service.create(
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=f1, role_id=r1)
+        )
+        await override_service.create(
+            FeatureFlagRoleAssignmentCreate(feature_flag_id="SF_B", role_id=r2)
+        )
         links, _ = await override_service.search(
-            search_filter=FeatureFlagRoleSearchFilter(feature_flag_id__eq=f1)
+            search_filter=FeatureFlagRoleAssignmentSearchFilter(feature_flag_id__eq=f1)
         )
         assert all(link.feature_flag_id == f1 for link in links)
 
     async def test_count(
-        self, override_service: FeatureFlagRoleService, session: AsyncSession
+        self, override_service: FeatureFlagRoleAssignmentService, session: AsyncSession
     ) -> None:
         flag_id, role_id = await _seed_flag_and_role(session, flag_id="CNT_OVR_SVC")
         await override_service.create(
-            FeatureFlagRoleCreate(feature_flag_id=flag_id, role_id=role_id)
+            FeatureFlagRoleAssignmentCreate(feature_flag_id=flag_id, role_id=role_id)
         )
         assert await override_service.count() >= 1

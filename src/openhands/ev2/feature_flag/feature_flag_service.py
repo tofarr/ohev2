@@ -1,8 +1,8 @@
 """Service layer for the feature_flag feature.
 
 CRUD over :class:`FeatureFlag` (governed by the ``feature_flag_permission``
-role column) and :class:`FeatureFlagRole` (the per-role override link table,
-governed by the ``feature_flag_role_permission`` role column). Services contain
+role column) and :class:`FeatureFlagRoleAssignment` (the per-role override link table,
+governed by the ``feature_flag_role_assignment_permission`` role column). Services contain
 business logic; the effective ``perm_filter`` is held as a field, set at
 construction, so search/update/delete SQL and create payloads are scoped to the
 principal (AGENTS.md §9 — authorization enforced in services, not just routers).
@@ -19,18 +19,18 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRole
+from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
 from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagBatchCreate,
     FeatureFlagBatchDelete,
     FeatureFlagBatchOp,
     FeatureFlagBatchUpdate,
     FeatureFlagCreate,
-    FeatureFlagRoleBatchCreate,
-    FeatureFlagRoleBatchDelete,
-    FeatureFlagRoleBatchOp,
-    FeatureFlagRoleCreate,
-    FeatureFlagRoleSearchFilter,
+    FeatureFlagRoleAssignmentBatchCreate,
+    FeatureFlagRoleAssignmentBatchDelete,
+    FeatureFlagRoleAssignmentBatchOp,
+    FeatureFlagRoleAssignmentCreate,
+    FeatureFlagRoleAssignmentSearchFilter,
     FeatureFlagSearchFilter,
     FeatureFlagUpdate,
 )
@@ -54,15 +54,15 @@ class FeatureFlagPermissionScopeError(Exception):
     """Raised when a create payload falls outside the principal's scope."""
 
 
-class FeatureFlagRoleNotFoundError(Exception):
+class FeatureFlagRoleAssignmentNotFoundError(Exception):
     """Raised when a feature-flag role override id does not exist."""
 
 
-class FeatureFlagRoleConflictError(Exception):
+class FeatureFlagRoleAssignmentConflictError(Exception):
     """Raised when an override already exists for the (feature_flag_id, role_id) pair."""
 
 
-class FeatureFlagRoleOrphanError(Exception):
+class FeatureFlagRoleAssignmentOrphanError(Exception):
     """Raised when the referenced feature flag or role does not exist."""
 
 
@@ -211,8 +211,8 @@ class FeatureFlagService:
         if not role_ids:
             result = await self._session.execute(globally_enabled)
             return [row[0] for row in result.all()]
-        overridden = select(FeatureFlagRole.feature_flag_id).where(
-            FeatureFlagRole.role_id.in_(role_ids)
+        overridden = select(FeatureFlagRoleAssignment.feature_flag_id).where(
+            FeatureFlagRoleAssignment.role_id.in_(role_ids)
         )
         stmt = globally_enabled.union(overridden)
         result = await self._session.execute(stmt)
@@ -289,37 +289,37 @@ def _classify_flag_integrity_error(exc: IntegrityError, flag_id: str) -> Excepti
 # ---------------------------------------------------------------------- #
 
 
-class FeatureFlagRoleService:
-    """CRUD over the ``feature_flag_roles`` link table (per-role overrides).
+class FeatureFlagRoleAssignmentService:
+    """CRUD over the ``feature_flag_role_assignments`` link table (per-role overrides).
 
     Overrides are immutable; there is no update — delete and re-create to
     change (mirroring ``user_roles``). The service takes a ``perm_filter`` so
     the override rows are scoped to the principal's
-    ``feature_flag_role_permission`` grant.
+    ``feature_flag_role_assignment_permission`` grant.
     """
 
     def __init__(
         self,
         session: AsyncSession,
-        perm_filter: SearchFilter[FeatureFlagRole] = ALL,
+        perm_filter: SearchFilter[FeatureFlagRoleAssignment] = ALL,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter
 
-    async def create(self, payload: FeatureFlagRoleCreate) -> FeatureFlagRole:
+    async def create(self, payload: FeatureFlagRoleAssignmentCreate) -> FeatureFlagRoleAssignment:
         """Attach a role override to a feature flag.
 
-        Raises :class:`FeatureFlagRoleConflictError` on a duplicate
+        Raises :class:`FeatureFlagRoleAssignmentConflictError` on a duplicate
         ``(feature_flag_id, role_id)`` pair, and
-        :class:`FeatureFlagRoleOrphanError` if the feature flag or role does
+        :class:`FeatureFlagRoleAssignmentOrphanError` if the feature flag or role does
         not exist.
         """
-        link = FeatureFlagRole(
+        link = FeatureFlagRoleAssignment(
             feature_flag_id=payload.feature_flag_id,
             role_id=payload.role_id,
         )
         if not self._perm_filter.matches(link):
-            raise FeatureFlagRoleOrphanError(str(payload.feature_flag_id))
+            raise FeatureFlagRoleAssignmentOrphanError(str(payload.feature_flag_id))
         self._session.add(link)
         try:
             await self._session.flush()
@@ -331,35 +331,39 @@ class FeatureFlagRoleService:
         await self._session.refresh(link)
         return link
 
-    async def get(self, override_id: uuid.UUID) -> FeatureFlagRole:
+    async def get(self, override_id: uuid.UUID) -> FeatureFlagRoleAssignment:
         """Retrieve an override by id, scoped by ``perm_filter``.
 
-        Raises :class:`FeatureFlagRoleNotFoundError` if missing or out of scope.
+        Raises :class:`FeatureFlagRoleAssignmentNotFoundError` if missing or out of scope.
         """
         stmt = self._perm_filter.filter_sql(
-            select(FeatureFlagRole).where(FeatureFlagRole.id == override_id)
+            select(FeatureFlagRoleAssignment).where(FeatureFlagRoleAssignment.id == override_id)
         )
         result = await self._session.execute(stmt)
         link = result.scalar_one_or_none()
         if link is None:
-            raise FeatureFlagRoleNotFoundError(str(override_id))
+            raise FeatureFlagRoleAssignmentNotFoundError(str(override_id))
         return link
 
-    async def get_many(self, override_ids: list[uuid.UUID]) -> list[FeatureFlagRole | None]:
+    async def get_many(
+        self, override_ids: list[uuid.UUID]
+    ) -> list[FeatureFlagRoleAssignment | None]:
         """Retrieve overrides by ids in a single query, scoped by ``perm_filter``.
 
         Returns a list positionally aligned with *override_ids*: the i-th entry
-        is the :class:`FeatureFlagRole` for ``override_ids[i]`` or ``None`` when
+        is the :class:`FeatureFlagRoleAssignment` for ``override_ids[i]`` or ``None`` when
         missing/out of scope. Duplicate ids are preserved. An empty
         *override_ids* yields an empty list without hitting the DB.
         """
         if not override_ids:
             return []
         stmt = self._perm_filter.filter_sql(
-            select(FeatureFlagRole).where(FeatureFlagRole.id.in_(override_ids))
+            select(FeatureFlagRoleAssignment).where(FeatureFlagRoleAssignment.id.in_(override_ids))
         )
         result = await self._session.execute(stmt)
-        by_id: dict[uuid.UUID, FeatureFlagRole] = {link.id: link for link in result.scalars().all()}
+        by_id: dict[uuid.UUID, FeatureFlagRoleAssignment] = {
+            link.id: link for link in result.scalars().all()
+        }
         return [by_id.get(oid) for oid in override_ids]
 
     async def search(
@@ -367,19 +371,21 @@ class FeatureFlagRoleService:
         *,
         cursor: uuid.UUID | None = None,
         limit: int = 50,
-        search_filter: FeatureFlagRoleSearchFilter | None = None,
-    ) -> tuple[list[FeatureFlagRole], uuid.UUID | None]:
+        search_filter: FeatureFlagRoleAssignmentSearchFilter | None = None,
+    ) -> tuple[list[FeatureFlagRoleAssignment], uuid.UUID | None]:
         """Search overrides ordered by id, keyed-pagination via cursor.
 
         The service's ``perm_filter`` scopes the SQL to rows the principal may
         see; the optional *search_filter* (from query params) is ANDed on top.
         Returns (overrides, next_cursor). next_cursor is None when exhausted.
         """
-        stmt = self._perm_filter.filter_sql(select(FeatureFlagRole).order_by(FeatureFlagRole.id))
+        stmt = self._perm_filter.filter_sql(
+            select(FeatureFlagRoleAssignment).order_by(FeatureFlagRoleAssignment.id)
+        )
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
-            stmt = stmt.where(FeatureFlagRole.id > cursor)
+            stmt = stmt.where(FeatureFlagRoleAssignment.id > cursor)
         stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         links = list(result.scalars().all())
@@ -392,10 +398,14 @@ class FeatureFlagRoleService:
         await self._session.delete(link)
         await self._session.flush()
 
-    async def count(self, search_filter: FeatureFlagRoleSearchFilter | None = None) -> int:
+    async def count(
+        self, search_filter: FeatureFlagRoleAssignmentSearchFilter | None = None
+    ) -> int:
         """Total override count, scoped by the service's ``perm_filter`` and the
         optional *search_filter*."""
-        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(FeatureFlagRole))
+        stmt = self._perm_filter.filter_sql(
+            select(func.count()).select_from(FeatureFlagRoleAssignment)
+        )
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
@@ -403,9 +413,9 @@ class FeatureFlagRoleService:
 
     async def apply_batch(
         self,
-        operations: list[FeatureFlagRoleBatchOp],
-        perm_filters: dict[Action, SearchFilter[FeatureFlagRole] | None],
-    ) -> list[FeatureFlagRole | None]:
+        operations: list[FeatureFlagRoleAssignmentBatchOp],
+        perm_filters: dict[Action, SearchFilter[FeatureFlagRoleAssignment] | None],
+    ) -> list[FeatureFlagRoleAssignment | None]:
         """Apply a mix of create/delete operations in one transaction.
 
         Each operation is authorized against its own action via *perm_filters*;
@@ -415,34 +425,34 @@ class FeatureFlagRoleService:
         results aligned with *operations*: the created override for create ops,
         ``None`` for delete ops.
         """
-        results: list[FeatureFlagRole | None] = []
+        results: list[FeatureFlagRoleAssignment | None] = []
         for op in operations:
-            if isinstance(op, FeatureFlagRoleBatchCreate):
+            if isinstance(op, FeatureFlagRoleAssignmentBatchCreate):
                 results.append(await self._batch_create(op, perm_filters))
-            elif isinstance(op, FeatureFlagRoleBatchDelete):
+            elif isinstance(op, FeatureFlagRoleAssignmentBatchDelete):
                 await self._batch_delete(op, perm_filters)
                 results.append(None)
         return results
 
     async def _batch_create(
         self,
-        op: FeatureFlagRoleBatchCreate,
-        perm_filters: dict[Action, SearchFilter[FeatureFlagRole] | None],
-    ) -> FeatureFlagRole:
+        op: FeatureFlagRoleAssignmentBatchCreate,
+        perm_filters: dict[Action, SearchFilter[FeatureFlagRoleAssignment] | None],
+    ) -> FeatureFlagRoleAssignment:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
-        return await FeatureFlagRoleService(self._session, filt).create(op.data)
+        return await FeatureFlagRoleAssignmentService(self._session, filt).create(op.data)
 
     async def _batch_delete(
         self,
-        op: FeatureFlagRoleBatchDelete,
-        perm_filters: dict[Action, SearchFilter[FeatureFlagRole] | None],
+        op: FeatureFlagRoleAssignmentBatchDelete,
+        perm_filters: dict[Action, SearchFilter[FeatureFlagRoleAssignment] | None],
     ) -> None:
         filt = perm_filters.get(Action.DELETE)
         if filt is None:
             raise BatchPermissionDeniedError("delete")
-        await FeatureFlagRoleService(self._session, filt).delete(op.id)
+        await FeatureFlagRoleAssignmentService(self._session, filt).delete(op.id)
 
 
 def _classify_override_integrity_error(
@@ -452,24 +462,26 @@ def _classify_override_integrity_error(
 ) -> Exception:
     """Map an IntegrityError to a duplicate vs orphan failure.
 
-    A violation of the ``uq_feature_flag_roles_flag_id_role_id`` unique
+    A violation of the ``uq_feature_flag_role_assignments_flag_id_role_id`` unique
     constraint means the override already exists
-    (:class:`FeatureFlagRoleConflictError``); a foreign-key violation means the
+    (:class:`FeatureFlagRoleAssignmentConflictError``); a foreign-key violation means the
     referenced feature flag or role is missing
-    (:class:`FeatureFlagRoleOrphanError``). asyncpg surfaces the constraint name
+    (:class:`FeatureFlagRoleAssignmentOrphanError``). asyncpg surfaces the constraint name
     in the error message; distinguish by it.
     """
     message = str(getattr(exc, "orig", exc)).lower()
-    if "uq_feature_flag_roles_flag_id_role_id" in message or (
-        "unique constraint" in message and "feature_flag_roles" in message
+    if "uq_feature_flag_role_assignments_flag_id_role_id" in message or (
+        "unique constraint" in message and "feature_flag_role_assignments" in message
     ):
-        return FeatureFlagRoleConflictError(f"{feature_flag_id}/{role_id}")
+        return FeatureFlagRoleAssignmentConflictError(f"{feature_flag_id}/{role_id}")
     if "foreign key" in message or "fk_" in message:
         if "role_id" in message and "feature_flag_id" not in message:
-            return FeatureFlagRoleOrphanError(f"role {role_id} does not exist")
-        return FeatureFlagRoleOrphanError(f"feature flag {feature_flag_id} does not exist")
+            return FeatureFlagRoleAssignmentOrphanError(f"role {role_id} does not exist")
+        return FeatureFlagRoleAssignmentOrphanError(
+            f"feature flag {feature_flag_id} does not exist"
+        )
     # Default to conflict for any unrecognized integrity error on this table.
-    return FeatureFlagRoleConflictError(f"{feature_flag_id}/{role_id}")
+    return FeatureFlagRoleAssignmentConflictError(f"{feature_flag_id}/{role_id}")
 
 
 __all__ = [
@@ -477,9 +489,9 @@ __all__ = [
     "FeatureFlagConflictError",
     "FeatureFlagNotFoundError",
     "FeatureFlagPermissionScopeError",
-    "FeatureFlagRoleConflictError",
-    "FeatureFlagRoleNotFoundError",
-    "FeatureFlagRoleOrphanError",
-    "FeatureFlagRoleService",
+    "FeatureFlagRoleAssignmentConflictError",
+    "FeatureFlagRoleAssignmentNotFoundError",
+    "FeatureFlagRoleAssignmentOrphanError",
+    "FeatureFlagRoleAssignmentService",
     "FeatureFlagService",
 ]

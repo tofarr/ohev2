@@ -5,11 +5,11 @@ Uniform REST surface (AGENTS.md §3). Two collections:
 * ``/feature-flags`` — full CRUD (create/GET/PATCH/DELETE) + batch read/write +
   count. The feature-flag ``id`` is a caller-supplied string of uppercase
   letters, digits, and underscores; it is the primary key.
-* ``/feature-flag-roles`` — immutable link rows (create/GET/DELETE + batch
+* ``/feature-flag-role-assignments`` — immutable link rows (create/GET/DELETE + batch
   read/write + count, no ``PATCH``). To change an override, delete and
   re-create, mirroring ``/user-roles``.
 
-The ``feature_flag_permission`` and ``feature_flag_role_permission`` columns on
+The ``feature_flag_permission`` and ``feature_flag_role_assignment_permission`` columns on
 :class:`Role` govern these resources (AGENTS.md §11).
 """
 
@@ -22,7 +22,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRole
+from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 # Feature-flag ids are restricted to uppercase letters, digits, and
@@ -208,7 +208,7 @@ class FeatureFlagBatchWriteRequest(BaseModel):
 # ---------------------------------------------------------------------- #
 
 
-class FeatureFlagRoleCreate(BaseModel):
+class FeatureFlagRoleAssignmentCreate(BaseModel):
     """Payload to attach a role override to a feature flag.
 
     The presence of the resulting row makes the flag enabled for any user
@@ -228,7 +228,7 @@ class FeatureFlagRoleCreate(BaseModel):
         return _validate_feature_flag_id(v)
 
 
-class FeatureFlagRoleRead(BaseModel):
+class FeatureFlagRoleAssignmentRead(BaseModel):
     """Feature-flag role override representation returned by the API."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -239,8 +239,8 @@ class FeatureFlagRoleRead(BaseModel):
     created_at: datetime
 
 
-class FeatureFlagRoleSearchFilter(BaseSearchFilter[FeatureFlagRole]):
-    """Optional filter clauses for ``GET /feature-flag-roles``."""
+class FeatureFlagRoleAssignmentSearchFilter(BaseSearchFilter[FeatureFlagRoleAssignment]):
+    """Optional filter clauses for ``GET /feature-flag-role-assignments``."""
 
     feature_flag_id__eq: str | None = Field(
         default=None, description="Exact feature flag id match."
@@ -260,10 +260,10 @@ class FeatureFlagRoleSearchFilter(BaseSearchFilter[FeatureFlagRole]):
     )
 
 
-class FeatureFlagRoleSearchResult(BaseModel):
+class FeatureFlagRoleAssignmentSearchResult(BaseModel):
     """Paginated collection of feature-flag role overrides."""
 
-    items: list[FeatureFlagRoleRead]
+    items: list[FeatureFlagRoleAssignmentRead]
     next_cursor: str | None = Field(
         default=None,
         description="Opaque cursor for the next page; null when no more results.",
@@ -271,35 +271,35 @@ class FeatureFlagRoleSearchResult(BaseModel):
     limit: int
 
 
-# Batch write: POST /feature-flag-roles/batch applies create/delete atomically
+# Batch write: POST /feature-flag-role-assignments/batch applies create/delete atomically
 # (AGENTS.md §3). Overrides are immutable, so there is no update op; to change
 # an override, delete and re-create within the same batch.
 
 
-class FeatureFlagRoleBatchCreate(BaseModel):
-    """Create operation within a feature-flag-role batch write."""
+class FeatureFlagRoleAssignmentBatchCreate(BaseModel):
+    """Create operation within a feature-flag-role-assignment batch write."""
 
     op: Literal["create"] = "create"
-    data: FeatureFlagRoleCreate
+    data: FeatureFlagRoleAssignmentCreate
 
 
-class FeatureFlagRoleBatchDelete(BaseModel):
-    """Delete operation within a feature-flag-role batch write."""
+class FeatureFlagRoleAssignmentBatchDelete(BaseModel):
+    """Delete operation within a feature-flag-role-assignment batch write."""
 
     op: Literal["delete"] = "delete"
     id: uuid.UUID
 
 
-FeatureFlagRoleBatchOp = Annotated[
-    FeatureFlagRoleBatchCreate | FeatureFlagRoleBatchDelete,
+FeatureFlagRoleAssignmentBatchOp = Annotated[
+    FeatureFlagRoleAssignmentBatchCreate | FeatureFlagRoleAssignmentBatchDelete,
     Field(discriminator="op"),
 ]
 
 
-class FeatureFlagRoleBatchWriteRequest(BaseModel):
-    """Request body for ``POST /feature-flag-roles/batch``."""
+class FeatureFlagRoleAssignmentBatchWriteRequest(BaseModel):
+    """Request body for ``POST /feature-flag-role-assignments/batch``."""
 
-    operations: list[FeatureFlagRoleBatchOp] = Field(
+    operations: list[FeatureFlagRoleAssignmentBatchOp] = Field(
         min_length=1,
         max_length=100,
         description="Operations to apply atomically; create/delete mixed (no update).",
@@ -312,12 +312,12 @@ __all__ = [
     "FeatureFlagBatchWriteRequest",
     "FeatureFlagCreate",
     "FeatureFlagRead",
-    "FeatureFlagRole",
-    "FeatureFlagRoleBatchWriteRequest",
-    "FeatureFlagRoleCreate",
-    "FeatureFlagRoleRead",
-    "FeatureFlagRoleSearchFilter",
-    "FeatureFlagRoleSearchResult",
+    "FeatureFlagRoleAssignment",
+    "FeatureFlagRoleAssignmentBatchWriteRequest",
+    "FeatureFlagRoleAssignmentCreate",
+    "FeatureFlagRoleAssignmentRead",
+    "FeatureFlagRoleAssignmentSearchFilter",
+    "FeatureFlagRoleAssignmentSearchResult",
     "FeatureFlagSearchFilter",
     "FeatureFlagSearchResult",
     "FeatureFlagUpdate",

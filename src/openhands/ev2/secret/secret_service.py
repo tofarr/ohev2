@@ -4,7 +4,7 @@ The service holds the effective ``perm_filter`` (the search filter from the
 centralized permission checker) as a field, set at construction, that scopes
 search/get/update/delete SQL to secrets the principal may act on. For
 ``SecretAccess`` policies that filter is a :class:`SecretAccessFilter` keyed on
-the action's ``role_secrets`` flag; for ``Permitted`` it is everything.
+the action's ``role_secret_permissions`` flag; for ``Permitted`` it is everything.
 
 The ``value`` is encrypted at rest via the encryption service (AGENTS.md §9)
 and decrypted only when materializing a :class:`SecretRead` DTO. ``user_id``

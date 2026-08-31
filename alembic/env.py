@@ -24,7 +24,7 @@ from openhands.ev2.auth.auth_models import (  # noqa: F401
 from openhands.ev2.db import Base
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
-    FeatureFlagRole,
+    FeatureFlagRoleAssignment,
 )
 from openhands.ev2.llm.llm_models import (  # noqa: F401
     LlmAggregatedUsage,
@@ -33,7 +33,7 @@ from openhands.ev2.llm.llm_models import (  # noqa: F401
     StoredProviderConnection,
 )
 from openhands.ev2.role.role_models import Role, UserRole  # noqa: F401
-from openhands.ev2.secret.secret_models import RoleSecret, Secret  # noqa: F401
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret  # noqa: F401
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 config = context.config
