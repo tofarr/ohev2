@@ -1,16 +1,18 @@
 """Pydantic schemas for the feature_flag feature.
 
-Uniform REST surface (AGENTS.md §3). Two collections:
+Uniform REST surface (AGENTS.md §3). Three collections:
 
 * ``/feature-flags`` — full CRUD (create/GET/PATCH/DELETE) + batch read/write +
   count. The feature-flag ``id`` is a caller-supplied string of uppercase
   letters, digits, and underscores; it is the primary key.
-* ``/feature-flag-role-assignments`` — immutable link rows (create/GET/DELETE + batch
-  read/write + count, no ``PATCH``). To change an override, delete and
-  re-create, mirroring ``/user-roles``.
+* ``/feature-flag-role-assignments`` — immutable role link rows (create/GET/DELETE +
+  batch read/write + count, no ``PATCH``).
+* ``/feature-flag-user-assignments`` — immutable user link rows (create/GET/DELETE +
+  batch read/write + count, no ``PATCH``).
 
-The ``feature_flag_permission`` and ``feature_flag_role_assignment_permission`` columns on
-:class:`Role` govern these resources (AGENTS.md §11).
+The ``feature_flag_permission``, ``feature_flag_role_assignment_permission``,
+and ``feature_flag_user_assignment_permission`` columns on :class:`Role` govern
+these resources (AGENTS.md §11).
 """
 
 from __future__ import annotations
@@ -22,7 +24,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
+from openhands.ev2.feature_flag.feature_flag_models import (
+    FeatureFlag,
+    FeatureFlagRoleAssignment,
+    FeatureFlagUserAssignment,
+)
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 # Feature-flag ids are restricted to uppercase letters, digits, and
@@ -152,9 +158,9 @@ class FeatureFlagSearchResult(BaseModel):
 class EnabledFeatureFlags(BaseModel):
     """The set of feature-flag ids enabled for the current user.
 
-    A flag is included when it is globally enabled OR when the user holds a role
-    with an override row for that flag (the override forces the flag on for that
-    role regardless of the global ``enabled`` value).
+    A flag is included when it is globally enabled, when the user holds a role
+    with an override row for that flag, or when the flag is assigned directly to
+    the user.
     """
 
     flags: list[str] = Field(description="Ids of feature flags enabled for the current user.")
@@ -306,6 +312,100 @@ class FeatureFlagRoleAssignmentBatchWriteRequest(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------- #
+# Feature flag user override (link table)
+# ---------------------------------------------------------------------- #
+
+
+class FeatureFlagUserAssignmentCreate(BaseModel):
+    """Payload to attach a user override to a feature flag."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    feature_flag_id: str = Field(
+        description="The feature flag id this override attaches to.",
+    )
+    user_id: uuid.UUID
+
+    @field_validator("feature_flag_id")
+    @classmethod
+    def _validate_feature_flag_id(cls, v: str) -> str:
+        return _validate_feature_flag_id(v)
+
+
+class FeatureFlagUserAssignmentRead(BaseModel):
+    """Feature-flag user override representation returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    feature_flag_id: str
+    user_id: uuid.UUID
+    created_at: datetime
+
+
+class FeatureFlagUserAssignmentSearchFilter(BaseSearchFilter[FeatureFlagUserAssignment]):
+    """Optional filter clauses for ``GET /feature-flag-user-assignments``."""
+
+    feature_flag_id__eq: str | None = Field(
+        default=None, description="Exact feature flag id match."
+    )
+    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    created_at__gte: datetime | None = Field(
+        default=None, description="ISO 8601; overrides created at or after."
+    )
+    created_at__lt: datetime | None = Field(
+        default=None, description="ISO 8601; overrides created before."
+    )
+    created_at__gt: datetime | None = Field(
+        default=None, description="ISO 8601; overrides created strictly after."
+    )
+    created_at__lte: datetime | None = Field(
+        default=None, description="ISO 8601; overrides created at or before."
+    )
+
+
+class FeatureFlagUserAssignmentSearchResult(BaseModel):
+    """Paginated collection of feature-flag user overrides."""
+
+    items: list[FeatureFlagUserAssignmentRead]
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
+    limit: int
+
+
+class FeatureFlagUserAssignmentBatchCreate(BaseModel):
+    """Create operation within a feature-flag-user-assignment batch write."""
+
+    op: Literal["create"] = "create"
+    data: FeatureFlagUserAssignmentCreate
+
+
+class FeatureFlagUserAssignmentBatchDelete(BaseModel):
+    """Delete operation within a feature-flag-user-assignment batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+FeatureFlagUserAssignmentBatchOp = Annotated[
+    FeatureFlagUserAssignmentBatchCreate | FeatureFlagUserAssignmentBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class FeatureFlagUserAssignmentBatchWriteRequest(BaseModel):
+    """Request body for ``POST /feature-flag-user-assignments/batch``."""
+
+    operations: list[FeatureFlagUserAssignmentBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/delete mixed (no update).",
+    )
+
+
 __all__ = [
     "EnabledFeatureFlags",
     "FeatureFlag",
@@ -321,4 +421,10 @@ __all__ = [
     "FeatureFlagSearchFilter",
     "FeatureFlagSearchResult",
     "FeatureFlagUpdate",
+    "FeatureFlagUserAssignment",
+    "FeatureFlagUserAssignmentBatchWriteRequest",
+    "FeatureFlagUserAssignmentCreate",
+    "FeatureFlagUserAssignmentRead",
+    "FeatureFlagUserAssignmentSearchFilter",
+    "FeatureFlagUserAssignmentSearchResult",
 ]

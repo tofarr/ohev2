@@ -559,6 +559,9 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
     FeatureFlagRoleAssignment as _FeatureFlagRoleAssignment,
 )
+from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
+    FeatureFlagUserAssignment as _FeatureFlagUserAssignment,
+)
 from openhands.ev2.llm.llm_models import (  # noqa: E402
     LlmAggregatedUsage as _LlmAggregatedUsage,
 )
@@ -593,6 +596,7 @@ register_resource_policy(_StoredLLM, "llm_permission")
 register_resource_policy(_LlmAggregatedUsage, "llm_aggregated_usage_permission")
 register_resource_policy(_FeatureFlag, "feature_flag_permission")
 register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
+register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignment_permission")
 
 
 def depends_permissions(

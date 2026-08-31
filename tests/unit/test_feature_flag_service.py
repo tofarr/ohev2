@@ -8,13 +8,19 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.feature_flag.feature_flag_models import FeatureFlag, FeatureFlagRoleAssignment
+from openhands.ev2.feature_flag.feature_flag_models import (
+    FeatureFlag,
+    FeatureFlagRoleAssignment,
+    FeatureFlagUserAssignment,
+)
 from openhands.ev2.feature_flag.feature_flag_schemas import (
     FeatureFlagCreate,
     FeatureFlagRoleAssignmentCreate,
     FeatureFlagRoleAssignmentSearchFilter,
     FeatureFlagSearchFilter,
     FeatureFlagUpdate,
+    FeatureFlagUserAssignmentCreate,
+    FeatureFlagUserAssignmentSearchFilter,
 )
 from openhands.ev2.feature_flag.feature_flag_service import (
     FeatureFlagConflictError,
@@ -24,14 +30,24 @@ from openhands.ev2.feature_flag.feature_flag_service import (
     FeatureFlagRoleAssignmentOrphanError,
     FeatureFlagRoleAssignmentService,
     FeatureFlagService,
+    FeatureFlagUserAssignmentConflictError,
+    FeatureFlagUserAssignmentNotFoundError,
+    FeatureFlagUserAssignmentOrphanError,
+    FeatureFlagUserAssignmentService,
 )
 from openhands.ev2.role.role_models import Role
+from openhands.ev2.user.user_models import User
 from openhands.ev2.util.search_filter import AllSearchFilter
 
 
 @pytest.fixture
 def service(session: AsyncSession) -> FeatureFlagService:
     return FeatureFlagService(session, AllSearchFilter[FeatureFlag]())
+
+
+@pytest.fixture
+def user_override_service(session: AsyncSession) -> FeatureFlagUserAssignmentService:
+    return FeatureFlagUserAssignmentService(session, AllSearchFilter[FeatureFlagUserAssignment]())
 
 
 @pytest.fixture
@@ -181,6 +197,48 @@ class TestEnabledForRoles:
         ids = set(await service.enabled_for_roles([role_id]))
         assert {"EF_GLOBAL", flag_id} <= ids
 
+    async def test_user_assignment_forces_flag_on(
+        self,
+        service: FeatureFlagService,
+        user_override_service: FeatureFlagUserAssignmentService,
+        session: AsyncSession,
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="EF_USER")
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        ids = await service.enabled_for_roles([], user_id=user_id)
+        assert flag_id in ids
+
+    async def test_user_assignment_does_not_apply_to_other_user(
+        self,
+        service: FeatureFlagService,
+        user_override_service: FeatureFlagUserAssignmentService,
+        session: AsyncSession,
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="EF_USER_ONLY")
+        other = User(email="other-user-flag@example.com", username="other-user-flag")
+        session.add(other)
+        await session.flush()
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        ids = await service.enabled_for_roles([], user_id=other.id)
+        assert flag_id not in ids
+
+
+async def _seed_flag_and_user(
+    session: AsyncSession,
+    *,
+    flag_id: str = "USR_SVC_FLAG",
+    username: str = "usr-svc-user",
+) -> tuple[str, uuid.UUID]:
+    session.add(FeatureFlag(id=flag_id))
+    session.add(User(email=f"{username}@example.com", username=username))
+    await session.flush()
+    user = (await session.execute(select(User).where(User.username == username))).scalar_one()
+    return flag_id, user.id
+
 
 # ---------------------------------------------------------------------- #
 # Feature flag role override service
@@ -269,6 +327,105 @@ class TestDeleteOverride:
         await override_service.delete(link.id)
         with pytest.raises(FeatureFlagRoleAssignmentNotFoundError):
             await override_service.get(link.id)
+
+
+# ---------------------------------------------------------------------- #
+# Feature flag user override service
+# ---------------------------------------------------------------------- #
+
+
+class TestCreateUserOverride:
+    async def test_create_user_override(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session)
+        link = await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        assert isinstance(link.id, uuid.UUID)
+        assert link.feature_flag_id == flag_id
+        assert link.user_id == user_id
+
+    async def test_create_duplicate_conflicts(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="DUP_USER_OVR_SVC")
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        with pytest.raises(FeatureFlagUserAssignmentConflictError):
+            await user_override_service.create(
+                FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+            )
+
+    async def test_create_missing_flag_raises_orphan(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        user = User(email="orphan-user-flag@example.com", username="orphan-user-flag")
+        session.add(user)
+        await session.flush()
+        with pytest.raises(FeatureFlagUserAssignmentOrphanError):
+            await user_override_service.create(
+                FeatureFlagUserAssignmentCreate(feature_flag_id="NO_SUCH_FLAG", user_id=user.id)
+            )
+
+
+class TestGetUserOverride:
+    async def test_get_existing(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="GET_USER_OVR_SVC")
+        link = await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        fetched = await user_override_service.get(link.id)
+        assert fetched.id == link.id
+
+    async def test_get_missing_raises(
+        self, user_override_service: FeatureFlagUserAssignmentService
+    ) -> None:
+        with pytest.raises(FeatureFlagUserAssignmentNotFoundError):
+            await user_override_service.get(uuid.uuid4())
+
+
+class TestDeleteUserOverride:
+    async def test_delete(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="DEL_USER_OVR_SVC")
+        link = await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        await user_override_service.delete(link.id)
+        with pytest.raises(FeatureFlagUserAssignmentNotFoundError):
+            await user_override_service.get(link.id)
+
+
+class TestSearchUserOverride:
+    async def test_search_filter_by_flag(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        f1, u1 = await _seed_flag_and_user(session, flag_id="SF_USER_A", username="sf-user-a")
+        f2, u2 = await _seed_flag_and_user(session, flag_id="SF_USER_B", username="sf-user-b")
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=f1, user_id=u1)
+        )
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=f2, user_id=u2)
+        )
+        links, _ = await user_override_service.search(
+            search_filter=FeatureFlagUserAssignmentSearchFilter(feature_flag_id__eq=f1)
+        )
+        assert all(link.feature_flag_id == f1 for link in links)
+
+    async def test_count(
+        self, user_override_service: FeatureFlagUserAssignmentService, session: AsyncSession
+    ) -> None:
+        flag_id, user_id = await _seed_flag_and_user(session, flag_id="CNT_USER_OVR_SVC")
+        await user_override_service.create(
+            FeatureFlagUserAssignmentCreate(feature_flag_id=flag_id, user_id=user_id)
+        )
+        assert await user_override_service.count() >= 1
 
 
 class TestSearchOverride:

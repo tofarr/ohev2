@@ -1,6 +1,6 @@
 """ORM models for the feature_flag feature.
 
-Two tables:
+Three tables:
 
 * :class:`FeatureFlag` — a named on/off switch keyed by a human-readable string
   id (uppercase letters, digits, and underscores). Carries an ``enabled`` flag
@@ -8,15 +8,17 @@ Two tables:
   caller, not server-generated), so feature-flag references are stable and
   readable in configuration/code.
 * :class:`FeatureFlagRoleAssignment` — a link table assigning a :class:`Role` to a
-  feature flag. The presence of a row *overrides* the feature flag's
-  ``enabled`` setting for any user holding that role: the flag is considered
-  enabled for such a user regardless of the flag's global ``enabled`` value.
-  Immutable (no update) — delete and re-create to change, mirroring
-  ``user_roles``. Unique on ``(feature_flag_id, role_id)``.
+  feature flag. The presence of a row makes the flag enabled for any user
+  holding that role, regardless of the flag's global ``enabled`` value.
+  Immutable (no update). Unique on ``(feature_flag_id, role_id)``.
+* :class:`FeatureFlagUserAssignment` — a link table assigning a specific
+  :class:`User` to a feature flag. The presence of a row makes the flag enabled
+  for that user, regardless of the flag's global ``enabled`` value. Immutable
+  (no update). Unique on ``(feature_flag_id, user_id)``.
 
-The ``feature_flag_permission`` and ``feature_flag_role_assignment_permission`` columns on
-:class:`Role` (and their entries in ``ROLE_ENTITY_COLUMNS``) govern these
-resources; see AGENTS.md §11.
+The ``feature_flag_permission``, ``feature_flag_role_assignment_permission``,
+and ``feature_flag_user_assignment_permission`` columns on :class:`Role` (and
+entries in ``ROLE_ENTITY_COLUMNS``) govern these resources; see AGENTS.md §11.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from sqlalchemy import ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from openhands.ev2.db import Base
+from openhands.ev2.user.user_models import User
 
 # Max length for a feature-flag id. The id charset is restricted to uppercase
 # letters, digits, and underscores (validated in the schema layer); the column
@@ -66,6 +69,11 @@ class FeatureFlag(Base):
     )
 
     role_overrides: Mapped[list[FeatureFlagRoleAssignment]] = relationship(
+        init=False,
+        back_populates="feature_flag",
+        cascade="all, delete-orphan",
+    )
+    user_overrides: Mapped[list[FeatureFlagUserAssignment]] = relationship(
         init=False,
         back_populates="feature_flag",
         cascade="all, delete-orphan",
@@ -110,7 +118,47 @@ class FeatureFlagRoleAssignment(Base):
     feature_flag: Mapped[FeatureFlag] = relationship(init=False, back_populates="role_overrides")
 
 
+class FeatureFlagUserAssignment(Base):
+    """A per-user override of a :class:`FeatureFlag`.
+
+    The presence of a row makes the flag considered *enabled* for the linked
+    :class:`User`, regardless of the flag's global ``enabled`` value. Immutable
+    (no update) — delete and re-create to change. Unique on
+    ``(feature_flag_id, user_id)``.
+    """
+
+    __tablename__ = "feature_flag_user_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "feature_flag_id", "user_id", name="uq_feature_flag_user_assignments_flag_id_user_id"
+        ),
+        {"comment": "Per-user overrides of feature flags"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    feature_flag_id: Mapped[str] = mapped_column(
+        ForeignKey("feature_flags.id", ondelete="CASCADE"),
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+
+    feature_flag: Mapped[FeatureFlag] = relationship(init=False, back_populates="user_overrides")
+    user: Mapped[User] = relationship(init=False, lazy="selectin")
+
+
 __all__ = [
     "FeatureFlag",
     "FeatureFlagRoleAssignment",
+    "FeatureFlagUserAssignment",
 ]
