@@ -4,7 +4,7 @@ The default ``client`` fixture is the test principal, whose seeded admin role
 carries ``Permitted()`` on every entity column including ``secret_permission``,
 so it has full CRUD. A second principal with a ``SecretAccess`` policy (not
 ``Permitted``) is used to exercise the per-secret grant gating via the
-``role_secrets`` link table.
+``role_secret_permissions`` link table.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ class TestSecretBatchRoute:
 
 class TestSecretAccessPolicy:
     """A principal whose role carries ``SecretAccess`` (not ``Permitted``) is
-    gated per-secret by the ``role_secrets`` link table."""
+    gated per-secret by the ``role_secret_permissions`` link table."""
 
     async def test_create_allowed_without_grant(self, client: AsyncClient, session) -> None:
         # SecretAccess permits CREATE regardless of grants (no secret id yet).
@@ -156,7 +156,7 @@ class TestSecretAccessPolicy:
 
     async def test_read_denied_without_grant(self, client: AsyncClient, session) -> None:
         # Admin creates a secret; the SecretAccess principal cannot read it
-        # without a role_secrets row with read_enabled.
+        # without a role_secret_permissions row with read_enabled.
         sid = (await client.post("/secrets", json=_create_payload("SA_READ"))).json()["id"]
         principal = await _make_principal(session, email="sa-read@example.com", username="sa-read")
         await _assign_role(session, principal.id, {"secret_permission": SecretAccess()})
@@ -174,7 +174,7 @@ class TestSecretAccessPolicy:
         await session.commit()
         # Admin grants read on the secret to the other principal's role.
         grant = await client.post(
-            "/role-secrets",
+            "/role-secret-permissions",
             json={"role_id": str(role.id), "secret_id": sid, "read_enabled": True},
         )
         assert grant.status_code == 201, grant.text

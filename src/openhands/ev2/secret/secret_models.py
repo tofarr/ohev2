@@ -7,7 +7,7 @@ Two tables:
   payload encrypted at rest via the encryption service (AGENTS.md §9 —
   sensitive data at rest), mirroring how OAuth client secrets are stored. The
   ``user_id`` records who created the secret.
-* :class:`RoleSecret` — the per-role grant link table (``role_secrets``). A
+* :class:`RoleSecretPermission` — the per-role grant link table (``role_secret_permissions``). A
   row grants a :class:`Role` access to a :class:`Secret` for the read/update/
   delete actions via the ``read_enabled`` / ``update_enabled`` /
   ``delete_enabled`` flags. The :class:`SecretAccess` permission policy on
@@ -87,7 +87,7 @@ class Secret(Base):
     )
 
 
-class RoleSecret(Base):
+class RoleSecretPermission(Base):
     """A per-role grant of access to a :class:`Secret`.
 
     A row links a :class:`Role` to a :class:`Secret` and carries three
@@ -99,9 +99,11 @@ class RoleSecret(Base):
     secret at most once; toggle the flags to change what the role may do.
     """
 
-    __tablename__ = "role_secrets"
+    __tablename__ = "role_secret_permissions"
     __table_args__ = (
-        UniqueConstraint("role_id", "secret_id", name="uq_role_secrets_role_id_secret_id"),
+        UniqueConstraint(
+            "role_id", "secret_id", name="uq_role_secret_permissions_role_id_secret_id"
+        ),
         {"comment": "Per-role grants of access to secrets"},
     )
 

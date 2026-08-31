@@ -7,14 +7,14 @@ Two tables:
   and an optional ``description``. The id is the primary key (supplied by the
   caller, not server-generated), so feature-flag references are stable and
   readable in configuration/code.
-* :class:`FeatureFlagRole` — a link table assigning a :class:`Role` to a
+* :class:`FeatureFlagRoleAssignment` — a link table assigning a :class:`Role` to a
   feature flag. The presence of a row *overrides* the feature flag's
   ``enabled`` setting for any user holding that role: the flag is considered
   enabled for such a user regardless of the flag's global ``enabled`` value.
   Immutable (no update) — delete and re-create to change, mirroring
   ``user_roles``. Unique on ``(feature_flag_id, role_id)``.
 
-The ``feature_flag_permission`` and ``feature_flag_role_permission`` columns on
+The ``feature_flag_permission`` and ``feature_flag_role_assignment_permission`` columns on
 :class:`Role` (and their entries in ``ROLE_ENTITY_COLUMNS``) govern these
 resources; see AGENTS.md §11.
 """
@@ -42,7 +42,7 @@ class FeatureFlag(Base):
     server-generated) so flag references stay stable and readable. The
     charset is restricted to ``[A-Z0-9_]`` (validated in the Pydantic schemas).
     ``enabled`` is the global default; per-role overrides live in
-    :class:`FeatureFlagRole`.
+    :class:`FeatureFlagRoleAssignment`.
     """
 
     __tablename__ = "feature_flags"
@@ -65,14 +65,14 @@ class FeatureFlag(Base):
         onupdate=func.now(),
     )
 
-    role_overrides: Mapped[list[FeatureFlagRole]] = relationship(
+    role_overrides: Mapped[list[FeatureFlagRoleAssignment]] = relationship(
         init=False,
         back_populates="feature_flag",
         cascade="all, delete-orphan",
     )
 
 
-class FeatureFlagRole(Base):
+class FeatureFlagRoleAssignment(Base):
     """A per-role override of a :class:`FeatureFlag`.
 
     The presence of a row makes the flag considered *enabled* for any user
@@ -81,10 +81,10 @@ class FeatureFlagRole(Base):
     mirroring ``user_roles``. Unique on ``(feature_flag_id, role_id)``.
     """
 
-    __tablename__ = "feature_flag_roles"
+    __tablename__ = "feature_flag_role_assignments"
     __table_args__ = (
         UniqueConstraint(
-            "feature_flag_id", "role_id", name="uq_feature_flag_roles_flag_id_role_id"
+            "feature_flag_id", "role_id", name="uq_feature_flag_role_assignments_flag_id_role_id"
         ),
         {"comment": "Per-role overrides of feature flags"},
     )
@@ -112,5 +112,5 @@ class FeatureFlagRole(Base):
 
 __all__ = [
     "FeatureFlag",
-    "FeatureFlagRole",
+    "FeatureFlagRoleAssignment",
 ]

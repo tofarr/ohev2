@@ -28,11 +28,11 @@ from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.db import Base, reset_engine_factory
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
-    FeatureFlagRole,
+    FeatureFlagRoleAssignment,
 )
 from openhands.ev2.llm.llm_models import StoredLLM, StoredProviderConnection  # noqa: F401
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.secret.secret_models import RoleSecret, Secret  # noqa: F401
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret  # noqa: F401
 from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.user.user_models import User  # noqa: F401
 

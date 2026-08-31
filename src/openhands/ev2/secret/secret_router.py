@@ -6,7 +6,7 @@ Handlers validate, call the service, and serialize — no business logic here.
 Every endpoint is guarded by the centralized permission checker (AGENTS.md §9)
 over the ``secret`` resource; for the :class:`SecretAccess` policy the
 read/update/delete filter is a :class:`SecretAccessFilter` keyed on the
-matching ``role_secrets`` flag, so a principal sees only the secrets one of
+matching ``role_secret_permissions`` flag, so a principal sees only the secrets one of
 their roles has been granted.
 """
 

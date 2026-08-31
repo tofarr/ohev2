@@ -557,7 +557,7 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
     FeatureFlag as _FeatureFlag,
 )
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
-    FeatureFlagRole as _FeatureFlagRole,
+    FeatureFlagRoleAssignment as _FeatureFlagRoleAssignment,
 )
 from openhands.ev2.llm.llm_models import StoredLLM as _StoredLLM  # noqa: E402
 from openhands.ev2.llm.llm_models import (  # noqa: E402
@@ -581,7 +581,7 @@ register_resource_policy(_Secret, "secret_permission")
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
 register_resource_policy(_FeatureFlag, "feature_flag_permission")
-register_resource_policy(_FeatureFlagRole, "feature_flag_role_permission")
+register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
 
 
 def depends_permissions(
