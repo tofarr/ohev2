@@ -24,6 +24,7 @@ Tables:
 * ``user_roles``             — role-to-user assignments.
 * ``secrets``                — named secrets with encrypted values.
 * ``role_secret_permissions``           — per-role grants of access to secrets.
+* ``user_secret_permissions``           — per-user grants of access to secrets.
 * ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
@@ -439,7 +440,6 @@ def upgrade() -> None:
         sa.Column("code", sa.String(length=255), nullable=False),
         sa.Column("value", sa.Text(), nullable=False, comment="Encrypted value (JWE ciphertext)."),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -453,11 +453,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.UniqueConstraint("code"),
     )
     op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
-    op.create_index("ix_secrets_user_id", "secrets", ["user_id"], unique=False)
 
     # ------------------------------------------------------------------ #
     # role_secret_permissions
@@ -506,6 +504,60 @@ def upgrade() -> None:
     op.create_index(
         "ix_role_secret_permissions_secret_id",
         "role_secret_permissions",
+        ["secret_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
+    # user_secret_permissions
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "user_secret_permissions",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("secret_id", sa.Uuid(), nullable=False),
+        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_user_secret_permissions_user_id_users",
+        ),
+        sa.ForeignKeyConstraint(
+            ["secret_id"],
+            ["secrets.id"],
+            ondelete="CASCADE",
+            name="fk_user_secret_permissions_secret_id_secrets",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "user_id", "secret_id", name="uq_user_secret_permissions_user_id_secret_id"
+        ),
+        comment="Per-user grants of access to secrets",
+    )
+    op.create_index(
+        "ix_user_secret_permissions_user_id",
+        "user_secret_permissions",
+        ["user_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_user_secret_permissions_secret_id",
+        "user_secret_permissions",
         ["secret_id"],
         unique=False,
     )
@@ -851,10 +903,12 @@ def downgrade() -> None:
     op.drop_table("llms")
     op.drop_index("ix_provider_connections_user_id", table_name="provider_connections")
     op.drop_table("provider_connections")
+    op.drop_index("ix_user_secret_permissions_user_id", table_name="user_secret_permissions")
+    op.drop_index("ix_user_secret_permissions_secret_id", table_name="user_secret_permissions")
+    op.drop_table("user_secret_permissions")
     op.drop_index("ix_role_secret_permissions_secret_id", table_name="role_secret_permissions")
     op.drop_index("ix_role_secret_permissions_role_id", table_name="role_secret_permissions")
     op.drop_table("role_secret_permissions")
-    op.drop_index("ix_secrets_user_id", table_name="secrets")
     op.drop_index("ix_secrets_code", table_name="secrets")
     op.drop_table("secrets")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")
