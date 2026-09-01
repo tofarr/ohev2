@@ -3,14 +3,36 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
 from tests.unit._auth_helpers import assign_role as _assign_role
 from tests.unit._auth_helpers import make_principal as _make_principal
 
-from openhands.ev2.security.security_models import Permitted, ReadOnly
+from openhands.ev2.security.security_models import Action, Permission, Permitted, ReadOnly
 from openhands.ev2.util.auth_token import create_auth_token
+from openhands.ev2.util.search_filter import (
+    AttributeFilter,
+    Condition,
+    NoneSearchFilter,
+    SearchFilter,
+)
+
+
+class _SelfAssignmentAccess(Permission):
+    """Test policy: a principal may manage assignments only for themselves.
+
+    Mirrors how :class:`ApiKeyAccess` scopes API keys to their owner, applied
+    to the user-role link table (``UserRole.user_id == principal``).
+    """
+
+    def to_search_filter(self, user_id: uuid.UUID | None, action: Action) -> SearchFilter[Any]:
+        if user_id is None:
+            return NoneSearchFilter[Any]()
+        from openhands.ev2.role.role_models import UserRole
+
+        return AttributeFilter[UserRole](attribute="user_id", value=user_id, condition=Condition.EQ)
 
 
 async def _seed_role_and_user(
@@ -212,10 +234,10 @@ class TestDeleteAssignmentRoute:
 
 
 class TestPermissionEnforcement:
-    """Tests for the permission check on role-user endpoints.
+    """Tests for the permission check on user-role endpoints.
 
-    Assignments are authorized through the ``role`` resource policy: READ
-    gates list/get, UPDATE gates create/delete.
+    Assignments are authorized through the dedicated ``user_role_permission``
+    column: SEARCH/READ gate list/get, CREATE/DELETE gate membership changes.
     """
 
     async def test_missing_auth_token_anonymous_denied(self, app) -> None:
@@ -234,13 +256,13 @@ class TestPermissionEnforcement:
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         principal = await _make_principal(session, email="ro@example.com", username="ro")
-        await _assign_role(session, principal.id, {"role_permission": ReadOnly()})
+        await _assign_role(session, principal.id, {"user_role_permission": ReadOnly()})
         await session.commit()
 
         token = create_auth_token(principal.id)
         resp = await client.get("/user-roles", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
-        # Create requires UPDATE on role; ReadOnly denies it.
+        # Create requires CREATE on user_role; ReadOnly denies it.
         resp = await client.post(
             "/user-roles",
             json={"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
@@ -252,7 +274,7 @@ class TestPermissionEnforcement:
         self, client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         principal = await _make_principal(session, email="perm@example.com", username="perm")
-        await _assign_role(session, principal.id, {"role_permission": Permitted()})
+        await _assign_role(session, principal.id, {"user_role_permission": Permitted()})
         await session.commit()
 
         token = create_auth_token(principal.id)
@@ -351,3 +373,113 @@ class TestBatchWriteUserRoles:
         assert resp.status_code == 409
         after = len((await client.get("/user-roles?limit=100")).json()["items"])
         assert after == before  # u2 assignment rolled back
+
+
+class TestLinkTableAuthorization:
+    """Regression tests: membership management is governed by
+    ``user_role_permission``, not by ``role_permission``.
+
+    A principal who may only *edit role metadata* must not be able to decide
+    who holds a role (privilege escalation via self-assignment); a principal
+    who manages membership must not thereby edit roles. Scoped filters must
+    also restrict which assignments are visible/creatable.
+    """
+
+    async def test_role_admin_cannot_manage_membership(self, client: AsyncClient, session) -> None:
+        """role_permission=Permitted alone (no user_role_permission) => 403."""
+        principal = await _make_principal(session, email="ra@example.com", username="ra")
+        await _assign_role(session, principal.id, {"role_permission": Permitted()})
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert (await client.get("/user-roles", headers=headers)).status_code == 403
+        assert (await client.get("/user-roles/count", headers=headers)).status_code == 403
+        assert (
+            await client.post(
+                "/user-roles",
+                json={"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.delete(f"/user-roles/{uuid.uuid4()}", headers=headers)
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/user-roles/batch",
+                json={
+                    "operations": [
+                        {
+                            "op": "create",
+                            "data": {"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
+                        }
+                    ]
+                },
+                headers=headers,
+            )
+        ).status_code == 403
+
+    async def test_membership_manager_cannot_edit_roles(self, client: AsyncClient, session) -> None:
+        """user_role_permission=Permitted alone manages membership but cannot
+        read or edit roles (403 on /roles)."""
+        principal = await _make_principal(session, email="mm@example.com", username="mm")
+        await _assign_role(session, principal.id, {"user_role_permission": Permitted()})
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # The conftest-seeded test-admin role assignment exists; membership
+        # listing works.
+        assert (await client.get("/user-roles", headers=headers)).status_code == 200
+        assert (
+            await client.post(
+                "/user-roles",
+                json={"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 404  # passes authz, fails on orphan FK
+        # Role administration is not conferred by membership management.
+        assert (await client.get("/roles", headers=headers)).status_code == 403
+        assert (
+            await client.patch(f"/roles/{uuid.uuid4()}", json={"name": "x"}, headers=headers)
+        ).status_code == 403
+
+    async def test_scoped_membership_filter_limits_visibility(
+        self, client: AsyncClient, session
+    ) -> None:
+        """A scoped user_role policy (user_id = principal) sees only own rows
+        and cannot create assignments for other users."""
+        principal = await _make_principal(session, email="sc@example.com", username="sc")
+        await _assign_role(
+            session,
+            principal.id,
+            {"user_role_permission": _SelfAssignmentAccess()},
+        )
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # A scope mismatch is a filter (200 with fewer rows), not a denial:
+        # the scoped view contains only the principal's own assignment (from
+        # _assign_role), not the conftest-seeded test-admin assignment.
+        resp = await client.get("/user-roles", headers=headers)
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert {i["user_id"] for i in items} == {str(principal.id)}
+        assert len((await client.get("/user-roles")).json()["items"]) > len(items)
+
+        # Create assigning the principal to a (nonexistent) role passes the
+        # scope check and fails on orphan FK; assigning someone else is denied.
+        own = await client.post(
+            "/user-roles",
+            json={"role_id": str(uuid.uuid4()), "user_id": str(principal.id)},
+            headers=headers,
+        )
+        assert own.status_code == 404
+        denied = await client.post(
+            "/user-roles",
+            json={"role_id": str(uuid.uuid4()), "user_id": str(uuid.uuid4())},
+            headers=headers,
+        )
+        assert denied.status_code == 403

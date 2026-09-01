@@ -6,12 +6,13 @@ row is mutable: :meth:`update` toggles the ``read_enabled`` /
 ``update_enabled`` / ``delete_enabled`` flags to change what the role may do
 with the secret without dropping and re-creating the grant.
 
-The service does not take a ``perm_filter`` because the link table has no
-resource policy of its own; authorization is enforced at the router via the
-``role`` resource (managing a role's secret grants requires ``UPDATE`` on the
-role, mirroring how ``user_roles`` management requires ``UPDATE`` on the
-role). See AGENTS.md §9 — authorization in services, but the link has no
-policy column to reduce.
+The link table is a governed resource of its own (``secret_grant_permission``
+on :class:`Role`): the service holds the effective ``perm_filter`` and scopes
+every read/write through it (AGENTS.md §9 — authorization enforced in
+services, not just routers). Managing grants is deliberately *not* implied by
+``role_permission`` update — a principal who may edit a role's metadata must
+not be able to grant that role access to arbitrary secrets (that would be
+privilege escalation / secret exfiltration).
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from openhands.ev2.secret.role_secret_permission_schemas import (
     RoleSecretPermissionUpdate,
 )
 from openhands.ev2.secret.secret_models import RoleSecretPermission
+from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
 class RoleSecretPermissionNotFoundError(Exception):
@@ -45,11 +48,29 @@ class RoleSecretPermissionOrphanError(Exception):
     """Raised when the referenced role or secret does not exist."""
 
 
-class RoleSecretPermissionService:
-    """CRUD operations over role-secret-permission grants."""
+class RoleSecretPermissionScopeError(Exception):
+    """Raised when a create payload falls outside the principal's scope."""
 
-    def __init__(self, session: AsyncSession) -> None:
+
+class BatchPermissionDeniedError(Exception):
+    """Raised when a batch operation's action is not granted to the principal."""
+
+
+class RoleSecretPermissionService:
+    """CRUD operations over role-secret-permission grants.
+
+    Constructed per request with the request-scoped session and the principal's
+    effective ``perm_filter`` (reduced from ``secret_grant_permission``); it
+    holds no other mutable state.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        perm_filter: SearchFilter[RoleSecretPermission] = ALL,
+    ) -> None:
         self._session = session
+        self._perm_filter = perm_filter
 
     async def create(
         self,
@@ -60,7 +81,9 @@ class RoleSecretPermissionService:
         update_enabled: bool = False,
         delete_enabled: bool = False,
     ) -> RoleSecretPermission:
-        """Grant a role access to a secret. Raises on duplicate or orphan FK."""
+        """Grant a role access to a secret. Raises on duplicate or orphan FK,
+        and :class:`RoleSecretPermissionScopeError` if the grant falls outside
+        the principal's create scope."""
         link = RoleSecretPermission(
             role_id=role_id,
             secret_id=secret_id,
@@ -68,6 +91,8 @@ class RoleSecretPermissionService:
             update_enabled=update_enabled,
             delete_enabled=delete_enabled,
         )
+        if not self._perm_filter.matches(link):
+            raise RoleSecretPermissionScopeError(f"{role_id}/{secret_id}")
         self._session.add(link)
         try:
             await self._session.flush()
@@ -78,8 +103,17 @@ class RoleSecretPermissionService:
         return link
 
     async def get(self, role_secret_permission_id: uuid.UUID) -> RoleSecretPermission:
-        """Retrieve a grant by id. Raises :class:`RoleSecretPermissionNotFoundError` if missing."""
-        link = await self._session.get(RoleSecretPermission, role_secret_permission_id)
+        """Retrieve a grant by id, scoped by ``perm_filter``.
+
+        Raises :class:`RoleSecretPermissionNotFoundError` if the grant is
+        missing or out of the principal's scope (so callers return 404 without
+        leaking existence).
+        """
+        stmt = self._perm_filter.filter_sql(
+            select(RoleSecretPermission).where(RoleSecretPermission.id == role_secret_permission_id)
+        )
+        result = await self._session.execute(stmt)
+        link = result.scalar_one_or_none()
         if link is None:
             raise RoleSecretPermissionNotFoundError(str(role_secret_permission_id))
         return link
@@ -87,11 +121,14 @@ class RoleSecretPermissionService:
     async def get_many(
         self, role_secret_permission_ids: list[uuid.UUID]
     ) -> list[RoleSecretPermission | None]:
-        """Retrieve grants by ids, positionally aligned; ``None`` where missing."""
+        """Retrieve grants by ids, scoped by ``perm_filter``; positionally
+        aligned, ``None`` where missing or out of scope."""
         if not role_secret_permission_ids:
             return []
-        stmt = select(RoleSecretPermission).where(
-            RoleSecretPermission.id.in_(role_secret_permission_ids)
+        stmt = self._perm_filter.filter_sql(
+            select(RoleSecretPermission).where(
+                RoleSecretPermission.id.in_(role_secret_permission_ids)
+            )
         )
         result = await self._session.execute(stmt)
         by_id: dict[uuid.UUID, RoleSecretPermission] = {
@@ -106,8 +143,11 @@ class RoleSecretPermissionService:
         limit: int = 50,
         search_filter: RoleSecretPermissionSearchFilter | None = None,
     ) -> tuple[list[RoleSecretPermission], uuid.UUID | None]:
-        """Search grants ordered by id, keyed-pagination via cursor."""
-        stmt = select(RoleSecretPermission).order_by(RoleSecretPermission.id)
+        """Search grants ordered by id, keyed-pagination via cursor, scoped by
+        ``perm_filter``."""
+        stmt = self._perm_filter.filter_sql(
+            select(RoleSecretPermission).order_by(RoleSecretPermission.id)
+        )
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         if cursor is not None:
@@ -119,8 +159,9 @@ class RoleSecretPermissionService:
         return links, next_cursor
 
     async def count(self, search_filter: RoleSecretPermissionSearchFilter | None = None) -> int:
-        """Total grant count, optionally narrowed by *search_filter*."""
-        stmt = select(func.count()).select_from(RoleSecretPermission)
+        """Total grant count, scoped by ``perm_filter`` and the optional
+        *search_filter*."""
+        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(RoleSecretPermission))
         if search_filter is not None:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
@@ -129,7 +170,8 @@ class RoleSecretPermissionService:
     async def update(
         self, role_secret_permission_id: uuid.UUID, payload: RoleSecretPermissionUpdate
     ) -> RoleSecretPermission:
-        """Toggle the read/update/delete flags on a grant. Raises if missing."""
+        """Toggle the read/update/delete flags on a grant. Raises if missing or
+        out of the principal's scope."""
         link = await self.get(role_secret_permission_id)
         if payload.read_enabled is not None:
             link.read_enabled = payload.read_enabled
@@ -148,20 +190,28 @@ class RoleSecretPermissionService:
         await self._session.flush()
 
     async def apply_batch(
-        self, operations: list[RoleSecretPermissionBatchOp]
+        self,
+        operations: list[RoleSecretPermissionBatchOp],
+        perm_filters: dict[Action, SearchFilter[RoleSecretPermission] | None],
     ) -> list[RoleSecretPermission | None]:
         """Apply a mix of create/update/delete operations in one transaction.
 
-        No commit is performed — the caller commits once after the whole batch
-        succeeds (atomic). Returns results aligned with *operations*: the
-        grant for create/update, ``None`` for delete.
+        Each operation is authorized against its own action via *perm_filters*;
+        a ``None`` filter denies that operation
+        (:class:`BatchPermissionDeniedError`). No commit is performed — the
+        caller commits once after the whole batch succeeds (atomic). Returns
+        results aligned with *operations*: the grant for create/update,
+        ``None`` for delete.
         """
         results: list[RoleSecretPermission | None] = []
         for op in operations:
             if isinstance(op, RoleSecretPermissionBatchCreate):
+                filt = perm_filters.get(Action.CREATE)
+                if filt is None:
+                    raise BatchPermissionDeniedError("create")
                 d = op.data
                 results.append(
-                    await self.create(
+                    await RoleSecretPermissionService(self._session, filt).create(
                         role_id=d.role_id,
                         secret_id=d.secret_id,
                         read_enabled=d.read_enabled,
@@ -170,9 +220,17 @@ class RoleSecretPermissionService:
                     )
                 )
             elif isinstance(op, RoleSecretPermissionBatchUpdate):
-                results.append(await self.update(op.id, op.data))
+                filt = perm_filters.get(Action.UPDATE)
+                if filt is None:
+                    raise BatchPermissionDeniedError("update")
+                results.append(
+                    await RoleSecretPermissionService(self._session, filt).update(op.id, op.data)
+                )
             elif isinstance(op, RoleSecretPermissionBatchDelete):
-                await self.delete(op.id)
+                filt = perm_filters.get(Action.DELETE)
+                if filt is None:
+                    raise BatchPermissionDeniedError("delete")
+                await RoleSecretPermissionService(self._session, filt).delete(op.id)
                 results.append(None)
         return results
 
@@ -201,9 +259,11 @@ def _classify_integrity_error(
 
 
 __all__ = [
+    "BatchPermissionDeniedError",
     "RoleSecretPermission",
     "RoleSecretPermissionConflictError",
     "RoleSecretPermissionNotFoundError",
     "RoleSecretPermissionOrphanError",
+    "RoleSecretPermissionScopeError",
     "RoleSecretPermissionService",
 ]

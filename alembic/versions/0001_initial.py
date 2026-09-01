@@ -360,10 +360,22 @@ def upgrade() -> None:
             comment="Permission policy for secret resources; null = deny.",
         ),
         sa.Column(
+            "secret_grant_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for role-secret grant resources; null = deny.",
+        ),
+        sa.Column(
             "mcp_server_config_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for mcp_server_config resources; null = deny.",
+        ),
+        sa.Column(
+            "mcp_server_config_grant_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for role-MCP-config grant resources; null = deny.",
         ),
         sa.Column(
             "provider_connection_permission",

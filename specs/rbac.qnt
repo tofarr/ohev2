@@ -17,6 +17,17 @@
 //
 // UserRole assignments are modeled as a set of (user_id, role_id) pairs with
 // a uniqueness constraint. Cascade-delete on user/role removal is modeled.
+//
+// Link tables are first-class governed entities (AGENTS.md §11):
+//   - `user_roles` is governed by the "user_role" entity permission —
+//     deciding who holds a role is NOT implied by "role" permission update.
+//   - `role_secret_permissions` is governed by "secret_grant"; granting a
+//     role access to a secret is NOT implied by "role" permission update.
+//   - `role_mcp_server_config_permissions` is governed by
+//     "mcp_server_config_grant" likewise.
+// These are the privilege-escalation guards: a role-metadata admin cannot
+// self-assign roles or grant a role access to secrets/MCP configs without
+// the corresponding link-table permission.
 
 module rbac {
   // Simplified permission policies (mirrors role.qnt).
@@ -157,7 +168,7 @@ module rbac {
 
   run permittedGrantsAll = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", Permitted) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
       .then(assignRole("u1", "r1"))
       .then(all {
         assert(effectiveFilter("u1", "user", "read", roles, userRoles) == All),
@@ -170,7 +181,7 @@ module rbac {
 
   run deniedGrantsNone = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", Denied) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> Denied) }))
       .then(assignRole("u1", "r1"))
       .then(all {
         assert(effectiveFilter("u1", "user", "read", roles, userRoles) == None),
@@ -182,7 +193,7 @@ module rbac {
 
   run readOnlyGrantsReadAndSearch = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", ReadOnly) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> ReadOnly) }))
       .then(assignRole("u1", "r1"))
       .then(all {
         assert(effectiveFilter("u1", "user", "read", roles, userRoles) == All),
@@ -198,8 +209,8 @@ module rbac {
   // Union semantics: if one role grants Permitted, the effective filter is All.
   run unionPermittedWins = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", Denied) }))
-      .then(createRole({ id: "r2", permissions: Map().set("user", Permitted) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> Denied) }))
+      .then(createRole({ id: "r2", permissions: Map("user" -> Permitted) }))
       .then(assignRole("u1", "r1"))
       .then(assignRole("u1", "r2"))
       .then(all {
@@ -213,8 +224,8 @@ module rbac {
   // Union semantics: ReadOnly + Denied = ReadOnly behavior.
   run unionReadOnlyOverridesDenied = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", Denied) }))
-      .then(createRole({ id: "r2", permissions: Map().set("user", ReadOnly) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> Denied) }))
+      .then(createRole({ id: "r2", permissions: Map("user" -> ReadOnly) }))
       .then(assignRole("u1", "r1"))
       .then(assignRole("u1", "r2"))
       .then(all {
@@ -226,10 +237,57 @@ module rbac {
       })
   }
 
+  // Link-table governance: permission to update a role's metadata does NOT
+  // confer permission to decide who holds the role.
+  run roleUpdateDoesNotConferMembershipControl = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("role" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilter("u1", "role", "update", roles, userRoles) == All),
+        assert(effectiveFilter("u1", "user_role", "create", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "user_role", "delete", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "user_role", "search", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Link-table governance: permission to manage membership does NOT confer
+  // permission to edit roles.
+  run membershipControlDoesNotConferRoleEdit = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user_role" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilter("u1", "user_role", "create", roles, userRoles) == All),
+        assert(effectiveFilter("u1", "user_role", "delete", roles, userRoles) == All),
+        assert(effectiveFilter("u1", "role", "read", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "role", "update", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Grant link tables are separately governed: role administration does not
+  // imply secret/MCP-config grant management (secret exfiltration guard).
+  run roleAdminDoesNotConferGrantManagement = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("role" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilter("u1", "secret_grant", "create", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "secret_grant", "search", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "mcp_server_config_grant", "create", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
   // Missing entity permission defaults to Denied.
   run missingEntityPermissionIsDenied = {
     init
-      .then(createRole({ id: "r1", permissions: Map().set("user", Permitted) }))
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
       .then(assignRole("u1", "r1"))
       .then(all {
         // "api_key" not in the role's permissions map

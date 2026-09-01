@@ -36,6 +36,55 @@ def service(session: AsyncSession) -> RoleService:
     return RoleService(session, _ALL)
 
 
+class TestEntityColumnParity:
+    """Guard against ROLE_ENTITY_COLUMNS drifting out of sync with the role
+    schemas, the Role ORM model, and the service's create/update copies.
+
+    Drift here is a security bug: a column missing from the schemas can never
+    be granted via the API, and a column the service fails to copy is silently
+    dropped (fail-closed, but breaks the documented grant).
+    """
+
+    def test_schemas_cover_every_entity_column(self) -> None:
+        from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS
+        from openhands.ev2.role.role_schemas import RoleRead
+
+        for schema in (RoleCreate, RoleUpdate, RoleRead):
+            fields = {name for name in schema.model_fields if name.endswith("_permission")}
+            assert fields == set(ROLE_ENTITY_COLUMNS), (
+                f"{schema.__name__} fields drifted from ROLE_ENTITY_COLUMNS: "
+                f"missing={set(ROLE_ENTITY_COLUMNS) - fields} extra={fields - set(ROLE_ENTITY_COLUMNS)}"
+            )
+
+    def test_model_and_registry_cover_every_entity_column(self) -> None:
+        from openhands.ev2.auth.auth_dependencies import _RESOURCE_POLICY
+        from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS
+
+        for column in ROLE_ENTITY_COLUMNS:
+            assert column in Role.__mapper__.columns, f"Role model missing {column}"
+        registered = set(_RESOURCE_POLICY.values())
+        assert registered == set(ROLE_ENTITY_COLUMNS), (
+            f"resource-policy registry drifted: missing={set(ROLE_ENTITY_COLUMNS) - registered} "
+            f"extra={registered - set(ROLE_ENTITY_COLUMNS)}"
+        )
+
+    async def test_create_and_update_round_trip_every_column(self, service: RoleService) -> None:
+        """Every entity column set via the schemas survives create + update."""
+        from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS
+
+        role = await service.create(
+            RoleCreate(name="full", **{column: Permitted() for column in ROLE_ENTITY_COLUMNS})
+        )
+        for column in ROLE_ENTITY_COLUMNS:
+            assert isinstance(getattr(role, column), Permitted), f"create dropped {column}"
+
+        updated = await service.update(
+            role.id, RoleUpdate(**{column: ReadOnly() for column in ROLE_ENTITY_COLUMNS})
+        )
+        for column in ROLE_ENTITY_COLUMNS:
+            assert isinstance(getattr(updated, column), ReadOnly), f"update dropped {column}"
+
+
 class TestCreateRole:
     async def test_create_role(self, service: RoleService) -> None:
         role = await service.create(RoleCreate(name="admin"))
