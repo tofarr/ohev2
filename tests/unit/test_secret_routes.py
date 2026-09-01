@@ -16,6 +16,7 @@ from tests.unit._auth_helpers import assign_role as _assign_role
 from tests.unit._auth_helpers import make_principal as _make_principal
 
 from openhands.ev2.secret.secret_security import SecretAccess
+from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.util.auth_token import create_auth_token
 
 
@@ -182,3 +183,67 @@ class TestSecretAccessPolicy:
         resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         assert resp.json()["value"] == "hunter2"
+
+
+class TestSecretGrantAuthorization:
+    """Regression tests: secret-grant management is governed by
+    ``secret_grant_permission``, not by ``role_permission``.
+
+    A principal who may only edit role metadata must not be able to grant a
+    role access to secrets (privilege escalation / secret exfiltration).
+    """
+
+    async def test_role_admin_cannot_manage_grants(self, client: AsyncClient, session) -> None:
+        """role_permission=Permitted alone (no secret_grant_permission) => 403."""
+        principal = await _make_principal(session, email="sg@example.com", username="sg")
+        await _assign_role(session, principal.id, {"role_permission": Permitted()})
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert (await client.get("/role-secret-permissions", headers=headers)).status_code == 403
+        assert (
+            await client.post(
+                "/role-secret-permissions",
+                json={"role_id": str(uuid.uuid4()), "secret_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/role-secret-permissions/batch",
+                json={
+                    "operations": [
+                        {
+                            "op": "create",
+                            "data": {
+                                "role_id": str(uuid.uuid4()),
+                                "secret_id": str(uuid.uuid4()),
+                            },
+                        }
+                    ]
+                },
+                headers=headers,
+            )
+        ).status_code == 403
+
+    async def test_grant_manager_can_manage_grants(self, client: AsyncClient, session) -> None:
+        """secret_grant_permission=Permitted manages grants (but cannot read
+        roles)."""
+        principal = await _make_principal(session, email="sgr@example.com", username="sgr")
+        await _assign_role(session, principal.id, {"secret_grant_permission": Permitted()})
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert (await client.get("/role-secret-permissions", headers=headers)).status_code == 200
+        # Passes authz, fails on orphan FK.
+        assert (
+            await client.post(
+                "/role-secret-permissions",
+                json={"role_id": str(uuid.uuid4()), "secret_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 404
+        # Role administration is not conferred.
+        assert (await client.get("/roles", headers=headers)).status_code == 403
