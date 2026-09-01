@@ -5,6 +5,9 @@ from __future__ import annotations
 import uuid
 from unittest.mock import patch
 
+import httpx
+import pytest
+import respx
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -278,6 +281,57 @@ class TestCompletion:
         assert usage.response_id == "resp-stream"
         assert usage.prompt_tokens == 2
         assert usage.completion_tokens == 1
+
+    @respx.mock
+    async def test_openai_compatible_proxy_records_calculated_cost(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ) -> None:
+        conn = await _create_connection(client, base_url="https://real.example.com")
+        llm = await _create_llm(
+            client,
+            conn["id"],
+            config={
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+            },
+        )
+        upstream = respx.post("https://real.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-1",
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "hello"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                        "total_tokens": 150,
+                    },
+                },
+            )
+        )
+
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            headers={"authorization": "Bearer sk-test"},
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert upstream.called
+        usage = (await session.execute(select(LlmUsage))).scalar_one()
+        assert usage.response_id == "chatcmpl-1"
+        assert usage.prompt_tokens == 100
+        assert usage.completion_tokens == 50
+        assert float(usage.accumulated_cost) == pytest.approx(0.0002)
 
 
 # ====================================================================== #

@@ -720,6 +720,7 @@ async def chat_completions_proxy(
                 client,
                 upstream,
                 llm.model,
+                llm.config,
             ),
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "text/event-stream"),
@@ -733,7 +734,15 @@ async def chat_completions_proxy(
             params=request.query_params,
         )
     if 200 <= upstream.status_code < 300:
-        await _record_openai_usage(session, llm.user_id, conn.id, llm.id, llm.model, upstream)
+        await _record_openai_usage(
+            session,
+            llm.user_id,
+            conn.id,
+            llm.id,
+            llm.model,
+            llm.config,
+            upstream,
+        )
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -782,6 +791,7 @@ async def _proxy_stream_response(
     client: httpx.AsyncClient,
     upstream: httpx.Response,
     fallback_model: str,
+    llm_config: dict[str, Any],
 ) -> AsyncIterator[bytes]:
     usage_payload: dict[str, Any] | None = None
     buffer = ""
@@ -798,6 +808,7 @@ async def _proxy_stream_response(
                 provider_connection_id,
                 llm_id,
                 fallback_model,
+                llm_config,
                 usage_payload,
             )
     finally:
@@ -835,6 +846,7 @@ async def _record_openai_usage(
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     fallback_model: str,
+    llm_config: dict[str, Any],
     response: httpx.Response,
 ) -> None:
     try:
@@ -848,8 +860,34 @@ async def _record_openai_usage(
             provider_connection_id,
             llm_id,
             fallback_model,
+            llm_config,
             payload,
         )
+
+
+def _openai_payload_cost(
+    *,
+    model: str,
+    payload: dict[str, Any],
+    llm_config: dict[str, Any],
+) -> float:
+    """Calculate USD cost for an OpenAI-compatible completion payload."""
+    try:
+        from litellm.cost_calculator import completion_cost as litellm_completion_cost
+        from litellm.types.utils import CostPerToken
+
+        kwargs: dict[str, Any] = {}
+        input_cost = llm_config.get("input_cost_per_token")
+        output_cost = llm_config.get("output_cost_per_token")
+        if input_cost is not None and output_cost is not None:
+            kwargs["custom_cost_per_token"] = CostPerToken(
+                input_cost_per_token=float(input_cost),
+                output_cost_per_token=float(output_cost),
+            )
+        cost = litellm_completion_cost(completion_response=payload, model=model, **kwargs)
+        return max(float(cost), 0.0)
+    except Exception:
+        return 0.0
 
 
 async def _record_usage_from_openai_payload(
@@ -858,6 +896,7 @@ async def _record_usage_from_openai_payload(
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     fallback_model: str,
+    llm_config: dict[str, Any],
     payload: dict[str, Any],
 ) -> None:
     usage = payload.get("usage") or {}
@@ -865,11 +904,16 @@ async def _record_usage_from_openai_payload(
         return
     prompt_details = usage.get("prompt_tokens_details") or {}
     completion_details = usage.get("completion_tokens_details") or {}
+    model = str(payload.get("model") or fallback_model)
     metrics = {
-        "model_name": payload.get("model") or fallback_model,
-        "accumulated_cost": 0.0,
+        "model_name": model,
+        "accumulated_cost": _openai_payload_cost(
+            model=model,
+            payload=payload,
+            llm_config=llm_config,
+        ),
         "accumulated_token_usage": {
-            "model": payload.get("model") or fallback_model,
+            "model": model,
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "cache_read_tokens": prompt_details.get("cached_tokens", 0)
@@ -890,7 +934,7 @@ async def _record_usage_from_openai_payload(
         provider_connection_id=provider_connection_id,
         llm_id=llm_id,
         response_id=payload.get("id") if isinstance(payload.get("id"), str) else None,
-        model=str(payload.get("model") or fallback_model),
+        model=model,
         sdk_metrics=metrics,
     )
     if row is not None:
