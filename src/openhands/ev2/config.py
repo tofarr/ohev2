@@ -126,6 +126,25 @@ class LlmConfig(BaseModel):
     )
 
 
+class McpConfig(BaseModel):
+    """MCP server proxy configuration.
+
+    When an :class:`MCPServerConfig` has ``enable_proxy`` set, the effective
+    ``url`` handed to the SDK is built from :attr:`AppConfig.base_url` plus
+    :attr:`proxy_path` so MCP traffic is routed through this service's proxy
+    endpoint.
+    """
+
+    proxy_path: str = Field(
+        default="/mcp",
+        description=(
+            "Path (relative to AppConfig.base_url) of the MCP proxy endpoint. "
+            "A config id is appended to form the full proxy URL handed to the "
+            "SDK when enable_proxy is set."
+        ),
+    )
+
+
 class IdpConfig(BaseModel):
     """Federated OAuth (auth) — identity provider configuration.
 
@@ -289,6 +308,10 @@ class AppConfig(BaseModel):
     llm: LlmConfig = Field(
         default_factory=LlmConfig,
         description="LLM proxy configuration (base_url for proxied provider connections).",
+    )
+    mcp: McpConfig = Field(
+        default_factory=McpConfig,
+        description="MCP server proxy configuration (url for proxied MCP server configs).",
     )
     # Minted-token lifetimes are NOT configurable here: they are always synced
     # to the expiries advertised by the IdP (with idp.* fallbacks when the IdP

@@ -4,6 +4,9 @@
 // controls read/update/delete access. Secret-bearing MCP fields are represented
 // as encrypted booleans: when a config carries env/header/auth secrets, the
 // implementation must persist ciphertext, not plaintext.
+//
+// An `enableProxy` flag selects whether the config's effective URL points at
+// this service's MCP proxy endpoint or at the stored URL.
 
 module mcp_server_config {
   type MCPServerConfig = {
@@ -20,6 +23,7 @@ module mcp_server_config {
     hasAuth: bool,
     authEncrypted: bool,
     enabled: bool,
+    enableProxy: bool,
     createdAt: int,
     updatedAt: int,
   }
@@ -121,7 +125,8 @@ module mcp_server_config {
     { id: id, userId: "u1", displayName: "filesystem", transport: "stdio",
       url: "", command: "npx", hasEnv: true, envEncrypted: true,
       hasHeaders: true, headersEncrypted: true, hasAuth: true,
-      authEncrypted: true, enabled: true, createdAt: 0, updatedAt: 0 }
+      authEncrypted: true, enabled: true, enableProxy: false,
+      createdAt: 0, updatedAt: 0 }
 
   run canCreateEncryptedConfig = {
     init.then(createConfig(sampleConfig("m1")))
@@ -136,7 +141,7 @@ module mcp_server_config {
     init.then(createConfig({ id: "m1", userId: "u1", displayName: "bad",
       transport: "stdio", url: "", command: "npx", hasEnv: true,
       envEncrypted: false, hasHeaders: false, headersEncrypted: false,
-      hasAuth: false, authEncrypted: false, enabled: true,
+      hasAuth: false, authEncrypted: false, enabled: true, enableProxy: false,
       createdAt: 0, updatedAt: 0 })).fail()
   }
 
