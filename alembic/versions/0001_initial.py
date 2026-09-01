@@ -556,6 +556,7 @@ def upgrade() -> None:
             comment="Encrypted JSON MCP auth credential.",
         ),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("enable_proxy", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

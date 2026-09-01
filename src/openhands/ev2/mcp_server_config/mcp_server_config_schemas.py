@@ -82,6 +82,7 @@ class MCPServerConfigCreate(BaseModel):
     headers: dict[str, SecretStr] | None = None
     auth: dict[str, Any] | None = None
     enabled: bool = True
+    enable_proxy: bool = False
 
     @field_validator("display_name")
     @classmethod
@@ -117,6 +118,7 @@ class MCPServerConfigUpdate(BaseModel):
     headers: dict[str, SecretStr] | None = None
     auth: dict[str, Any] | None = None
     enabled: bool | None = None
+    enable_proxy: bool | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -155,6 +157,7 @@ class MCPServerConfigRead(BaseModel):
     headers: dict[str, str | None] | None = None
     auth: dict[str, Any] | None = None
     enabled: bool
+    enable_proxy: bool
     created_at: datetime
     updated_at: datetime
 
@@ -166,6 +169,7 @@ class MCPServerConfigSearchFilter(BaseSearchFilter[MCPServerConfig]):
     transport__eq: MCPTransport | None = Field(default=None)
     user_id__eq: uuid.UUID | None = Field(default=None)
     enabled__eq: bool | None = Field(default=None)
+    enable_proxy__eq: bool | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)
     created_at__lt: datetime | None = Field(default=None)
     created_at__gt: datetime | None = Field(default=None)

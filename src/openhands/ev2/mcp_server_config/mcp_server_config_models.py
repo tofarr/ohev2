@@ -8,6 +8,10 @@ object or masked API response is materialized.
 ``RoleMCPServerConfigPermission`` mirrors ``role_secret_permissions``: a role
 gets per-config read/update/delete grants through this link table, while create
 is governed by the role's ``mcp_server_config_permission`` policy.
+
+An ``enable_proxy`` flag selects whether the config's effective ``url`` points
+at this service's MCP proxy endpoint (built from :attr:`AppConfig.base_url`) or
+at the stored ``url``.
 """
 
 from __future__ import annotations
@@ -89,6 +93,11 @@ class MCPServerConfig(Base):
         comment="Encrypted JSON MCP auth credential.",
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    enable_proxy: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
@@ -101,8 +110,20 @@ class MCPServerConfig(Base):
         onupdate=func.now(),
     )
 
-    def to_plain_mcp_dict(self, enc: EncryptionService) -> dict[str, Any]:
-        """Return plaintext SDK ``MCPServer`` constructor fields for this row."""
+    def to_plain_mcp_dict(
+        self,
+        enc: EncryptionService,
+        *,
+        proxy_url: str | None = None,
+        use_proxy: bool = True,
+    ) -> dict[str, Any]:
+        """Return plaintext SDK ``MCPServer`` constructor fields for this row.
+
+        When ``enable_proxy`` and ``use_proxy`` are both ``True`` the effective
+        ``url`` is *proxy_url*; otherwise the stored ``url`` is used. Set
+        ``use_proxy=False`` when serving the proxy endpoint itself so forwarding
+        goes to the stored server URL.
+        """
         data: dict[str, Any] = {"enabled": self.enabled}
         for field in (
             "url",
@@ -119,6 +140,9 @@ class MCPServerConfig(Base):
             value = getattr(self, field)
             if value is not None:
                 data[field] = value
+        # When proxy is enabled and requested, use the proxy URL instead.
+        if self.enable_proxy and use_proxy and proxy_url is not None:
+            data["url"] = proxy_url
         if self.env is not None:
             data["env"] = decrypt_json_blob(enc, self.env)
         if self.headers is not None:
@@ -127,11 +151,25 @@ class MCPServerConfig(Base):
             data["auth"] = decrypt_json_blob(enc, self.auth)
         return data
 
-    def to_mcp_server(self, enc: EncryptionService) -> MCPServer:
-        """Materialize the SDK :class:`MCPServer` represented by this row."""
+    def to_mcp_server(
+        self,
+        enc: EncryptionService,
+        *,
+        proxy_url: str | None = None,
+        use_proxy: bool = True,
+    ) -> MCPServer:
+        """Materialize the SDK :class:`MCPServer` represented by this row.
+
+        When ``enable_proxy`` and ``use_proxy`` are both ``True`` the effective
+        ``url`` is *proxy_url*; otherwise the stored ``url`` is used. Set
+        ``use_proxy=False`` when serving the proxy endpoint itself so forwarding
+        goes to the stored server URL.
+        """
         from openhands.sdk.mcp.config import MCPServer
 
-        return MCPServer.model_validate(self.to_plain_mcp_dict(enc))
+        return MCPServer.model_validate(
+            self.to_plain_mcp_dict(enc, proxy_url=proxy_url, use_proxy=use_proxy)
+        )
 
 
 class RoleMCPServerConfigPermission(Base):
