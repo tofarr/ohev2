@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from openhands.ev2.sandbox.sandbox_models import (
     DockerSandboxRuntimeState,
     DockerSandboxTemplateSpec,
@@ -14,8 +18,18 @@ from openhands.ev2.sandbox.sandbox_models import (
     SandboxServerSpec,
     SandboxSnapshotArtifact,
     SandboxStorageSpec,
+    SandboxTemplate,
     SandboxTemplateSpec,
 )
+from openhands.ev2.sandbox.sandbox_schemas import (
+    SandboxTemplateCreate,
+    SandboxTemplateUpdate,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxTemplatePermissionScopeError,
+    SandboxTemplateService,
+)
+from openhands.ev2.util.search_filter import NoneSearchFilter
 
 
 def test_sandbox_template_spec_round_trip() -> None:
@@ -57,3 +71,70 @@ def test_runtime_and_snapshot_artifacts_round_trip() -> None:
     assert restored_runtime.kind == "DockerSandboxRuntimeState"
     assert isinstance(restored_artifact, FuseySandboxSnapshotArtifact)
     assert restored_artifact.filesystem_id == filesystem_id
+
+
+def test_template_create_rejects_non_docker_provider() -> None:
+    with pytest.raises(ValidationError):
+        SandboxTemplateCreate.model_validate(
+            {
+                "name": "bad",
+                "provider_kind": "kubernetes",
+                "template_spec": {
+                    "kind": "DockerSandboxTemplateSpec",
+                    "provider_kind": "docker",
+                    "image": "img",
+                },
+                "storage_spec": {
+                    "kind": "FuseySandboxStorageSpec",
+                    "storage_kind": "fusey",
+                    "mount_path": "/ws",
+                },
+            }
+        )
+
+
+def test_template_create_rejects_non_fusey_storage() -> None:
+    with pytest.raises(ValidationError):
+        SandboxTemplateCreate.model_validate(
+            {
+                "name": "bad",
+                "provider_kind": "docker",
+                "template_spec": {
+                    "kind": "DockerSandboxTemplateSpec",
+                    "provider_kind": "docker",
+                    "image": "img",
+                },
+                "storage_spec": {
+                    "kind": "OtherStorage",
+                    "storage_kind": "other",
+                },
+            }
+        )
+
+
+def test_template_update_rejects_non_docker_spec() -> None:
+    with pytest.raises(ValidationError):
+        SandboxTemplateUpdate.model_validate(
+            {"template_spec": {"kind": "OtherSpec", "provider_kind": "other"}}
+        )
+
+
+def test_template_update_rejects_non_fusey_storage() -> None:
+    with pytest.raises(ValidationError):
+        SandboxTemplateUpdate.model_validate(
+            {"storage_spec": {"kind": "OtherStorage", "storage_kind": "other"}}
+        )
+
+
+async def test_template_create_permission_scope_error(session: AsyncSession) -> None:
+    empty_filter = NoneSearchFilter[SandboxTemplate]()
+    svc = SandboxTemplateService(session, empty_filter)
+    with pytest.raises(SandboxTemplatePermissionScopeError):
+        await svc.create(
+            SandboxTemplateCreate(
+                name="denied",
+                template_spec=DockerSandboxTemplateSpec(image="img"),
+                storage_spec=FuseySandboxStorageSpec(mount_path="/ws"),
+            ),
+            user_id=uuid.uuid4(),
+        )
