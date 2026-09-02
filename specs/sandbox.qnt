@@ -1,322 +1,305 @@
 // Sandbox lifecycle specification.
 //
-// Models a sandbox as a resource with a provider backend and lifecycle states:
-// pending -> running -> (stopped | terminated). Supports ephemeral and persistent.
+// Models the v2 sandbox split:
+//   - Sandbox is durable user-facing state with provider-neutral public states.
+//   - Compute is an internal replaceable attachment that may come from a warm pool.
+//   - Snapshots are named pins of Fusey filesystem generations.
 //
-// Invariants:
-//   - statesConsistent: every sandbox has a recorded state.
-//   - ownershipRequired: every sandbox has a non-empty owner.
-//   - terminatedIsTerminal: once terminated, a sandbox cannot change state.
-//   - idsUnique: sandbox ids are unique.
-//
-// The provider is pluggable (Docker, Kubernetes, E2B) and configured at create
-// time. All providers use the same lifecycle state machine; provider-specific
-// behavior is implementation detail outside the spec.
+// Public sandbox states are intentionally provider-neutral:
+// inactive -> activating -> active -> deactivating -> inactive, with deleting
+// and error transitions. Docker/Kubernetes/E2B-specific terms are not exposed.
 
 module sandbox {
-  // A sandbox is a runtime backing an agent conversation. Its provider is
-  // pluggable (Docker, Kubernetes, E2B) and it may be ephemeral or persistent.
-  type Provider = Docker | Kubernetes | E2B
-  type Lifetime = Ephemeral | Persistent
+  type ProviderKind = Docker | Kubernetes | E2B
+  type StorageKind = Fusey | OtherStorage
 
-  type State = Pending | Running | Stopped | Terminated
+  type SandboxState = Inactive | Activating | Active | Deactivating | Deleting | Error
+  type ComputeState = Warming | Dormant | Claimed | Mounting | Initializing | Serving | Draining | Released | Failed | Deleted
+  type SnapshotState = Creating | Ready | SnapshotDeleting | SnapshotError
 
   type Sandbox = {
     id: str,
-    provider: Provider,
-    lifetime: Lifetime,
     owner: str,
+    providerKind: ProviderKind,
+    filesystemId: str,
+    currentComputeId: str,
+    currentSnapshotId: str,
+  }
+
+  type Compute = {
+    id: str,
+    providerKind: ProviderKind,
+    sandboxId: str,
+    state: ComputeState,
+  }
+
+  type Snapshot = {
+    id: str,
+    filesystemId: str,
+    storageKind: StorageKind,
+    generation: str,
+    state: SnapshotState,
   }
 
   var sandboxes: Set[Sandbox]
-  var states: str -> State
+  var states: str -> SandboxState
+  var computes: Set[Compute]
+  var snapshots: Set[Snapshot]
 
   action init = all {
     sandboxes' = Set(),
     states' = Map(),
+    computes' = Set(),
+    snapshots' = Set(),
   }
 
-  // A new sandbox must not already exist (by id).
-  def notExists(s: Sandbox): bool =
-    not(sandboxes.exists(x => x.id == s.id))
+  def sandboxExists(id: str): bool = sandboxes.exists(s => s.id == id)
+  def noSandbox(id: str): bool = not(sandboxExists(id))
+  def computeExists(id: str): bool = computes.exists(c => c.id == id)
+  def noCompute(id: str): bool = not(computeExists(id))
+  def snapshotExists(id: str): bool = snapshots.exists(s => s.id == id)
 
-  // Create a sandbox in Pending state. Owner must be non-empty.
   action create(s: Sandbox): bool = all {
-    notExists(s),
+    noSandbox(s.id),
     s.owner != "",
+    s.filesystemId != "",
+    s.currentComputeId == "",
     sandboxes' = sandboxes.union(Set(s)),
-    states' = states.set(s.id, Pending),
+    states' = states.set(s.id, Inactive),
+    computes' = computes,
+    snapshots' = snapshots,
     true
   }
 
-  // Permitted lifecycle transitions. Terminated is terminal.
-  pure def validTransition(from: State, target: State): bool = or {
-    from == Pending and target == Running,
-    from == Pending and target == Terminated,
-    from == Running and target == Stopped,
-    from == Stopped and target == Running,
-    from == Running and target == Terminated,
-    from == Stopped and target == Terminated,
-  }
-
-  // Move a sandbox to a new state iff the transition is permitted.
-  action transition(id: str, target: State): bool = all {
+  action beginActivate(id: str): bool = all {
     states.keys().contains(id),
-    validTransition(states.get(id), target),
+    states.get(id) == Inactive or states.get(id) == Error,
+    sandboxes.exists(s => s.id == id and s.currentComputeId == ""),
     sandboxes' = sandboxes,
-    states' = states.set(id, target),
+    states' = states.set(id, Activating),
+    computes' = computes,
+    snapshots' = snapshots,
     true
   }
 
-  // Move a sandbox to a new state, but only if the caller is the owner.
-  action transitionAsOwner(id: str, target: State, callerId: str): bool = all {
+  action finishActivate(id: str, computeId: str, providerKind: ProviderKind): bool = all {
     states.keys().contains(id),
-    sandboxes.exists(s => s.id == id and s.owner == callerId),
-    validTransition(states.get(id), target),
-    sandboxes' = sandboxes,
-    states' = states.set(id, target),
+    states.get(id) == Activating,
+    noCompute(computeId),
+    sandboxes.exists(s => s.id == id and s.providerKind == providerKind),
+    sandboxes' = sandboxes.map(s =>
+      if (s.id == id)
+        { id: s.id, owner: s.owner, providerKind: s.providerKind,
+          filesystemId: s.filesystemId, currentComputeId: computeId,
+          currentSnapshotId: s.currentSnapshotId }
+      else
+        s),
+    states' = states.set(id, Active),
+    computes' = computes.union(Set({ id: computeId, providerKind: providerKind, sandboxId: id, state: Serving })),
+    snapshots' = snapshots,
     true
   }
 
-  // Delete a sandbox (removes from both sets).
-  action remove(id: str): bool = all {
-    sandboxes.exists(s => s.id == id),
+  action beginDeactivate(id: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Active or states.get(id) == Error,
+    sandboxes.exists(s => s.id == id and s.currentComputeId != ""),
+    sandboxes' = sandboxes,
+    states' = states.set(id, Deactivating),
+    computes' = computes,
+    snapshots' = snapshots,
+    true
+  }
+
+  action finishDeactivate(id: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Deactivating,
+    sandboxes.exists(s => s.id == id and s.currentComputeId != ""),
+    computes' = computes.map(c =>
+      if (sandboxes.exists(s => s.id == id and s.currentComputeId == c.id))
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Released }
+      else
+        c),
+    sandboxes' = sandboxes.map(s =>
+      if (s.id == id)
+        { id: s.id, owner: s.owner, providerKind: s.providerKind,
+          filesystemId: s.filesystemId, currentComputeId: "",
+          currentSnapshotId: s.currentSnapshotId }
+      else
+        s),
+    states' = states.set(id, Inactive),
+    snapshots' = snapshots,
+    true
+  }
+
+  action markError(id: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) != Deleting,
+    sandboxes' = sandboxes,
+    states' = states.set(id, Error),
+    computes' = computes,
+    snapshots' = snapshots,
+    true
+  }
+
+  action beginDelete(id: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) != Deleting,
+    sandboxes' = sandboxes,
+    states' = states.set(id, Deleting),
+    computes' = computes,
+    snapshots' = snapshots,
+    true
+  }
+
+  action finishDelete(id: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Deleting,
     sandboxes' = sandboxes.filter(s => s.id != id),
     states' = states.keys().filter(k => k != id).fold(
       Map(),
       (acc, k) => acc.set(k, states.get(k))
     ),
+    computes' = computes.map(c =>
+      if (c.sandboxId == id)
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+      else
+        c),
+    snapshots' = snapshots,
     true
   }
 
-  // No-op action: reads state, leaves it unchanged. Used to wrap assertions.
+  action createSnapshot(id: str, snap: Snapshot): bool = all {
+    sandboxExists(id),
+    not(snapshotExists(snap.id)),
+    snap.storageKind == Fusey,
+    snap.generation != "",
+    sandboxes.exists(s => s.id == id and s.filesystemId == snap.filesystemId),
+    snapshots' = snapshots.union(Set(snap)),
+    sandboxes' = sandboxes.map(s =>
+      if (s.id == id)
+        { id: s.id, owner: s.owner, providerKind: s.providerKind,
+          filesystemId: s.filesystemId, currentComputeId: s.currentComputeId,
+          currentSnapshotId: snap.id }
+      else
+        s),
+    states' = states,
+    computes' = computes,
+    true
+  }
+
   action noop: bool = all {
     sandboxes' = sandboxes,
     states' = states,
+    computes' = computes,
+    snapshots' = snapshots,
     true
   }
 
-  // Nondeterministic step for the simulator.
   action step: bool = noop
 
-  // ------------------------------------------------------------------ #
-  // Invariants
-  // ------------------------------------------------------------------ #
-
-  // Every tracked sandbox has a recorded state.
   val statesConsistent: bool =
     sandboxes.forall(s => states.keys().contains(s.id))
 
-  // Every sandbox has a non-empty owner.
   val ownershipRequired: bool =
     sandboxes.forall(s => s.owner != "")
 
-  // Sandbox ids are unique.
-  val idsUnique: bool =
-    sandboxes.forall(s1 =>
-      sandboxes.forall(s2 =>
-        s1.id == s2.id implies s1 == s2))
+  val activeHasServingCompute: bool =
+    sandboxes.forall(s =>
+      states.get(s.id) == Active implies
+        (s.currentComputeId != "" and
+          computes.exists(c => c.id == s.currentComputeId and c.sandboxId == s.id and c.state == Serving)))
 
-  // ------------------------------------------------------------------ #
-  // Tests
-  // ------------------------------------------------------------------ #
+  val inactiveHasNoCompute: bool =
+    sandboxes.forall(s => states.get(s.id) == Inactive implies s.currentComputeId == "")
 
-  run createThenRun = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
+  val computeAttachedToAtMostOneSandbox: bool =
+    computes.forall(c1 => computes.forall(c2 => c1.id == c2.id implies c1 == c2))
+
+  val snapshotsHaveFuseyGeneration: bool =
+    snapshots.forall(s => s.storageKind == Fusey and s.generation != "")
+
+  val currentSnapshotValid: bool =
+    sandboxes.forall(s =>
+      s.currentSnapshotId == "" or
+        snapshots.exists(sn => sn.id == s.currentSnapshotId and sn.filesystemId == s.filesystemId))
+
+  run createStartsInactive = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
       .then(all {
-        assert(states.get("sb1") == Pending),
-        noop
-      })
-      .then(transition("sb1", Running))
-      .then(all {
-        assert(states.get("sb1") == Running),
+        assert(states.get("sb1") == Inactive),
         noop
       })
   }
 
-  run cannotReuseId = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u2" }))
+  run activateLifecycle = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      .then(beginActivate("sb1"))
+      .then(all {
+        assert(states.get("sb1") == Activating),
+        noop
+      })
+      .then(finishActivate("sb1", "c1", Docker))
+      .then(all {
+        assert(states.get("sb1") == Active),
+        assert(activeHasServingCompute),
+        noop
+      })
+  }
+
+  run deactivateReleasesCompute = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      .then(beginActivate("sb1"))
+      .then(finishActivate("sb1", "c1", Docker))
+      .then(beginDeactivate("sb1"))
+      .then(all {
+        assert(states.get("sb1") == Deactivating),
+        noop
+      })
+      .then(finishDeactivate("sb1"))
+      .then(all {
+        assert(states.get("sb1") == Inactive),
+        assert(inactiveHasNoCompute),
+        assert(computes.exists(c => c.id == "c1" and c.state == Released)),
+        noop
+      })
+  }
+
+  run cannotActivateActiveSandbox = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      .then(beginActivate("sb1"))
+      .then(finishActivate("sb1", "c1", Docker))
+      .then(beginActivate("sb1"))
       .fail()
   }
 
-  run cannotCreateWithEmptyOwner = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "" }))
-      .fail()
-  }
-
-  // Running -> Stopped -> Running (resume)
-  run canResumeFromStopped = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Stopped))
+  run snapshotPinsFuseyGeneration = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      .then(createSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: Fusey,
+        generation: "generation-1", state: Ready }))
       .then(all {
-        assert(states.get("sb1") == Stopped),
-        noop
-      })
-      .then(transition("sb1", Running))
-      .then(all {
-        assert(states.get("sb1") == Running),
+        assert(snapshotsHaveFuseyGeneration),
+        assert(currentSnapshotValid),
         noop
       })
   }
 
-  // Pending -> Terminated (skip running)
-  run canTerminateFromPending = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Terminated))
+  run deleteRemovesSandbox = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      .then(beginDelete("sb1"))
       .then(all {
-        assert(states.get("sb1") == Terminated),
+        assert(states.get("sb1") == Deleting),
         noop
       })
-  }
-
-  // Stopped -> Terminated
-  run canTerminateFromStopped = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Stopped))
-      .then(transition("sb1", Terminated))
+      .then(finishDelete("sb1"))
       .then(all {
-        assert(states.get("sb1") == Terminated),
-        noop
-      })
-  }
-
-  // Running -> Terminated
-  run canTerminateFromRunning = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Terminated))
-      .then(all {
-        assert(states.get("sb1") == Terminated),
-        noop
-      })
-  }
-
-  // Terminated is terminal: cannot transition out.
-  run terminatedIsTerminal = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Terminated))
-      .then(transition("sb1", Running))
-      .fail()
-  }
-
-  run terminatedCannotStop = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Terminated))
-      .then(transition("sb1", Stopped))
-      .fail()
-  }
-
-  // Invalid transitions are rejected.
-  run cannotSkipPendingToStopped = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Stopped))
-      .fail()
-  }
-
-  run cannotGoFromStoppedToPending = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Stopped))
-      .then(transition("sb1", Pending))
-      .fail()
-  }
-
-  // Ownership: only owner can transition.
-  run ownerCanTransition = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transitionAsOwner("sb1", Running, "u1"))
-      .then(all {
-        assert(states.get("sb1") == Running),
-        noop
-      })
-  }
-
-  run nonOwnerCannotTransition = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transitionAsOwner("sb1", Running, "u2"))
-      .fail()
-  }
-
-  // Provider tests: all providers follow the same lifecycle.
-  run dockerProviderLifecycle = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Terminated))
-      .then(all {
-        assert(states.get("sb1") == Terminated),
-        noop
-      })
-  }
-
-  run kubernetesProviderLifecycle = {
-    init.then(create({ id: "sb1", provider: Kubernetes, lifetime: Persistent, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Stopped))
-      .then(transition("sb1", Terminated))
-      .then(all {
-        assert(states.get("sb1") == Terminated),
-        noop
-      })
-  }
-
-  run e2bProviderLifecycle = {
-    init.then(create({ id: "sb1", provider: E2B, lifetime: Ephemeral, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Terminated))
-      .then(all {
-        assert(states.get("sb1") == Terminated),
-        noop
-      })
-  }
-
-  // Persistent sandboxes can be stopped and resumed.
-  run persistentCanStopAndResume = {
-    init.then(create({ id: "sb1", provider: Kubernetes, lifetime: Persistent, owner: "u1" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb1", Stopped))
-      .then(transition("sb1", Running))
-      .then(all {
-        assert(states.get("sb1") == Running),
-        noop
-      })
-  }
-
-  // Can delete a sandbox.
-  run canDeleteSandbox = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(remove("sb1"))
-      .then(all {
-        assert(not(sandboxes.exists(s => s.id == "sb1"))),
-        assert(not(states.keys().contains("sb1"))),
-        noop
-      })
-  }
-
-  // Multiple sandboxes can coexist.
-  run multipleSandboxes = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(create({ id: "sb2", provider: Kubernetes, lifetime: Persistent, owner: "u2" }))
-      .then(transition("sb1", Running))
-      .then(transition("sb2", Running))
-      .then(all {
-        assert(states.get("sb1") == Running),
-        assert(states.get("sb2") == Running),
-        assert(sandboxes.size() == 2),
-        noop
-      })
-  }
-
-  // Same owner can have multiple sandboxes.
-  run sameOwnerMultipleSandboxes = {
-    init.then(create({ id: "sb1", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(create({ id: "sb2", provider: Docker, lifetime: Ephemeral, owner: "u1" }))
-      .then(all {
-        assert(sandboxes.filter(s => s.owner == "u1").size() == 2),
+        assert(not(sandboxExists("sb1"))),
         noop
       })
   }

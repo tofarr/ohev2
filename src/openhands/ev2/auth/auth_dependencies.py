@@ -580,6 +580,13 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: 
 )
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
+from openhands.ev2.sandbox.sandbox_models import Sandbox as _Sandbox  # noqa: E402
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    SandboxSnapshot as _SandboxSnapshot,
+)
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    SandboxTemplate as _SandboxTemplate,
+)
 from openhands.ev2.secret import (  # noqa: E402,F401
     secret_security as _secret_security,  # registers SecretAccess in the Permission union
 )
@@ -605,6 +612,9 @@ register_resource_policy(_LlmAggregatedUsage, "llm_aggregated_usage_permission")
 register_resource_policy(_FeatureFlag, "feature_flag_permission")
 register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
 register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignment_permission")
+register_resource_policy(_SandboxTemplate, "sandbox_template_permission")
+register_resource_policy(_Sandbox, "sandbox_permission")
+register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
 
 
 def depends_permissions(
