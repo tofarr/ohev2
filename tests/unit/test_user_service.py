@@ -313,6 +313,10 @@ class TestNewFields:
         with pytest.raises(ValueError):
             UserCreate(email="alice@example.com", username="   ")
 
+    async def test_update_username_none_passes_through(self) -> None:
+        update = UserUpdate()
+        assert update.username is None
+
     async def test_create_duplicate_username_conflicts(self, service: UserService) -> None:
         await service.create(UserCreate(email="alice@example.com", username="alice"))
         with pytest.raises(UserUsernameConflictError):
@@ -405,6 +409,11 @@ class TestPasswordHashing:
         )
         assert service.verify_password("wrong", user) is False
         assert service.verify_password("", user) is False
+
+    async def test_verify_password_rejects_when_no_password_set(self, service: UserService) -> None:
+        user = await service.create(UserCreate(email="nopass@example.com", username="nopass"))
+        assert user.password is None
+        assert service.verify_password("anything", user) is False
 
     async def test_password_never_in_read_schema(self) -> None:
         from openhands.ev2.user.user_schemas import UserRead

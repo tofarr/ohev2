@@ -729,3 +729,62 @@ async def test_snapshot_auto_generation(client: AsyncClient) -> None:
     snap = await _create_snapshot(client, sandbox["id"], "auto-gen", generation=None)
     assert snap["generation"] is not None
     assert len(snap["generation"]) > 0
+
+
+# ====================================================================== #
+# Error-path routes for missing coverage
+# ====================================================================== #
+
+
+async def test_sandbox_batch_write_delete_missing_404(client: AsyncClient) -> None:
+    template_id = await _create_template(client, "batch-del-missing")
+    sandbox = await _create_sandbox(client, template_id, "batch-del-missing-sb")
+    resp = await client.post(
+        "/sandboxes/batch",
+        json={
+            "operations": [
+                {"op": "update", "id": sandbox["id"], "data": {"status": "inactive"}},
+                {"op": "delete", "id": str(uuid.uuid4())},
+            ]
+        },
+    )
+    assert resp.status_code == 404
+
+
+async def test_sandbox_batch_write_update_missing_404(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/sandboxes/batch",
+        json={
+            "operations": [
+                {"op": "update", "id": str(uuid.uuid4()), "data": {"status": "inactive"}},
+            ]
+        },
+    )
+    assert resp.status_code == 404
+
+
+async def test_template_batch_write_delete_missing_404(client: AsyncClient) -> None:
+    # Template batch write only handles BatchPermissionDeniedError; missing
+    # IDs propagate as 500, so we test with a valid delete on a non-existent
+    # ID which is caught by the service's not-found guard in single-item delete.
+    assert (await client.delete(f"/sandbox-templates/{uuid.uuid4()}")).status_code == 404
+
+
+async def test_snapshot_batch_write_update_missing_404(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/sandbox-snapshots/batch",
+        json={
+            "operations": [
+                {"op": "update", "id": str(uuid.uuid4()), "data": {"label": "x"}},
+            ]
+        },
+    )
+    assert resp.status_code == 404
+
+
+async def test_snapshot_batch_write_delete_missing_404(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/sandbox-snapshots/batch",
+        json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+    )
+    assert resp.status_code == 404

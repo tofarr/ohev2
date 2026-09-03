@@ -392,3 +392,57 @@ class TestDecodeErrorBranches:
         )
         with pytest.raises(InvalidTokenError):
             await _seeded_service(session).authenticate(bad)
+
+    async def test_api_key_type_rejected(self, session) -> None:
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        enc = get_encryption_service()
+        bad = enc.create_jwe_token(
+            {
+                "sub": str(_TEST_USER_ID),
+                "ttyp": "api_key",
+                "jti": str(uuid.uuid4()),
+                "iat": int(datetime.now(UTC).timestamp()),
+                "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+            },
+            expires_in=timedelta(hours=1),
+        )
+        with pytest.raises(InvalidTokenError, match="api key"):
+            await _seeded_service(session).authenticate(bad)
+
+    async def test_token_invalid_jti_rejected(self, session) -> None:
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        enc = get_encryption_service()
+        bad = enc.create_jwe_token(
+            {
+                "sub": str(_TEST_USER_ID),
+                "ttyp": "cookie",
+                "jti": "not-a-uuid",
+                "iat": int(datetime.now(UTC).timestamp()),
+                "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+            },
+            expires_in=timedelta(hours=1),
+        )
+        with pytest.raises(InvalidTokenError, match="jti"):
+            await _seeded_service(session).authenticate(bad)
+
+    async def test_token_invalid_row_id_rejected(self, session) -> None:
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        await _seed_user(session)
+        enc = get_encryption_service()
+        bad = enc.create_jwe_token(
+            {
+                "sub": str(_TEST_USER_ID),
+                "ttyp": "idp_refresh_token",
+                "jti": str(uuid.uuid4()),
+                "iat": int(datetime.now(UTC).timestamp()),
+                "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+                "rid": "not-a-uuid",
+            },
+            expires_in=timedelta(hours=1),
+        )
+        svc = _seeded_service(session)
+        with pytest.raises(InvalidTokenError, match=r"rid|row|invalid"):
+            await svc.authenticate(bad, allow_refresh=True)
