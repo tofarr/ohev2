@@ -50,6 +50,9 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "feature_flag_permission",
     "feature_flag_role_assignment_permission",
     "feature_flag_user_assignment_permission",
+    "sandbox_template_permission",
+    "sandbox_permission",
+    "sandbox_snapshot_permission",
 )
 
 
@@ -150,6 +153,21 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for feature_flag_user_assignment resources; null = deny.",
+    )
+    sandbox_template_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for sandbox_template resources; null = deny.",
+    )
+    sandbox_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for sandbox resources; null = deny.",
+    )
+    sandbox_snapshot_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for sandbox_snapshot resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
