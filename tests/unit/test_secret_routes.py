@@ -247,3 +247,52 @@ class TestSecretGrantAuthorization:
         ).status_code == 404
         # Role administration is not conferred.
         assert (await client.get("/roles", headers=headers)).status_code == 403
+
+
+class TestSecretRouteErrorPaths:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/secrets?cursor=not-a-uuid")).status_code == 400
+
+    async def test_batch_read_too_many_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        assert (await client.get(f"/secrets/batch?{ids}")).status_code == 422
+
+    async def test_batch_write_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/secrets/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": {"value": "x"}},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/secrets/batch",
+            json={
+                "operations": [
+                    {"op": "delete", "id": str(uuid.uuid4())},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_duplicate_returns_409(self, client: AsyncClient) -> None:
+        resp1 = await client.post("/secrets", json=_create_payload("DUP_BATCH"))
+        assert resp1.status_code == 201
+        secret_id = resp1.json()["id"]
+        resp = await client.post(
+            "/secrets/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _create_payload("DUP_BATCH", "other")},
+                    {"op": "delete", "id": secret_id},
+                ]
+            },
+        )
+        assert resp.status_code == 409
+
+    async def test_batch_empty_ops_rejected(self, client: AsyncClient) -> None:
+        assert (await client.post("/secrets/batch", json={"operations": []})).status_code == 422

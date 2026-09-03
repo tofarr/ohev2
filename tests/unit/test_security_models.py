@@ -16,6 +16,7 @@ from openhands.ev2.security.security_models import (
     Action,
     Denied,
     Permission,
+    PermissionType,
     Permitted,
     ReadOnly,
 )
@@ -75,3 +76,18 @@ class TestPermissionAbstract:
         # override it. Validating without a kind should fail to resolve a subclass.
         with pytest.raises(ValueError, match="kind"):
             Permission.model_validate({})
+
+
+class TestPermissionTypeBindProcessor:
+    """The JSONB column type serializes Permission models for the driver."""
+
+    def test_none_returns_none(self) -> None:
+        assert PermissionType().process_bind_param(None, None) is None
+
+    def test_dict_returned_as_is(self) -> None:
+        d = {"kind": "Permitted"}
+        assert PermissionType().process_bind_param(d, None) == d
+
+    def test_permission_model_dumped_to_json_dict(self) -> None:
+        result = PermissionType().process_bind_param(Permitted(), None)
+        assert result == {"kind": "Permitted"}

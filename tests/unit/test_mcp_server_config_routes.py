@@ -355,3 +355,41 @@ class TestRoleMCPServerConfigGrantAuthorization:
         ).status_code == 404
         # Role administration is not conferred.
         assert (await client.get("/roles", headers=headers)).status_code == 403
+
+
+class TestMCPServerConfigRouteErrorPaths:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/mcp-server-configs?cursor=not-a-uuid")).status_code == 400
+
+    async def test_batch_write_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/mcp-server-configs/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_update_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/mcp-server-configs/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": {"name": "x"}},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_empty_ops_rejected(self, client: AsyncClient) -> None:
+        assert (
+            await client.post("/mcp-server-configs/batch", json={"operations": []})
+        ).status_code == 422
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/mcp-server-configs/{uuid.uuid4()}",
+            json={"name": "x"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        assert (await client.delete(f"/mcp-server-configs/{uuid.uuid4()}")).status_code == 404

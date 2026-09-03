@@ -220,3 +220,24 @@ class TestCountAndSearch:
         rest, nxt2 = await service.search_secrets(cursor=nxt, limit=2)
         assert len(rest) == 1
         assert nxt2 is None
+
+
+class TestSecretSchemaValidation:
+    """Pure schema-level validation for SecretCreate/SecretUpdate code field."""
+
+    def test_create_rejects_whitespace_only_code(self) -> None:
+        from pydantic import SecretStr, ValidationError
+
+        with pytest.raises(ValidationError):
+            SecretCreate(code="   ", value=SecretStr("v"))
+
+    def test_update_none_code_passes_through(self) -> None:
+        assert SecretUpdate().code is None
+
+    def test_update_rejects_whitespace_only_code(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            SecretUpdate(code="   ")
+
+    def test_update_rejects_invalid_code_chars(self) -> None:
+        with pytest.raises(ValueError, match="letters, digits"):
+            SecretUpdate(code="bad!")
