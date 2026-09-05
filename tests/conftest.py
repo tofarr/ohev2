@@ -50,6 +50,10 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: 
     MCPServerConfig,
     RoleMCPServerConfigPermission,
 )
+from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: F401
+    McpAggregatedUsage,
+    McpUsage,
+)
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.secret.secret_models import (  # noqa: F401
     RoleSecretPermission,
@@ -86,6 +90,7 @@ def _build_template_schema(host: str, port: int, user: str, password: str, dbnam
     import openhands.ev2.feature_flag.feature_flag_models
     import openhands.ev2.llm.llm_models
     import openhands.ev2.mcp_server_config.mcp_server_config_models
+    import openhands.ev2.mcp_server_config.mcp_usage_models
     import openhands.ev2.role.role_models
     import openhands.ev2.secret.secret_models
     import openhands.ev2.user.user_models  # noqa: F401
@@ -98,10 +103,19 @@ def _build_template_schema(host: str, port: int, user: str, password: str, dbnam
         try:
             async with eng.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                # llm_usage and mcp_usage are range-partitioned by created_at;
+                # create_all emits only the parents. Add DEFAULT partitions so
+                # test inserts land somewhere before dated partitions exist.
                 await conn.execute(
                     text(
                         "CREATE TABLE IF NOT EXISTS llm_usage_default "
                         "PARTITION OF llm_usage DEFAULT"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS mcp_usage_default "
+                        "PARTITION OF mcp_usage DEFAULT"
                     )
                 )
         finally:
@@ -169,6 +183,9 @@ def _set_test_config(
     # Keep the LLM usage background loops out of the test process.
     monkeypatch.setenv("OHE_LLM_USAGE_PARTITION_INTERVAL", "0")
     monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
+    # Keep the MCP usage background loops out of the test process.
+    monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
+    monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
 
 
 # Per-entity ``Permission`` columns the seeded test admin role grants

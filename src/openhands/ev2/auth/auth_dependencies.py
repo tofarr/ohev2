@@ -578,6 +578,9 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: 
 from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: E402
     RoleMCPServerConfigPermission as _RoleMCPServerConfigPermission,
 )
+from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: E402
+    McpAggregatedUsage as _McpAggregatedUsage,
+)
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.sandbox.sandbox_models import Sandbox as _Sandbox  # noqa: E402
@@ -609,6 +612,7 @@ register_resource_policy(_RoleMCPServerConfigPermission, "mcp_server_config_gran
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
 register_resource_policy(_LlmAggregatedUsage, "llm_aggregated_usage_permission")
+register_resource_policy(_McpAggregatedUsage, "mcp_aggregated_usage_permission")
 register_resource_policy(_FeatureFlag, "feature_flag_permission")
 register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
 register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignment_permission")

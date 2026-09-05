@@ -191,6 +191,17 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   - `llm.usage.aggregate_interval` (`OHE_LLM_USAGE_AGGREGATE_INTERVAL`):
     rolls finished minutes (at least one behind wall-clock) from `llm_usage`
     into the read-only `llm_aggregated_usage` projection.
+* Background MCP usage management — two lifespan loops with the same shape
+  and the same `= 0` disables-in-process semantics, configured under
+  `mcp.usage` (env `OHE_MCP_USAGE_*`). See README "MCP usage logging":
+  - `mcp.usage.partition_interval` (`OHE_MCP_USAGE_PARTITION_INTERVAL`):
+    preallocates `mcp.usage.preallocate_days` future daily `mcp_usage`
+    partitions and drops ones older than `mcp.usage.retention_days`.
+  - `mcp.usage.aggregate_interval` (`OHE_MCP_USAGE_AGGREGATE_INTERVAL`):
+    rolls finished minutes (at least one behind wall-clock) from `mcp_usage`
+    into the read-only `mcp_aggregated_usage` projection (per-user
+    `total_duration_ms` sums + `invocations` counts, gated by
+    `mcp_aggregated_usage_permission`).
 * Authorization checks live in services (not just routers) — defense in depth.
 
 ## 11. Roles & per-entity permission columns
