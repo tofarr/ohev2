@@ -40,7 +40,7 @@ async def _seed_role_secret_permission_user(
     session.add(user)
     session.add(role)
     await session.flush()
-    secret = Secret(code=f"RS_{n}_{uuid.uuid4().hex[:6]}", value="v", user_id=user.id)
+    secret = Secret(code=f"RS_{n}_{uuid.uuid4().hex[:6]}", value="v")
     session.add(secret)
     await session.flush()
     return role, secret, user

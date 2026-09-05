@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import Secret
+from openhands.ev2.secret.secret_models import Secret, UserSecretPermission
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
@@ -60,7 +61,17 @@ class TestCreate:
         # The persisted value is ciphertext, never the plaintext.
         assert secret.value != "hunter2"
         assert enc.decrypt_value(secret.value) == "hunter2"
-        assert secret.user_id == user.id
+        grant = (
+            await session.execute(
+                select(UserSecretPermission).where(
+                    UserSecretPermission.user_id == user.id,
+                    UserSecretPermission.secret_id == secret.id,
+                )
+            )
+        ).scalar_one()
+        assert grant.read_enabled is True
+        assert grant.update_enabled is True
+        assert grant.delete_enabled is True
 
     async def test_create_duplicate_code_conflicts(
         self, service: SecretService, session: AsyncSession

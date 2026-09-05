@@ -15,11 +15,13 @@
 //   cors.qnt         — CORS allow-list: add/remove origins
 //   encryption.qnt   — encryption key config + encryptionKeyInDecryptionKeys invariant
 //   feature_flag.qnt — feature flags: global, role, and user-specific assignments
+//   mcp_server_config.qnt — persisted MCP server configs and role grants
 //   rbac.qnt         — RBAC evaluation: permission-union, filter disjunction
 //   rest.qnt         — uniform REST route/verb mapping (review guard)
 //   role.qnt         — role entity: name uniqueness, per-entity permissions
 //   sandbox.qnt      — sandbox lifecycle state machine: ownership, transitions
 //   search_filter.qnt — search filter semantics: operators, conjunction, composite
+//   secret.qnt       — secret access grants without singular ownership
 //   user.qnt         — user entity: id/email/username uniqueness, passwords
 //
 // Cross-cutting concerns:
@@ -33,5 +35,5 @@
 
 module ohev {
   // Index of available spec modules. See header comment for invocation.
-  pure val specModules: str = "api_key, auth, batch, cors, encryption, feature_flag, rbac, rest, role, sandbox, search_filter, user"
+  pure val specModules: str = "api_key, auth, batch, cors, encryption, feature_flag, mcp_server_config, rbac, rest, role, sandbox, search_filter, secret, user"
 }
