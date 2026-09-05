@@ -52,16 +52,21 @@ class DbConfig(BaseModel):
 
 
 class UsageConfig(BaseModel):
-    """LLM usage logging configuration.
+    """Usage logging configuration for a raw daily-partitioned usage table.
 
-    Raw LLM invocations are written to the daily-partitioned ``llm_usage`` table
-    and rolled up into the ``llm_aggregated_usage`` projection by background
-    loops (see README 'LLM usage logging'). These knobs control the two loops:
+    Raw invocations are written to a daily-partitioned ``<prefix>_usage`` table
+    and rolled up into a ``<prefix>_aggregated_usage`` projection by background
+    loops (see README 'LLM usage logging' / 'MCP usage logging'). These knobs
+    control the two loops:
 
     * the **partition manager** keeps ``preallocate_days`` future daily
       partitions allocated and drops partitions older than ``retention_days``;
-    * the **aggregator** rolls per-minute ``llm_aggregated_usage`` rows one
+    * the **aggregator** rolls per-minute ``<prefix>_aggregated_usage`` rows one
       minute at a time, always at least one minute behind wall-clock time.
+
+    Shared by the LLM and MCP usage features (nested under ``llm.usage`` and
+    ``mcp.usage`` respectively), so the env-var prefix differs
+    (``OHE_LLM_USAGE_*`` / ``OHE_MCP_USAGE_*``) while the knobs are identical.
     """
 
     partition_interval: int = Field(
@@ -71,7 +76,7 @@ class UsageConfig(BaseModel):
             "Seconds between partition-manager sweeps that allocate future "
             "daily partitions and drop expired ones. 0 disables the in-process "
             "loop (drive it with an external scheduler); see README 'LLM usage "
-            "logging'."
+            "logging' / 'MCP usage logging'."
         ),
     )
     preallocate_days: int = Field(
@@ -93,8 +98,8 @@ class UsageConfig(BaseModel):
         ge=0,
         description=(
             "Seconds between aggregator sweeps that roll per-minute "
-            "llm_aggregated_usage rows from llm_usage. 0 disables the in-process "
-            "loop (drive it with an external scheduler)."
+            "aggregated-usage rows from the raw usage table. 0 disables the "
+            "in-process loop (drive it with an external scheduler)."
         ),
     )
 
@@ -133,6 +138,10 @@ class McpConfig(BaseModel):
     ``url`` handed to the SDK is built from :attr:`AppConfig.base_url` plus
     :attr:`proxy_path` so MCP traffic is routed through this service's proxy
     endpoint.
+
+    ``usage`` configures the background loops that manage the daily-partitioned
+    raw ``mcp_usage`` table and its per-minute ``mcp_aggregated_usage``
+    projection (see README 'MCP usage logging').
     """
 
     proxy_path: str = Field(
@@ -142,6 +151,10 @@ class McpConfig(BaseModel):
             "A config id is appended to form the full proxy URL handed to the "
             "SDK when enable_proxy is set."
         ),
+    )
+    usage: UsageConfig = Field(
+        default_factory=UsageConfig,
+        description="MCP usage logging (partitioning, retention, aggregation).",
     )
 
 

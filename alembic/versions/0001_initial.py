@@ -27,6 +27,8 @@ Tables:
 * ``user_secret_permissions``           — per-user grants of access to secrets.
 * ``mcp_server_configs``    — stored MCP server configurations.
 * ``role_mcp_server_config_permissions`` — per-role grants for MCP configs.
+* ``mcp_usage``             — raw proxied MCP tool-invocation records (daily-partitioned).
+* ``mcp_aggregated_usage``  — per-minute, per-user rollup of mcp_usage.
 * ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
@@ -399,6 +401,12 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for llm_aggregated_usage resources; null = deny.",
+        ),
+        sa.Column(
+            "mcp_aggregated_usage_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for mcp_aggregated_usage resources; null = deny.",
         ),
         sa.Column(
             "feature_flag_permission",
@@ -1327,8 +1335,113 @@ def upgrade() -> None:
         "ix_llm_aggregated_usage_user_id", "llm_aggregated_usage", ["user_id"], unique=False
     )
 
+    # ------------------------------------------------------------------ #
+    # mcp_usage (range-partitioned parent by created_at; partitions are
+    # created by the background partition manager at runtime — see README
+    # 'MCP usage logging'. A DEFAULT partition is created here so inserts
+    # never fail before the manager's first sweep.)
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "mcp_usage",
+        sa.Column(
+            "id",
+            sa.BigInteger(),
+            server_default=sa.text("nextval(pg_get_serial_sequence('mcp_usage', 'id'))"),
+            autoincrement=True,
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("mcp_server_config_id", sa.Uuid(), nullable=False),
+        sa.Column("tool_name", sa.String(length=255), server_default="", nullable=False),
+        sa.Column("duration_ms", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("success", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("error", sa.Text(), nullable=True),
+        sa.Column("details", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.PrimaryKeyConstraint("id", "created_at"),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_mcp_usage_user_id_users"
+        ),
+        sa.ForeignKeyConstraint(
+            ["mcp_server_config_id"],
+            ["mcp_server_configs.id"],
+            ondelete="CASCADE",
+            name="fk_mcp_usage_mcp_server_config_id_configs",
+        ),
+        comment="Raw proxied MCP tool-invocation records, daily-partitioned by created_at",
+        postgresql_partition_by="RANGE(created_at)",
+    )
+    op.create_index("ix_mcp_usage_user_id", "mcp_usage", ["user_id"], unique=False)
+    op.create_index(
+        "ix_mcp_usage_mcp_server_config_id",
+        "mcp_usage",
+        ["mcp_server_config_id"],
+        unique=False,
+    )
+    op.create_index("ix_mcp_usage_created_at", "mcp_usage", ["created_at"], unique=False)
+    # DEFAULT partition so inserts succeed before the manager allocates the
+    # day's partition (or when a row's created_at falls outside any allocated
+    # day). Created with raw SQL: op.create_table does not emit PARTITION OF.
+    op.execute("CREATE TABLE mcp_usage_default PARTITION OF mcp_usage DEFAULT")
+
+    # ------------------------------------------------------------------ #
+    # mcp_aggregated_usage
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "mcp_aggregated_usage",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("minute", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("invocations", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "total_duration_ms",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_mcp_aggregated_usage_user_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_id", "minute", name="uq_mcp_aggregated_usage_user_id_minute"),
+        comment="Per-minute, per-user rollup of mcp_usage",
+    )
+    op.create_index(
+        "ix_mcp_aggregated_usage_minute", "mcp_aggregated_usage", ["minute"], unique=False
+    )
+    op.create_index(
+        "ix_mcp_aggregated_usage_user_id", "mcp_aggregated_usage", ["user_id"], unique=False
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_mcp_aggregated_usage_user_id", table_name="mcp_aggregated_usage")
+    op.drop_index("ix_mcp_aggregated_usage_minute", table_name="mcp_aggregated_usage")
+    op.drop_table("mcp_aggregated_usage")
+    op.drop_index("ix_mcp_usage_created_at", table_name="mcp_usage")
+    op.drop_index("ix_mcp_usage_mcp_server_config_id", table_name="mcp_usage")
+    op.drop_index("ix_mcp_usage_user_id", table_name="mcp_usage")
+    op.drop_table("mcp_usage")
     op.drop_index("ix_llm_aggregated_usage_user_id", table_name="llm_aggregated_usage")
     op.drop_index("ix_llm_aggregated_usage_minute", table_name="llm_aggregated_usage")
     op.drop_table("llm_aggregated_usage")

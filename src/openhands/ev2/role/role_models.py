@@ -47,6 +47,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "provider_connection_permission",
     "llm_permission",
     "llm_aggregated_usage_permission",
+    "mcp_aggregated_usage_permission",
     "feature_flag_permission",
     "feature_flag_role_assignment_permission",
     "feature_flag_user_assignment_permission",
@@ -138,6 +139,11 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for llm_aggregated_usage resources; null = deny.",
+    )
+    mcp_aggregated_usage_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for mcp_aggregated_usage resources; null = deny.",
     )
     feature_flag_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,

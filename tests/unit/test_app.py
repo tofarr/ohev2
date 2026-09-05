@@ -11,6 +11,8 @@ from openhands.ev2.app import (
     _cleanup_loop,
     _llm_usage_aggregate_loop,
     _llm_usage_partition_loop,
+    _mcp_usage_aggregate_loop,
+    _mcp_usage_partition_loop,
     create_app,
     lifespan,
 )
@@ -172,6 +174,100 @@ class TestLlmUsageAggregateLoop:
                 await task
 
 
+class TestMcpUsagePartitionLoop:
+    async def test_interval_zero_returns_immediately(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.mcp.usage.partition_interval = 0
+            await _mcp_usage_partition_loop()
+
+    async def test_sweep_creates_and_drops_partitions(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.mcp.usage.partition_interval = 0.01
+            mock_cfg.return_value.mcp.usage.preallocate_days = 3
+            mock_cfg.return_value.mcp.usage.retention_days = 30
+
+            class FakeService:
+                async def ensure_partitions(self, *, preallocate_days, retention_days):
+                    return (["p1"], ["p2"])
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=FakeService())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            with patch(
+                "openhands.ev2.mcp_server_config.mcp_usage_service.McpUsageService", FakeService
+            ):
+                task = asyncio.create_task(_mcp_usage_partition_loop())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    async def test_sweep_logs_exception_and_continues(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.mcp.usage.partition_interval = 0.01
+            mock_factory.side_effect = RuntimeError("db down")
+
+            task = asyncio.create_task(_mcp_usage_partition_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+class TestMcpUsageAggregateLoop:
+    async def test_interval_zero_returns_immediately(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.mcp.usage.aggregate_interval = 0
+            await _mcp_usage_aggregate_loop()
+
+    async def test_sweep_aggregates_usage(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.mcp.usage.aggregate_interval = 0.01
+
+            class FakeService:
+                async def aggregate_behind_now(self, *, lag_minutes=1):
+                    return 5
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=FakeService())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            with patch(
+                "openhands.ev2.mcp_server_config.mcp_usage_service.McpUsageService", FakeService
+            ):
+                task = asyncio.create_task(_mcp_usage_aggregate_loop())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    async def test_sweep_logs_exception_and_continues(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.mcp.usage.aggregate_interval = 0.01
+            mock_factory.side_effect = RuntimeError("db down")
+
+            task = asyncio.create_task(_mcp_usage_aggregate_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
 class TestLifespan:
     async def test_lifespan_starts_and_cancels_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi import FastAPI
@@ -192,6 +288,8 @@ class TestLifespan:
         monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
         monkeypatch.setenv("OHE_LLM_USAGE_PARTITION_INTERVAL", "0")
         monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
+        monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
+        monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
 
         app = FastAPI()
         async with lifespan(app):

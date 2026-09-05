@@ -78,6 +78,10 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for llm_aggregated_usage resources; null = deny.",
     )
+    mcp_aggregated_usage_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for mcp_aggregated_usage resources; null = deny.",
+    )
     feature_flag_permission: Permission | None = Field(
         default=None,
         description="Permission policy for feature_flag resources; null = deny.",
@@ -170,6 +174,10 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for llm_aggregated_usage resources; null = deny.",
     )
+    mcp_aggregated_usage_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for mcp_aggregated_usage resources; null = deny.",
+    )
     feature_flag_permission: Permission | None = Field(
         default=None,
         description="Permission policy for feature_flag resources; null = deny.",
@@ -226,6 +234,7 @@ class RoleRead(BaseModel):
     provider_connection_permission: Permission | None
     llm_permission: Permission | None
     llm_aggregated_usage_permission: Permission | None
+    mcp_aggregated_usage_permission: Permission | None
     feature_flag_permission: Permission | None
     feature_flag_role_assignment_permission: Permission | None
     feature_flag_user_assignment_permission: Permission | None

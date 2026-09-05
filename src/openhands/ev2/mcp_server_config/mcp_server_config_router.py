@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
@@ -28,6 +29,12 @@ from openhands.ev2.mcp_server_config.mcp_server_config_service import (
     MCPServerConfigPermissionScopeError,
     MCPServerConfigService,
     MCPServerConfigValidationError,
+)
+from openhands.ev2.mcp_server_config.mcp_usage_models import McpAggregatedUsage
+from openhands.ev2.mcp_server_config.mcp_usage_schemas import (
+    McpAggregatedUsageRead,
+    McpAggregatedUsageSearchFilter,
+    McpAggregatedUsageSearchResult,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
@@ -194,6 +201,122 @@ async def write_mcp_server_configs_batch(
     return BatchWriteResult(
         items=[service.to_read(config) if config is not None else None for config in results]
     )
+
+
+# ---------------------------------------------------------------------- #
+# MCP aggregated usage (read-only projection of mcp_usage)
+#
+# The raw ``mcp_usage`` table (daily-partitioned, append-only) is not exposed
+# over REST. Usage queries go through the ``mcp_aggregated_usage`` projection
+# — per-minute, per-user rollups exposed read-only here. Only SEARCH / READ /
+# batch-read are wired — there is no create/update/delete (the projection is
+# populated by the background aggregator), so per AGENTS.md §3 no batch write
+# endpoint is required. These routes are declared before ``/{config_id}`` so
+# the UUID path parameter does not shadow the ``aggregated-usage`` literal.
+# ---------------------------------------------------------------------- #
+
+
+@router.get(
+    "/aggregated-usage",
+    response_model=McpAggregatedUsageSearchResult,
+)
+async def search_mcp_aggregated_usage(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[McpAggregatedUsage],
+        Depends(depends_permissions(McpAggregatedUsage, Action.SEARCH)),
+    ],
+    search_filter: McpAggregatedUsageSearchFilter = Depends(),  # noqa: B008
+    cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> McpAggregatedUsageSearchResult:
+    """List per-minute, per-user MCP usage rollups (paginated, scoped by permissions)."""
+    cursor_uuid = _cursor(cursor) if cursor is not None else None
+    stmt = perm_filter.filter_sql(select(McpAggregatedUsage).order_by(McpAggregatedUsage.id))
+    if search_filter is not None:
+        stmt = search_filter.filter_sql(stmt)
+    if cursor_uuid is not None:
+        stmt = stmt.where(McpAggregatedUsage.id > cursor_uuid)
+    stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    rows = list(result.scalars().all())
+    next_cursor = rows[-1].id if len(rows) == limit else None
+    return McpAggregatedUsageSearchResult(
+        items=[McpAggregatedUsageRead.model_validate(r) for r in rows],
+        next_cursor=str(next_cursor) if next_cursor is not None else None,
+        limit=limit,
+    )
+
+
+@router.get("/aggregated-usage/count", response_model=CountResult)
+async def count_mcp_aggregated_usage(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[McpAggregatedUsage],
+        Depends(depends_permissions(McpAggregatedUsage, Action.SEARCH)),
+    ],
+    search_filter: McpAggregatedUsageSearchFilter = Depends(),  # noqa: B008
+) -> CountResult:
+    """Count per-minute, per-user MCP usage rollups in the principal's scope."""
+    stmt = perm_filter.filter_sql(select(func.count()).select_from(McpAggregatedUsage))
+    if search_filter is not None:
+        stmt = search_filter.filter_sql(stmt)
+    result = await session.execute(stmt)
+    return CountResult(count=int(result.scalar_one()))
+
+
+@router.get(
+    "/aggregated-usage/batch",
+    response_model=BatchReadResult[McpAggregatedUsageRead],
+)
+async def get_mcp_aggregated_usage_batch(
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[McpAggregatedUsage],
+        Depends(depends_permissions(McpAggregatedUsage, Action.READ)),
+    ],
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+) -> BatchReadResult[McpAggregatedUsageRead]:
+    """Batch read MCP aggregated-usage rows by id (positional, null for missing)."""
+    if len(ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
+        )
+    if not ids:
+        return BatchReadResult(items=[])
+    stmt = perm_filter.filter_sql(select(McpAggregatedUsage).where(McpAggregatedUsage.id.in_(ids)))
+    result = await session.execute(stmt)
+    by_id: dict[uuid.UUID, McpAggregatedUsage] = {row.id: row for row in result.scalars().all()}
+    return BatchReadResult(
+        items=[
+            McpAggregatedUsageRead.model_validate(by_id[i]) if i in by_id else None for i in ids
+        ],
+    )
+
+
+@router.get(
+    "/aggregated-usage/{row_id}",
+    response_model=McpAggregatedUsageRead,
+)
+async def get_mcp_aggregated_usage(
+    row_id: uuid.UUID,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[McpAggregatedUsage],
+        Depends(depends_permissions(McpAggregatedUsage, Action.READ)),
+    ],
+) -> McpAggregatedUsageRead:
+    """Retrieve one MCP aggregated-usage rollup by id."""
+    stmt = perm_filter.filter_sql(select(McpAggregatedUsage).where(McpAggregatedUsage.id == row_id))
+    result = await session.execute(stmt)
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"MCP aggregated usage not found: {row_id}",
+        )
+    return McpAggregatedUsageRead.model_validate(row)
 
 
 @router.get("/{config_id}", response_model=MCPServerConfigRead)
