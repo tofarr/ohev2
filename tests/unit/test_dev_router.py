@@ -16,33 +16,56 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pytest_postgresql.executor import PostgreSQLExecutor
+from pytest_postgresql.janitor import DatabaseJanitor
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from openhands.ev2.app import create_app
 from openhands.ev2.auth.auth_models import OAuthClient
 from openhands.ev2.auth.dev_router import DevIdpService
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
-from openhands.ev2.db import Base, dispose_engine_factory
+from openhands.ev2.db import dispose_engine_factory
 from openhands.ev2.db import get_session as _app_get_session
 from openhands.ev2.user.user_models import User  # noqa: F401
 from openhands.ev2.util.password import hash_password
 
-_TEST_DB_URL = "postgresql+asyncpg://ohev:ohev@localhost:5432/ohev"
 _DEV_USER_USERNAME = "dev-user"
 _DEV_USER_PASSWORD = "dev-pass"
 
 
-def _set_dev_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point AppConfig at the test DB and select the dev IdP."""
+def _set_dev_config(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    host: str | None = None,
+    port: str | None = None,
+    db_name: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> None:
+    """Point AppConfig at the dev test DB and select the dev IdP.
+
+    DB coordinates are optional: callers that already set them via
+    ``dev_engine`` omit them to keep the prior values.
+    """
     get_config.cache_clear()
     monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-    monkeypatch.setenv("OHE_DB_CONFIG_HOST", "localhost")
-    monkeypatch.setenv("OHE_DB_CONFIG_PORT", "5432")
-    monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", "ohev")
-    monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", "ohev")
-    monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", "ohev")
+    if host is not None:
+        monkeypatch.setenv("OHE_DB_CONFIG_HOST", host)
+    if port is not None:
+        monkeypatch.setenv("OHE_DB_CONFIG_PORT", port)
+    if db_name is not None:
+        monkeypatch.setenv("OHE_DB_CONFIG_DB_NAME", db_name)
+    if username is not None:
+        monkeypatch.setenv("OHE_DB_CONFIG_USERNAME", username)
+    if password is not None:
+        monkeypatch.setenv("OHE_DB_CONFIG_PASSWORD", password)
     # Select the built-in dev identity provider.
     monkeypatch.setenv("OHE_IDP_URL", "/auth/dev")
     monkeypatch.setenv("OHE_IDP_CLIENT_ID", "ohe")
@@ -74,23 +97,50 @@ async def _seed_dev_user(engine: create_async_engine) -> uuid.UUID:
 
 
 @pytest_asyncio.fixture
-async def dev_engine(monkeypatch: pytest.MonkeyPatch):
-    _set_dev_config(monkeypatch)
-    eng = create_async_engine(_TEST_DB_URL)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+async def dev_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    pg_server: PostgreSQLExecutor,
+) -> AsyncGenerator[AsyncEngine, None]:
+    """A per-test engine on a fresh DB cloned from the session template."""
+    proc = pg_server
+    host = proc.host
+    port = proc.port
+    user = proc.user
+    password = proc.password or ""
+    template_dbname = proc.template_dbname
+    test_dbname = f"dev_{uuid.uuid4().hex[:12]}"
+    janitor = DatabaseJanitor(
+        user=user,
+        host=host,
+        port=port,
+        dbname=test_dbname,
+        template_dbname=template_dbname,
+        version=proc.version,
+        password=password or None,
+    )
+    janitor.init()
+    _set_dev_config(
+        monkeypatch,
+        host=host,
+        port=str(port),
+        db_name=test_dbname,
+        username=user,
+        password=password,
+    )
+    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{test_dbname}"
+    eng = create_async_engine(url)
     await _seed_dev_user(eng)
     yield eng
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
     await eng.dispose()
+    janitor.drop()
     await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
 async def dev_app(dev_engine, monkeypatch: pytest.MonkeyPatch):
-    _set_dev_config(monkeypatch)
+    # DB + dev-IdP config was set by dev_engine; just clear the config cache
+    # so create_app() rebuilds AppConfig from the env vars.
+    get_config.cache_clear()
     factory = async_sessionmaker(dev_engine, expire_on_commit=False)
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
