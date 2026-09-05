@@ -152,6 +152,67 @@ async def _llm_usage_aggregate_loop() -> None:
             logger.exception("llm_usage aggregate sweep failed; will retry next interval")
 
 
+async def _mcp_usage_partition_loop() -> None:
+    """Background sweep that manages daily ``mcp_usage`` partitions.
+
+    Allocates ``preallocate_days`` future daily partitions and drops partitions
+    older than ``retention_days`` every ``mcp.usage.partition_interval`` seconds.
+    A failure in one sweep is logged and the loop continues. When
+    ``partition_interval`` is 0 the loop is not started and partition management
+    must be driven by an external scheduler — see README 'MCP usage logging'.
+    """
+    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
+
+    cfg = get_config()
+    interval = cfg.mcp.usage.partition_interval
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                service = McpUsageService(session)
+                created, dropped = await service.ensure_partitions(
+                    preallocate_days=cfg.mcp.usage.preallocate_days,
+                    retention_days=cfg.mcp.usage.retention_days,
+                )
+            if created:
+                logger.info("mcp_usage partition manager created %d partitions", len(created))
+            if dropped:
+                logger.info("mcp_usage partition manager dropped %d partitions", len(dropped))
+        except Exception:
+            logger.exception("mcp_usage partition sweep failed; will retry next interval")
+
+
+async def _mcp_usage_aggregate_loop() -> None:
+    """Background sweep that rolls ``mcp_aggregated_usage`` from ``mcp_usage``.
+
+    Aggregates the most recent finished minute (at least one minute behind
+    wall-clock time) every ``mcp.usage.aggregate_interval`` seconds. A failure in
+    one sweep is logged and the loop continues. When ``aggregate_interval`` is 0
+    the loop is not started and aggregation must be driven by an external
+    scheduler — see README 'MCP usage logging'.
+    """
+    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
+
+    cfg = get_config()
+    interval = cfg.mcp.usage.aggregate_interval
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                service = McpUsageService(session)
+                count = await service.aggregate_behind_now(lag_minutes=1)
+            if count:
+                logger.info("mcp_usage aggregator rolled %d per-user minute rows", count)
+        except Exception:
+            logger.exception("mcp_usage aggregate sweep failed; will retry next interval")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime."""
@@ -159,6 +220,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_cleanup_loop(), name="auth-cleanup"),
         asyncio.create_task(_llm_usage_partition_loop(), name="llm-usage-partition"),
         asyncio.create_task(_llm_usage_aggregate_loop(), name="llm-usage-aggregate"),
+        asyncio.create_task(_mcp_usage_partition_loop(), name="mcp-usage-partition"),
+        asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
     ]
     try:
         yield

@@ -262,3 +262,48 @@ the projection usable:
 
 A `DEFAULT` partition is created by the initial migration so inserts never
 fail before the manager's first sweep (or for out-of-range timestamps).
+
+## MCP usage logging
+
+Every proxied MCP `tools/call` invocation is recorded to a daily-partitioned
+`mcp_usage` table (raw, append-only, **not** exposed over REST). One row per
+call captures the wall-clock `duration_ms` spent inside the proxied upstream
+endpoint, the `tool_name`, and a success/error flag, so cumulative duration
+and invocation counts can be calculated in aggregation. Usage queries go
+through the `mcp_aggregated_usage` projection — per-minute, per-user rollups
+(summing `total_duration_ms` and counting `invocations`) exposed read-only at
+`GET /mcp-server-configs/aggregated-usage` (paginated),
+`GET /mcp-server-configs/aggregated-usage/{id}`,
+`GET /mcp-server-configs/aggregated-usage/batch?ids=…`, and
+`GET /mcp-server-configs/aggregated-usage/count`. Access is gated by the
+`mcp_aggregated_usage_permission` role column.
+
+Two background sweeps (same lifespan pattern as the LLM usage loops above)
+keep the projection usable, configured under `mcp.usage` with the same knobs
+as `llm.usage`:
+
+* **Partition manager** — preallocates `preallocate_days` future daily
+  `mcp_usage` partitions and drops partitions older than `retention_days`.
+  * `mcp.usage.partition_interval` (`OHE_MCP_USAGE_PARTITION_INTERVAL`, default
+    `300`): seconds between sweeps. **Non-zero** runs an `asyncio` loop in the
+    FastAPI lifespan.
+  * `mcp.usage.partition_interval = 0` **disables** the in-process loop; drive
+    partition management with an external scheduler calling
+    `McpUsageService.ensure_partitions`.
+  * `mcp.usage.preallocate_days` (`OHE_MCP_USAGE_PREALLOCATE_DAYS`, default
+    `7`): how many future daily partitions to keep allocated ahead of time.
+  * `mcp.usage.retention_days` (`OHE_MCP_USAGE_RETENTION_DAYS`, default
+    `365`): partitions whose day is older than this are dropped.
+
+* **Aggregator** — rolls finished minutes from `mcp_usage` into
+  `mcp_aggregated_usage`, at least one minute behind wall-clock time so a
+  minute is only rolled once it has finished receiving rows.
+  * `mcp.usage.aggregate_interval` (`OHE_MCP_USAGE_AGGREGATE_INTERVAL`, default
+    `60`): seconds between sweeps. **Non-zero** runs an `asyncio` loop in the
+    FastAPI lifespan.
+  * `mcp.usage.aggregate_interval = 0` **disables** the in-process loop; drive
+    aggregation with an external scheduler calling
+    `McpUsageService.aggregate_behind_now`.
+
+A `DEFAULT` partition is created by the initial migration so inserts never
+fail before the manager's first sweep (or for out-of-range timestamps).
