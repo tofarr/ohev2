@@ -8,15 +8,23 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.secret.role_secret_permission_schemas import RoleSecretPermissionUpdate
+from openhands.ev2.secret.role_secret_permission_schemas import (
+    RoleSecretPermissionBatchCreate,
+    RoleSecretPermissionSearchFilter,
+    RoleSecretPermissionUpdate,
+)
 from openhands.ev2.secret.role_secret_permission_service import (
+    BatchPermissionDeniedError,
     RoleSecretPermissionConflictError,
     RoleSecretPermissionNotFoundError,
     RoleSecretPermissionOrphanError,
+    RoleSecretPermissionScopeError,
     RoleSecretPermissionService,
 )
 from openhands.ev2.secret.secret_models import Secret
+from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
+from openhands.ev2.util.search_filter import NONE
 
 
 @pytest.fixture
@@ -124,9 +132,6 @@ class TestSearchGrant:
     ) -> None:
         role, secret, _ = await _seed_role_secret_permission_user(session)
         await service.create(role_id=role.id, secret_id=secret.id, read_enabled=True)
-        from openhands.ev2.secret.role_secret_permission_schemas import (
-            RoleSecretPermissionSearchFilter,
-        )
 
         links, _ = await service.search_role_secret_permissions(
             search_filter=RoleSecretPermissionSearchFilter(role_id__eq=role.id)
@@ -138,3 +143,65 @@ class TestSearchGrant:
         role, secret, _ = await _seed_role_secret_permission_user(session)
         await service.create(role_id=role.id, secret_id=secret.id)
         assert await service.count() >= 1
+
+
+class TestGetMany:
+    async def test_get_many_aligned_with_nulls(
+        self, service: RoleSecretPermissionService, session: AsyncSession
+    ) -> None:
+        role, secret, _ = await _seed_role_secret_permission_user(session)
+        link = await service.create(role_id=role.id, secret_id=secret.id)
+        missing = uuid.uuid4()
+        results = await service.get_many([link.id, missing])
+        assert results[0] is not None and results[0].id == link.id
+        assert results[1] is None
+
+    async def test_get_many_empty(self, service: RoleSecretPermissionService) -> None:
+        assert await service.get_many([]) == []
+
+
+class TestScopeError:
+    async def test_create_denied_by_scope(self, session: AsyncSession) -> None:
+        role, secret, _ = await _seed_role_secret_permission_user(session)
+        svc = RoleSecretPermissionService(session, NONE)
+        with pytest.raises(RoleSecretPermissionScopeError):
+            await svc.create(role_id=role.id, secret_id=secret.id)
+
+
+class TestBatch:
+    async def test_batch_create_update_delete(
+        self, service: RoleSecretPermissionService, session: AsyncSession
+    ) -> None:
+        role, secret, _ = await _seed_role_secret_permission_user(session)
+        role2, secret2, _ = await _seed_role_secret_permission_user(session, n=1)
+        await session.flush()
+        from openhands.ev2.util.search_filter import ALL
+
+        results = await service.apply_batch(
+            [
+                RoleSecretPermissionBatchCreate(
+                    data={"role_id": role.id, "secret_id": secret.id, "read_enabled": True}
+                ),
+                RoleSecretPermissionBatchCreate(
+                    data={"role_id": role2.id, "secret_id": secret2.id}
+                ),
+            ],
+            {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: ALL},
+        )
+        assert len(results) == 2
+        assert results[0].read_enabled is True
+        assert results[1] is not None
+
+    async def test_batch_denied_when_action_filter_none(
+        self, service: RoleSecretPermissionService, session: AsyncSession
+    ) -> None:
+        role, secret, _ = await _seed_role_secret_permission_user(session)
+        with pytest.raises(BatchPermissionDeniedError):
+            await service.apply_batch(
+                [
+                    RoleSecretPermissionBatchCreate(
+                        data={"role_id": role.id, "secret_id": secret.id}
+                    ),
+                ],
+                {Action.CREATE: None, Action.UPDATE: None, Action.DELETE: None},
+            )

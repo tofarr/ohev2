@@ -1,4 +1,9 @@
-"""Service layer for MCP server configuration resources."""
+"""Service layer for MCP server configuration resources.
+
+CRUD over :class:`MCPServerConfig`. The proxy URL for an ``enable_proxy`` config
+is built from :attr:`AppConfig.base_url` plus the configured MCP proxy path,
+keyed on the config id (the path parameter of the MCP proxy endpoint).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.config import AppConfig, get_config
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
 from openhands.ev2.mcp_server_config.mcp_server_config_models import (
     MCPServerConfig,
@@ -44,6 +50,20 @@ class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
 
 
+def mcp_proxy_url_for(config_id: uuid.UUID, *, config: AppConfig | None = None) -> str:
+    """Build the SDK ``url`` for an ``enable_proxy`` MCP server config.
+
+    Derived from :attr:`AppConfig.base_url` plus the configured MCP proxy path
+    with the config id appended, so MCP traffic is routed through this service's
+    proxy endpoint. The config id (not any other identifier) is the path key
+    because the proxy endpoint authorizes access via the stored config profile.
+    """
+    cfg = config or get_config()
+    base = cfg.base_url.rstrip("/")
+    path = cfg.mcp.proxy_path.strip("/")
+    return f"{base}/{path}/{config_id}"
+
+
 class MCPServerConfigService:
     """CRUD over :class:`MCPServerConfig`."""
 
@@ -53,14 +73,23 @@ class MCPServerConfigService:
         perm_filter: SearchFilter[MCPServerConfig] = ALL,
         *,
         encryption_service: EncryptionService | None = None,
+        config: AppConfig | None = None,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter
         self._enc = encryption_service or get_encryption_service()
+        self._cfg = config or get_config()
 
     def to_read(self, config: MCPServerConfig) -> MCPServerConfigRead:
-        """Return a masked API representation for *config*."""
-        server_data = config.to_mcp_server(self._enc).model_dump(mode="json")
+        """Return a masked API representation for *config*.
+
+        The ``url`` is the stored URL (not the proxy URL) because this is the
+        admin view of the resource. The ``enable_proxy`` flag tells the caller
+        whether materialization will substitute a proxy URL.
+        """
+        server_data = config.to_mcp_server(self._enc, proxy_url=None, use_proxy=False).model_dump(
+            mode="json"
+        )
         return MCPServerConfigRead(
             id=config.id,
             user_id=config.user_id,
@@ -79,9 +108,25 @@ class MCPServerConfigService:
             headers=server_data.get("headers"),
             auth=server_data.get("auth"),
             enabled=bool(server_data.get("enabled", True)),
+            enable_proxy=config.enable_proxy,
             created_at=config.created_at,
             updated_at=config.updated_at,
         )
+
+    def materialize_mcp_server(
+        self,
+        config: MCPServerConfig,
+        *,
+        use_proxy: bool = True,
+    ) -> Any:
+        """Materialize the SDK :class:`MCPServer` for a stored config.
+
+        When ``enable_proxy`` and ``use_proxy`` are both ``True``, the server's
+        ``url`` points to the MCP proxy endpoint. Set ``use_proxy=False`` when
+        serving the proxy endpoint itself so forwarding goes to the stored URL.
+        """
+        proxy = mcp_proxy_url_for(config.id, config=self._cfg) if config.enable_proxy else None
+        return config.to_mcp_server(self._enc, proxy_url=proxy, use_proxy=use_proxy)
 
     async def create(
         self,
@@ -94,6 +139,7 @@ class MCPServerConfigService:
         config = MCPServerConfig(
             user_id=user_id,
             display_name=payload.display_name,
+            enable_proxy=payload.enable_proxy,
             **self._stored_kwargs(data),
         )
         if not self._perm_filter.matches(config):
@@ -161,7 +207,9 @@ class MCPServerConfigService:
         config = await self.get(config_id)
         if "display_name" in payload.model_fields_set and payload.display_name is not None:
             config.display_name = payload.display_name
-        current = config.to_plain_mcp_dict(self._enc)
+        if "enable_proxy" in payload.model_fields_set and payload.enable_proxy is not None:
+            config.enable_proxy = payload.enable_proxy
+        current = config.to_plain_mcp_dict(self._enc, use_proxy=False)
         current.update(mcp_payload_to_plain_dict(payload, exclude_unset=True))
         data = self._normalized_mcp_data(current)
         self._apply_stored_kwargs(config, data)
@@ -208,6 +256,7 @@ class MCPServerConfigService:
             self._session,
             filt,
             encryption_service=self._enc,
+            config=self._cfg,
         ).create(op.data, user_id=user_id)
 
     async def _batch_update(
@@ -222,6 +271,7 @@ class MCPServerConfigService:
             self._session,
             filt,
             encryption_service=self._enc,
+            config=self._cfg,
         ).update(op.id, op.data)
 
     async def _batch_delete(
@@ -236,6 +286,7 @@ class MCPServerConfigService:
             self._session,
             filt,
             encryption_service=self._enc,
+            config=self._cfg,
         ).delete(op.id)
 
     @staticmethod
@@ -283,4 +334,5 @@ __all__ = [
     "MCPServerConfigPermissionScopeError",
     "MCPServerConfigService",
     "MCPServerConfigValidationError",
+    "mcp_proxy_url_for",
 ]

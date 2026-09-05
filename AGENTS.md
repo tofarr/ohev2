@@ -17,7 +17,7 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 
 * `ruff check .` and `ruff format --check .` clean.
 * `mypy --strict` clean (no `Any` without explicit `# type: ignore` + reason).
-* Unit coverage â‰¥ 90%. New code without tests blocks merge.
+* Unit coverage >= 94%. New code without tests blocks merge.
 * Quint specs compile and pass.
 * Playwright e2e suite green. The full suite runs daily and also on every PR
   (see `.github/workflows/e2e-daily.yml` and the `e2e` job in
@@ -203,15 +203,22 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   `user_permission` fallback: every governed entity is its own column.
 * The canonical list of entity columns is `ROLE_ENTITY_COLUMNS` in
   `role/role_models.py` — each entry is the full column name
-  (``<entity>_permission``). Adding a governed entity is a three-step change:
+  (``<entity>_permission``). Adding a governed entity is a four-step change:
   1. append the ``<entity>_permission`` column name to `ROLE_ENTITY_COLUMNS`;
   2. add the matching column to `Role` (and to the initial migration
      `0001_initial.py`, since the schema is not yet published);
   3. register the resource's ORM model against the column name in
      `auth_dependencies.register_resource_policy(model, "<entity>_permission")`.
+  4. add the field to `RoleCreate`/`RoleUpdate`/`RoleRead` in
+     `role/role_schemas.py`.
   `register_resource_policy` validates the column is in
   `ROLE_ENTITY_COLUMNS` and raises at import time if not, so a mismatched
-  registration fails fast.
+  registration fails fast. `RoleService.create`/`update` copy every column in
+  `ROLE_ENTITY_COLUMNS` generically, so schemas must stay in sync —
+  `tests/unit/test_role_service.py::TestEntityColumnParity` guards all four
+  steps (column, model, registry, schemas, service round-trip). A column
+  missing from the schemas can never be granted via the API — silently
+  denying the entity to everyone except seeds.
 * `Role` and `UserRole` live in `role/role_models.py`, **not** in
   `security_models.py`. `security_models.py` only defines the policy types
   (`Permission` and subclasses) and the `PermissionType` JSONB column type.
@@ -225,6 +232,31 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   `api_key_permission` so a non-admin user can manage their own API keys. It
   also upserts an admin user and (by default) a regular user account.
 
+### 11.1 Link tables are first-class governed resources
+
+Privilege-escalation holes repeatedly come from guarding a link table by the
+permission of one of its endpoints. **Every link/join table gets its own
+entity column and is authorized through it — never through a parent's
+column.**
+
+* `user_roles` → `user_role_permission`: deciding who *holds* a role is not
+  implied by `role_permission` (a role-metadata admin must not be able to
+  self-assign an admin role — self-service privilege escalation).
+* `role_secret_permissions` → `secret_grant_permission`: granting a role
+  access to secrets is not implied by `role_permission` (a role admin must
+  not be able to grant roles it doesn't control read access to arbitrary
+  secrets — cross-role secret exfiltration).
+* `role_mcp_server_config_permissions` → `mcp_server_config_grant_permission`
+  (same exfiltration concern for MCP credentials).
+* Routers for link tables guard with `depends_permissions(<LinkModel>,
+  Action.*)` and pass the resolved filter to the service; the service scopes
+  reads via `perm_filter.filter_sql(...)` and rejects out-of-scope creates
+  with a scope error (403) — same pattern as the primary resources.
+* Auditing rule of thumb: for every endpoint, name the *entity* it mutates
+  and confirm the guard checks that entity's column. If the guard checks a
+  different entity's column, ask whether that coupling lets a principal gain
+  access they were not explicitly granted.
+
 ## 10. Review checklist (for agents reviewing PRs)
 
 - [ ] REST verbs/names consistent with §3.
@@ -235,5 +267,7 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
 - [ ] e2e suite green locally (§2.1).
 - [ ] Spec updated and passing if behavior changed (§7).
 - [ ] No secrets/hardcoded credentials (§9).
-- [ ] New governed entity: column added to `Role` + `ROLE_ENTITY_COLUMNS` (full `<entity>_permission` name) + migration + registered in `auth_dependencies` (§11).
+- [ ] New governed entity: column added to `Role` + `ROLE_ENTITY_COLUMNS` (full `<entity>_permission` name) + migration + registered in `auth_dependencies` + field added to `RoleCreate`/`RoleUpdate`/`RoleRead` (§11; `TestEntityColumnParity` enforces).
+- [ ] Link tables guarded by their own entity column, not a parent's (§11.1); every endpoint's guard names the entity it actually mutates.
+- [ ] Every router passes the resolved permission filter to its service, and the service scopes SQL with it (§9).
 - [ ] Comments follow §6.

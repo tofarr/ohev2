@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.scripts.seed_db import seed_admin, seed_db
+from openhands.ev2.scripts.seed_db import _assign_role, _parse_args, seed_admin, seed_db
 from openhands.ev2.security.security_models import Action, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
@@ -249,3 +249,82 @@ async def _named_role(session: AsyncSession, name: str) -> Role:
     role = await session.scalar(select(Role).where(Role.name == name))
     assert role is not None, f"role {name!r} not seeded"
     return role
+
+
+class TestSeedDbValidation:
+    async def test_empty_user_username_raises(self, session: AsyncSession) -> None:
+        with pytest.raises(ValueError, match="username"):
+            await seed_db(
+                session,
+                admin_username="a",
+                admin_email="a@e.com",
+                admin_password="p",
+                user_username="  ",
+                user_email="u@e.com",
+                user_password="p",
+            )
+
+    async def test_invalid_user_email_raises(self, session: AsyncSession) -> None:
+        with pytest.raises(ValueError, match="email"):
+            await seed_db(
+                session,
+                admin_username="a",
+                admin_email="a@e.com",
+                admin_password="p",
+                user_username="u",
+                user_email="not-email",
+                user_password="p",
+            )
+
+    async def test_empty_user_password_raises(self, session: AsyncSession) -> None:
+        with pytest.raises(ValueError, match="password"):
+            await seed_db(
+                session,
+                admin_username="a",
+                admin_email="a@e.com",
+                admin_password="p",
+                user_username="u",
+                user_email="u@e.com",
+                user_password="",
+            )
+
+
+class TestAssignRoleError:
+    async def test_runtime_error_when_role_missing(self, session: AsyncSession) -> None:
+        user = await seed_admin(session, username="x", email="x@e.com", password="p")
+        with pytest.raises(RuntimeError, match="not found"):
+            await _assign_role(session, user.id, "nonexistent-role")
+
+
+class TestParseArgs:
+    def test_defaults(self) -> None:
+        args = _parse_args([])
+        assert args.admin_username == "admin"
+        assert args.admin_email == "admin@example.com"
+        assert args.user_username == "user"
+
+    def test_custom_flags(self) -> None:
+        args = _parse_args(
+            [
+                "--admin-username",
+                "boss",
+                "--admin-email",
+                "boss@e.com",
+                "--admin-password",
+                "s3cret",
+                "--user-username",
+                "worker",
+                "--user-email",
+                "w@e.com",
+                "--user-password",
+                "pw",
+            ]
+        )
+        assert args.admin_username == "boss"
+        assert args.admin_email == "boss@e.com"
+        assert args.user_username == "worker"
+
+    def test_env_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OHE_SEED_ADMIN_USERNAME", "envadmin")
+        args = _parse_args([])
+        assert args.admin_username == "envadmin"

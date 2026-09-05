@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
+import respx
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,8 +183,6 @@ class TestCompletion:
         )
         llm = await _create_llm(client, conn["id"])
 
-        from unittest.mock import MagicMock
-
         # A fake SDK LLMResponse: message + metrics + raw_response(id).
         fake_message = MagicMock()
         fake_message.model_dump.return_value = {"role": "assistant", "content": []}
@@ -236,8 +236,6 @@ class TestCompletion:
     ) -> None:
         conn = await _create_connection(client, base_url="https://real.example.com")
         llm = await _create_llm(client, conn["id"])
-
-        from unittest.mock import MagicMock
 
         fake_message = MagicMock()
         fake_message.model_dump.return_value = {"role": "assistant", "content": []}
@@ -491,4 +489,378 @@ class TestBatchWriteLlms:
                 "operations": [{"op": "upsert", "data": _llm_payload(conn["id"], display_name="z")}]
             },
         )
+        assert resp.status_code == 422
+
+
+# ====================================================================== #
+# Cursor validation and error-path routes
+# ====================================================================== #
+
+
+class TestCursorValidation:
+    async def test_provider_connections_invalid_cursor_returns_400(
+        self, client: AsyncClient
+    ) -> None:
+        await _create_connection(client)
+        resp = await client.get("/llm/provider-connections?cursor=not-a-uuid")
+        assert resp.status_code == 400
+
+    async def test_llms_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        await _create_llm(client, conn["id"])
+        resp = await client.get("/llm/llms?cursor=not-a-uuid")
+        assert resp.status_code == 400
+
+
+class TestProviderConnectionErrorPaths:
+    async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.get(f"/llm/provider-connections/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/llm/provider-connections/{uuid.uuid4()}",
+            json={"display_name": "x"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/llm/provider-connections/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_batch_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/llm/provider-connections/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": {"display_name": "x"}},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_create_config_error_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/llm/provider-connections/batch",
+            json={
+                "operations": [
+                    {"op": "create", "data": _conn_payload(display_name="")},
+                ]
+            },
+        )
+        assert resp.status_code == 422
+
+
+class TestLLMErrorPaths:
+    async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.get(f"/llm/llms/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/llm/llms/{uuid.uuid4()}",
+            json={"display_name": "x"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/llm/llms/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_batch_update_missing_returns_404(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": _llm_payload(conn["id"])},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [
+                    {"op": "delete", "id": str(uuid.uuid4())},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_create_invalid_config_returns_422(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        resp = await client.post(
+            "/llm/llms/batch",
+            json={
+                "operations": [
+                    {
+                        "op": "create",
+                        "data": _llm_payload(conn["id"], config={"num_retries": -1}),
+                    },
+                ]
+            },
+        )
+        assert resp.status_code == 422
+
+
+# ====================================================================== #
+# Completion action error paths
+# ====================================================================== #
+
+
+class TestCompletionErrorPaths:
+    async def test_invalid_tools_returns_422(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client)
+        llm = await _create_llm(client, conn["id"])
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}",
+            json={
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "tools": [{"not": "a-valid-tool"}],
+            },
+        )
+        assert resp.status_code == 422
+
+    async def test_completion_failure_returns_502(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client, base_url="https://real.example.com")
+        llm = await _create_llm(client, conn["id"])
+
+        async def _fail_acompletion(self, messages, tools=None, **kwargs):
+            raise RuntimeError("upstream down")
+
+        with patch("openhands.sdk.llm.llm.LLM.acompletion", new=_fail_acompletion):
+            resp = await client.post(
+                f"/llm/completion/{llm['id']}",
+                json={
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                },
+            )
+        assert resp.status_code == 502
+
+    async def test_stream_completion_error_emits_sse_error(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        conn = await _create_connection(client, base_url="https://real.example.com")
+        llm = await _create_llm(client, conn["id"])
+
+        async def _fail_stream(self, messages, tools=None, on_token=None, **kwargs):
+            raise RuntimeError("stream broke")
+
+        with patch("openhands.sdk.llm.llm.LLM.acompletion", new=_fail_stream):
+            async with client.stream(
+                "POST",
+                f"/llm/completion/{llm['id']}",
+                json={
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                    "params": {"stream": True},
+                },
+            ) as resp:
+                body = await resp.aread()
+
+        assert resp.status_code == 200
+        assert b"event: error" in body
+
+    async def test_completion_chunk_to_sse_variants(self) -> None:
+        from openhands.ev2.llm.llm_router import _completion_chunk_to_sse
+
+        assert _completion_chunk_to_sse({"choices": []}).startswith(b"data: ")
+
+        # object with to_dict but no model_dump
+        class _ChunkWithToDict:
+            def to_dict(self) -> dict:
+                return {"k": "v"}
+
+        assert b'"k": "v"' in _completion_chunk_to_sse(_ChunkWithToDict())
+        # str fallback for non-dict, non-pydantic, non-to_dict
+        assert b"42" in _completion_chunk_to_sse(42)
+
+
+# ====================================================================== #
+# OpenAI-compatible chat completions proxy
+# ====================================================================== #
+
+
+class TestChatCompletionsProxy:
+    async def test_missing_llm_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            f"/llm/completion/{uuid.uuid4()}/chat/completions",
+            json={"messages": []},
+        )
+        assert resp.status_code == 404
+
+    async def test_invalid_proxy_credentials_returns_401(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": []},
+        )
+        assert resp.status_code == 401
+
+    async def test_no_base_url_returns_422(self, client: AsyncClient) -> None:
+        conn = await _create_connection(client, api_key="sk-real", base_url=None)
+        llm = await _create_llm(client, conn["id"])
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": []},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 422
+
+    @respx.mock
+    async def test_non_stream_proxies_and_records_usage(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-1",
+                    "model": "gpt-4o",
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18},
+                },
+            )
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "chatcmpl-1"
+
+    @respx.mock
+    async def test_stream_proxies_and_records_usage(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        stream_body = (
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":""}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200, content=stream_body, headers={"content-type": "text/event-stream"}
+            )
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 200
+        assert b"hi" in resp.content
+
+    @respx.mock
+    async def test_stream_upstream_error_passthrough(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                429, json={"error": "rate limited"}, headers={"content-type": "application/json"}
+            )
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 429
+
+    @respx.mock
+    async def test_non_stream_upstream_error_passthrough(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(500, json={"error": "internal"})
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 500
+
+    @respx.mock
+    async def test_bearer_auth_header_accepted(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(200, json={"id": "x", "model": "m"})
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer sk-real"},
+        )
+        assert resp.status_code == 200
+
+    @respx.mock
+    async def test_non_json_upstream_body_no_usage(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200, content=b"not-json", headers={"content-type": "text/plain"}
+            )
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 200
+
+    @respx.mock
+    async def test_stream_no_usage_dict_no_record(self, client: AsyncClient) -> None:
+        conn = await _create_connection(
+            client, api_key="sk-real", base_url="https://up.example.com"
+        )
+        llm = await _create_llm(client, conn["id"])
+
+        stream_body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndatan\n'
+        respx.post("https://up.example.com/chat/completions").mock(
+            return_value=httpx.Response(
+                200, content=stream_body, headers={"content-type": "text/event-stream"}
+            )
+        )
+        resp = await client.post(
+            f"/llm/completion/{llm['id']}/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            headers={"x-api-key": "sk-real"},
+        )
+        assert resp.status_code == 200
+
+
+class TestAggregatedUsageExtraRoutes:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/llm/aggregated-usage?cursor=not-a-uuid")
+        assert resp.status_code == 400
+
+    async def test_batch_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/llm/aggregated-usage/batch?{ids}")
         assert resp.status_code == 422

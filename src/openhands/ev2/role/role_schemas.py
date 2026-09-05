@@ -54,9 +54,17 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for secret resources; null = deny.",
     )
+    secret_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-secret grant resources; null = deny.",
+    )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
         description="Permission policy for mcp_server_config resources; null = deny.",
+    )
+    mcp_server_config_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-MCP-config grant resources; null = deny.",
     )
     provider_connection_permission: Permission | None = Field(
         default=None,
@@ -65,6 +73,10 @@ class RoleCreate(BaseModel):
     llm_permission: Permission | None = Field(
         default=None,
         description="Permission policy for llm resources; null = deny.",
+    )
+    llm_aggregated_usage_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for llm_aggregated_usage resources; null = deny.",
     )
     feature_flag_permission: Permission | None = Field(
         default=None,
@@ -77,6 +89,18 @@ class RoleCreate(BaseModel):
     feature_flag_user_assignment_permission: Permission | None = Field(
         default=None,
         description="Permission policy for feature_flag_user_assignment resources; null = deny.",
+    )
+    sandbox_template_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox_template resources; null = deny.",
+    )
+    sandbox_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox resources; null = deny.",
+    )
+    sandbox_snapshot_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox_snapshot resources; null = deny.",
     )
 
     @field_validator("name")
@@ -122,9 +146,17 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for secret resources; null = deny.",
     )
+    secret_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-secret grant resources; null = deny.",
+    )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
         description="Permission policy for mcp_server_config resources; null = deny.",
+    )
+    mcp_server_config_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-MCP-config grant resources; null = deny.",
     )
     provider_connection_permission: Permission | None = Field(
         default=None,
@@ -133,6 +165,10 @@ class RoleUpdate(BaseModel):
     llm_permission: Permission | None = Field(
         default=None,
         description="Permission policy for llm resources; null = deny.",
+    )
+    llm_aggregated_usage_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for llm_aggregated_usage resources; null = deny.",
     )
     feature_flag_permission: Permission | None = Field(
         default=None,
@@ -145,6 +181,18 @@ class RoleUpdate(BaseModel):
     feature_flag_user_assignment_permission: Permission | None = Field(
         default=None,
         description="Permission policy for feature_flag_user_assignment resources; null = deny.",
+    )
+    sandbox_template_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox_template resources; null = deny.",
+    )
+    sandbox_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox resources; null = deny.",
+    )
+    sandbox_snapshot_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for sandbox_snapshot resources; null = deny.",
     )
 
     @field_validator("name")
@@ -172,12 +220,18 @@ class RoleRead(BaseModel):
     oauth_client_permission: Permission | None
     cors_origin_permission: Permission | None
     secret_permission: Permission | None
+    secret_grant_permission: Permission | None
     mcp_server_config_permission: Permission | None
+    mcp_server_config_grant_permission: Permission | None
     provider_connection_permission: Permission | None
     llm_permission: Permission | None
+    llm_aggregated_usage_permission: Permission | None
     feature_flag_permission: Permission | None
     feature_flag_role_assignment_permission: Permission | None
     feature_flag_user_assignment_permission: Permission | None
+    sandbox_template_permission: Permission | None
+    sandbox_permission: Permission | None
+    sandbox_snapshot_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 

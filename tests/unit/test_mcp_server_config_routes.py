@@ -5,6 +5,11 @@ from __future__ import annotations
 import uuid
 
 from httpx import AsyncClient
+from tests.unit._auth_helpers import assign_role as _assign_role
+from tests.unit._auth_helpers import make_principal as _make_principal
+
+from openhands.ev2.security.security_models import Permitted
+from openhands.ev2.util.auth_token import create_auth_token
 
 
 def _stdio_payload(display_name: str = "filesystem") -> dict[str, object]:
@@ -279,3 +284,112 @@ class TestRoleMCPServerConfigPermissionRoutes:
         assert (
             await client.delete(f"/role-mcp-server-config-permissions/{missing}")
         ).status_code == 404
+
+
+class TestRoleMCPServerConfigGrantAuthorization:
+    """Regression tests: MCP-config-grant management is governed by
+    ``mcp_server_config_grant_permission``, not by ``role_permission``.
+
+    A principal who may only edit role metadata must not be able to grant a
+    role access to MCP server configs (privilege escalation / credential
+    exfiltration).
+    """
+
+    async def test_role_admin_cannot_manage_grants(self, client: AsyncClient, session) -> None:
+        """role_permission=Permitted alone (no grant permission) => 403."""
+        principal = await _make_principal(session, email="mg@example.com", username="mg")
+        await _assign_role(session, principal.id, {"role_permission": Permitted()})
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert (
+            await client.get("/role-mcp-server-config-permissions", headers=headers)
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/role-mcp-server-config-permissions",
+                json={"role_id": str(uuid.uuid4()), "mcp_server_config_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/role-mcp-server-config-permissions/batch",
+                json={
+                    "operations": [
+                        {
+                            "op": "create",
+                            "data": {
+                                "role_id": str(uuid.uuid4()),
+                                "mcp_server_config_id": str(uuid.uuid4()),
+                            },
+                        }
+                    ]
+                },
+                headers=headers,
+            )
+        ).status_code == 403
+
+    async def test_grant_manager_can_manage_grants(self, client: AsyncClient, session) -> None:
+        """mcp_server_config_grant_permission=Permitted manages grants (but
+        cannot read roles)."""
+        principal = await _make_principal(session, email="mgr@example.com", username="mgr")
+        await _assign_role(
+            session, principal.id, {"mcp_server_config_grant_permission": Permitted()}
+        )
+        await session.commit()
+        token = create_auth_token(principal.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert (
+            await client.get("/role-mcp-server-config-permissions", headers=headers)
+        ).status_code == 200
+        # Passes authz, fails on orphan FK.
+        assert (
+            await client.post(
+                "/role-mcp-server-config-permissions",
+                json={"role_id": str(uuid.uuid4()), "mcp_server_config_id": str(uuid.uuid4())},
+                headers=headers,
+            )
+        ).status_code == 404
+        # Role administration is not conferred.
+        assert (await client.get("/roles", headers=headers)).status_code == 403
+
+
+class TestMCPServerConfigRouteErrorPaths:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/mcp-server-configs?cursor=not-a-uuid")).status_code == 400
+
+    async def test_batch_write_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/mcp-server-configs/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_update_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/mcp-server-configs/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": {"name": "x"}},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_empty_ops_rejected(self, client: AsyncClient) -> None:
+        assert (
+            await client.post("/mcp-server-configs/batch", json={"operations": []})
+        ).status_code == 422
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/mcp-server-configs/{uuid.uuid4()}",
+            json={"name": "x"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        assert (await client.delete(f"/mcp-server-configs/{uuid.uuid4()}")).status_code == 404

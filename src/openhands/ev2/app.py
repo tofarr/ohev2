@@ -42,6 +42,11 @@ from openhands.ev2.mcp_server_config.role_mcp_server_config_permission_router im
 )
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
+from openhands.ev2.sandbox.sandbox_router import (
+    sandbox_router,
+    sandbox_snapshot_router,
+    sandbox_template_router,
+)
 from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
 )
@@ -200,6 +205,9 @@ def create_app() -> FastAPI:
     app.include_router(secret_router)
     app.include_router(role_secret_permission_router)
     app.include_router(user_secret_permission_router)
+    app.include_router(sandbox_template_router)
+    app.include_router(sandbox_router)
+    app.include_router(sandbox_snapshot_router)
     app.include_router(user_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app

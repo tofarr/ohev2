@@ -4,11 +4,13 @@ Uniform REST surface (AGENTS.md §3). The collection is ``/user-roles`` with
 cursor pagination; create is ``POST``, retrieve is ``GET``, remove is
 ``DELETE``. Assignments are immutable; there is no update.
 
-Authorization models the link as a sub-resource of ``role``: managing role
-membership requires the ``UPDATE`` action on the ``role`` resource (a principal
-who can update a role can assign/unassign users to it), while listing and
-retrieving assignments requires ``READ`` on the ``role`` resource. Every
-endpoint is guarded by the centralized permission checker (AGENTS.md §9).
+The link table is a governed resource of its own: endpoints are authorized
+through ``user_role_permission`` (SEARCH for list/count, READ for get/batch,
+CREATE/DELETE for membership changes). Managing membership is deliberately not
+implied by ``role_permission`` update — a principal who may edit a role's
+metadata must not be able to decide who holds it (that would be privilege
+escalation). Every endpoint passes the effective filter to the service, which
+scopes the SQL (AGENTS.md §9).
 """
 
 from __future__ import annotations
@@ -18,9 +20,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import (
+    depends_permissions,
+    depends_permissions_or_none,
+)
 from openhands.ev2.db import SessionDep
-from openhands.ev2.role.role_models import Role
+from openhands.ev2.role.role_models import UserRole as UserRoleModel
 from openhands.ev2.role.user_role_schemas import (
     UserRoleBatchWriteRequest,
     UserRoleCreate,
@@ -29,9 +34,11 @@ from openhands.ev2.role.user_role_schemas import (
     UserRoleSearchResult,
 )
 from openhands.ev2.role.user_role_service import (
+    BatchPermissionDeniedError,
     UserRoleConflictError,
     UserRoleNotFoundError,
     UserRoleOrphanError,
+    UserRolePermissionScopeError,
     UserRoleService,
 )
 from openhands.ev2.security.security_models import Action
@@ -63,13 +70,14 @@ async def _to_read(link: Any) -> UserRoleRead:
 @router.get("", response_model=UserRoleSearchResult)
 async def search_user_roles(
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.SEARCH))
+    ],
     search_filter: UserRoleSearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> UserRoleSearchResult:
-    _ = perm_filter  # assignments are global; the filter only gates access.
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     cursor_uuid = _cursor(cursor) if cursor is not None else None
     links, next_cursor = await service.search_user_roles(
         cursor=cursor_uuid,
@@ -86,11 +94,12 @@ async def search_user_roles(
 @router.get("/count", response_model=CountResult)
 async def count_user_roles(
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.SEARCH))
+    ],
     search_filter: UserRoleSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
-    _ = perm_filter
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
 
@@ -99,12 +108,18 @@ async def count_user_roles(
 async def create_user_role(
     payload: UserRoleCreate,
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.CREATE))
+    ],
 ) -> UserRoleRead:
-    _ = perm_filter
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     try:
         link = await service.create(payload.role_id, payload.user_id)
+    except UserRolePermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Assignment falls outside your create scope: {exc}",
+        ) from exc
     except UserRoleConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -125,19 +140,20 @@ async def create_user_role(
 )
 async def get_user_roles_batch(
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.READ))
+    ],
     # Declared before `/{user_role_id}` so the static `/batch` path matches
     # ahead of the UUID path param. Default to an empty list so an omitted
     # `ids` param is valid (returns an empty result) rather than a 422.
     ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
 ) -> BatchReadResult[UserRoleRead]:
-    _ = perm_filter
     if len(ids) > 100:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="ids: at most 100 ids are allowed per batch read.",
         )
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     links = await service.get_many(ids)
     return BatchReadResult(
         items=[await _to_read(link) if link is not None else None for link in links],
@@ -151,15 +167,36 @@ async def get_user_roles_batch(
 async def write_user_roles_batch(
     payload: UserRoleBatchWriteRequest,
     session: SessionDep,
-    # Managing assignments requires UPDATE on the role resource, mirroring the
-    # single-item create/delete endpoints. Declared before `/{user_role_id}` so
-    # the static `/batch` path matches ahead of the UUID path param.
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
+    # Per-action filters resolved without raising so a batch that uses only
+    # one action does not 403 on the other; the service denies per operation.
+    # Declared before `/{user_role_id}` so the static `/batch` path matches
+    # ahead of the UUID path param.
+    create_filter: Annotated[
+        SearchFilter[UserRoleModel] | None,
+        Depends(depends_permissions_or_none(UserRoleModel, Action.CREATE)),
+    ],
+    delete_filter: Annotated[
+        SearchFilter[UserRoleModel] | None,
+        Depends(depends_permissions_or_none(UserRoleModel, Action.DELETE)),
+    ],
 ) -> BatchWriteResult[UserRoleRead]:
-    _ = perm_filter
     service = UserRoleService(session)
+    perm_filters = {
+        Action.CREATE: create_filter,
+        Action.DELETE: delete_filter,
+    }
     try:
-        results = await service.apply_batch(payload.operations)
+        results = await service.apply_batch(payload.operations, perm_filters)
+    except BatchPermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Batch operation denied: {exc}",
+        ) from exc
+    except UserRolePermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Assignment falls outside your create scope: {exc}",
+        ) from exc
     except UserRoleConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -185,10 +222,11 @@ async def write_user_roles_batch(
 async def get_user_role(
     user_role_id: uuid.UUID,
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.READ))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.READ))
+    ],
 ) -> UserRoleRead:
-    _ = perm_filter
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     try:
         link = await service.get(user_role_id)
     except UserRoleNotFoundError as exc:
@@ -203,10 +241,11 @@ async def get_user_role(
 async def delete_user_role(
     user_role_id: uuid.UUID,
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Any], Depends(depends_permissions(Role, Action.UPDATE))],
+    perm_filter: Annotated[
+        SearchFilter[UserRoleModel], Depends(depends_permissions(UserRoleModel, Action.DELETE))
+    ],
 ) -> None:
-    _ = perm_filter
-    service = UserRoleService(session)
+    service = UserRoleService(session, perm_filter)
     try:
         await service.delete(user_role_id)
     except UserRoleNotFoundError as exc:

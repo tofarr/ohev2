@@ -240,3 +240,18 @@ class TestCorsMiddleware:
             headers={"Origin": "https://cached.example.com"},
         )
         assert "access-control-allow-origin" not in resp2.headers
+
+
+class TestCorsRouteErrorPaths:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/cors-origins?cursor=not-a-uuid")).status_code == 400
+
+    async def test_batch_write_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/cors-origins/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        assert (await client.delete(f"/cors-origins/{uuid.uuid4()}")).status_code == 404
