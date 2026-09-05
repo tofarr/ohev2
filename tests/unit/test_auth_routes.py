@@ -1182,3 +1182,86 @@ class TestLogout:
             second = await c.post("/auth/logout")
             assert second.status_code == 204, second.text
             assert "ohesession=" in second.headers.get("set-cookie", "")
+
+
+class TestErrorStatus:
+    """Unit tests for the _error_status helper (no DB needed)."""
+
+    def test_invalid_client_returns_401(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import InvalidClientError
+
+        assert _error_status(InvalidClientError("x")) == 401
+
+    def test_invalid_redirect_uri_returns_400(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import InvalidRedirectUriError
+
+        assert _error_status(InvalidRedirectUriError("x")) == 400
+
+    def test_invalid_grant_returns_400(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import InvalidGrantError
+
+        assert _error_status(InvalidGrantError("x")) == 400
+
+    def test_refresh_lock_timeout_returns_409(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import RefreshLockTimeoutError
+
+        assert _error_status(RefreshLockTimeoutError("x")) == 409
+
+    def test_idp_error_returns_502(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import IdpError
+
+        assert _error_status(IdpError("x")) == 502
+
+    def test_unknown_auth_error_returns_400(self) -> None:
+        from openhands.ev2.auth.auth_router import _error_status
+        from openhands.ev2.auth.auth_service import AuthError
+
+        assert _error_status(AuthError("x")) == 400
+
+
+class TestClientErrorHelpers:
+    """Unit tests for _client_error_status / _client_error_detail (no DB)."""
+
+    def test_scope_error_status_and_detail(self) -> None:
+        from openhands.ev2.auth.auth_router import _client_error_detail, _client_error_status
+        from openhands.ev2.auth.auth_service import OAuthClientPermissionScopeError
+
+        exc = OAuthClientPermissionScopeError("scope")
+        assert _client_error_status(exc) == 403
+        assert "create scope" in _client_error_detail(exc)
+
+    def test_not_found_status_and_detail(self) -> None:
+        from openhands.ev2.auth.auth_router import _client_error_detail, _client_error_status
+        from openhands.ev2.auth.auth_service import OAuthClientNotFoundError
+
+        exc = OAuthClientNotFoundError("abc")
+        assert _client_error_status(exc) == 404
+        assert "not found" in _client_error_detail(exc)
+
+    def test_conflict_status_and_detail(self) -> None:
+        from openhands.ev2.auth.auth_router import _client_error_detail, _client_error_status
+        from openhands.ev2.auth.auth_service import OAuthClientConflictError
+
+        exc = OAuthClientConflictError("dup")
+        assert _client_error_status(exc) == 409
+        assert "already exists" in _client_error_detail(exc)
+
+    def test_batch_denied_status_and_detail(self) -> None:
+        from openhands.ev2.auth.auth_router import _client_error_detail, _client_error_status
+        from openhands.ev2.auth.auth_service import BatchPermissionDeniedError
+
+        exc = BatchPermissionDeniedError("nope")
+        assert _client_error_status(exc) == 403
+        assert "Batch operation denied" in _client_error_detail(exc)
+
+    def test_unknown_error_status_and_detail(self) -> None:
+        from openhands.ev2.auth.auth_router import _client_error_detail, _client_error_status
+
+        exc = RuntimeError("oops")
+        assert _client_error_status(exc) == 400
+        assert _client_error_detail(exc) == "oops"

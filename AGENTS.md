@@ -17,7 +17,7 @@ follow these rules when producing or reviewing code. Rules are grouped by topic.
 
 * `ruff check .` and `ruff format --check .` clean.
 * `mypy --strict` clean (no `Any` without explicit `# type: ignore` + reason).
-* Unit coverage â‰¥ 90%. New code without tests blocks merge.
+* Unit coverage >= 94%. New code without tests blocks merge.
 * Quint specs compile and pass.
 * Playwright e2e suite green. The full suite runs daily and also on every PR
   (see `.github/workflows/e2e-daily.yml` and the `e2e` job in

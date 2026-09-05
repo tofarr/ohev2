@@ -62,7 +62,7 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Generic, TypeVar, cast
 
@@ -117,14 +117,15 @@ SqlCondition = ColumnElement[bool] | None
 
 
 def _naive(value: Any) -> Any:
-    """Strip tzinfo from aware datetimes.
+    """Normalize datetimes for safe comparison against timestamptz columns.
 
-    ORM timestamp columns use `func.now()` (naive, server-side); comparing them
-    against an aware datetime raises an asyncpg offset mismatch. Normalizing to
-    naive keeps comparison operators safe for timestamp columns.
+    All ORM timestamp columns use ``DateTime(timezone=True)`` (timestamptz).
+    Comparing an aware datetime with a non-UTC offset against such a column
+    raises an asyncpg offset mismatch. Convert aware datetimes to UTC so the
+    comparison is always correct regardless of the session timezone.
     """
     if isinstance(value, datetime) and value.tzinfo is not None:
-        return value.replace(tzinfo=None)
+        return value.astimezone(UTC)
     return value
 
 

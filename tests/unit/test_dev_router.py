@@ -627,3 +627,87 @@ class TestAuthServiceDevUrlResolution:
             service = AuthService(session)
             assert service._idp_base() == "https://real-idp.example.com"
             await service.aclose()
+
+
+class TestDevIdpServiceHelpers:
+    """Unit tests for DevIdpService internal helpers (no HTTP needed)."""
+
+    @pytest_asyncio.fixture
+    async def service(self, dev_engine) -> DevIdpService:
+        from openhands.ev2.encryption.encryption_service import get_encryption_service
+
+        enc = get_encryption_service()
+        return DevIdpService(enc)
+
+    async def test_decrypt_garbage_raises_invalid_grant(self, service: DevIdpService) -> None:
+        from openhands.ev2.auth.dev_router import InvalidGrantError
+
+        with pytest.raises(InvalidGrantError, match="decryption"):
+            service._decrypt("not-a-valid-token")
+
+    async def test_user_id_missing_subject_raises(self, service: DevIdpService) -> None:
+        from openhands.ev2.auth.dev_router import InvalidGrantError
+
+        with pytest.raises(InvalidGrantError, match="subject"):
+            service._user_id({})
+
+    async def test_user_id_invalid_uuid_raises(self, service: DevIdpService) -> None:
+        from openhands.ev2.auth.dev_router import InvalidGrantError
+
+        with pytest.raises(InvalidGrantError, match="subject"):
+            service._user_id({"sub": "not-a-uuid"})
+
+    async def test_email_missing_raises(self, service: DevIdpService) -> None:
+        from openhands.ev2.auth.dev_router import InvalidGrantError
+
+        with pytest.raises(InvalidGrantError, match="email"):
+            service._email({})
+
+    async def test_email_empty_string_raises(self, service: DevIdpService) -> None:
+        from openhands.ev2.auth.dev_router import InvalidGrantError
+
+        with pytest.raises(InvalidGrantError, match="email"):
+            service._email({"email": ""})
+
+
+class TestHandleTokenErrorPaths:
+    """Tests for _handle_token error branches via the /auth/dev/token endpoint."""
+
+    async def test_token_missing_code_raises_400(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "authorization_code",
+                "redirect_uri": "http://test/cb",
+                "client_id": "ohe",
+                "client_secret": "changeme",
+            },
+        )
+        assert resp.status_code == 400
+
+    async def test_token_missing_refresh_token_raises_400(self, dev_client: AsyncClient) -> None:
+        resp = await dev_client.post(
+            "/auth/dev/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": "ohe",
+                "client_secret": "changeme",
+            },
+        )
+        assert resp.status_code == 400
+
+    async def test_refresh_endpoint_with_wrong_grant_type_normalizes(
+        self, dev_client: AsyncClient
+    ) -> None:
+        """The refresh endpoint forces grant_type to 'refresh_token' even if wrong."""
+        resp = await dev_client.post(
+            "/auth/dev/refresh",
+            data={
+                "grant_type": "authorization_code",
+                "refresh_token": "garbage",
+                "client_id": "ohe",
+                "client_secret": "changeme",
+            },
+        )
+        # Should be 400 (garbage token) not 422 or other error
+        assert resp.status_code == 400

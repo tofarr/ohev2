@@ -369,6 +369,11 @@ class TestFeatureFlagRoleAssignmentBatchRead:
         assert items[0]["id"] == aid
         assert items[1] is None
 
+    async def test_batch_over_100_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/feature-flag-role-assignments/batch?{ids}")
+        assert resp.status_code == 422
+
 
 class TestFeatureFlagRoleAssignmentBatchWrite:
     async def test_batch_mix_cd_returns_positional(self, client: AsyncClient) -> None:
@@ -550,6 +555,46 @@ class TestListFeatureFlagUserAssignmentsRoute:
         items = resp.json()["items"]
         assert len(items) == 2
         assert all(i["user_id"] == str(target.id) for i in items)
+
+
+class TestCountFeatureFlagUserAssignmentsRoute:
+    async def test_count_after_create(self, client: AsyncClient, session) -> None:
+        flag_id = "CNT_USER_OVR_FLAG"
+        target = await _make_principal(session, email="cnt-user@example.com", username="cnt-user")
+        await session.commit()
+        await client.post("/feature-flags", json={"id": flag_id})
+        await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target.id)},
+        )
+        resp = await client.get("/feature-flag-user-assignments/count")
+        assert resp.status_code == 200
+        assert resp.json()["count"] >= 1
+
+
+class TestFeatureFlagUserAssignmentBatchRead:
+    async def test_batch_aligned_with_nulls(self, client: AsyncClient, session) -> None:
+        flag_id = "BR_USER_OVR_FLAG"
+        target = await _make_principal(session, email="br-user@example.com", username="br-user")
+        await session.commit()
+        await client.post("/feature-flags", json={"id": flag_id})
+        create = await client.post(
+            "/feature-flag-user-assignments",
+            json={"feature_flag_id": flag_id, "user_id": str(target.id)},
+        )
+        aid = create.json()["id"]
+        missing = str(uuid.uuid4())
+        resp = await client.get(f"/feature-flag-user-assignments/batch?ids={aid}&ids={missing}")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert items[0]["id"] == aid
+        assert items[1] is None
+
+    async def test_batch_over_100_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/feature-flag-user-assignments/batch?{ids}")
+        assert resp.status_code == 422
 
 
 class TestFeatureFlagUserAssignmentBatchWrite:
@@ -944,3 +989,53 @@ class TestGetEnabledFeatureFlags:
         # the single FeatureFlagRead for the "ENABLED" flag.
         assert resp.status_code == 200
         assert "flags" in resp.json()
+
+
+class TestFeatureFlagRouteErrorPaths:
+    async def test_flag_get_missing_returns_404(self, client: AsyncClient) -> None:
+        import uuid as _uuid
+
+        assert (await client.get(f"/feature-flags/{_uuid.uuid4()}")).status_code == 404
+
+    async def test_flag_update_missing_returns_404(self, client: AsyncClient) -> None:
+        import uuid as _uuid
+
+        resp = await client.patch(f"/feature-flags/{_uuid.uuid4()}", json={"enabled": False})
+        assert resp.status_code == 404
+
+    async def test_flag_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        import uuid as _uuid
+
+        assert (await client.delete(f"/feature-flags/{_uuid.uuid4()}")).status_code == 404
+
+    async def test_role_assignment_batch_too_many(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/feature-flag-role-assignments/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_user_assignment_batch_too_many(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/feature-flag-user-assignments/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_role_assignment_batch_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/feature-flag-role-assignments/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_user_assignment_batch_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/feature-flag-user-assignments/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_user_assignment_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/feature-flag-user-assignments/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_role_assignment_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/feature-flag-role-assignments/{uuid.uuid4()}")
+        assert resp.status_code == 404

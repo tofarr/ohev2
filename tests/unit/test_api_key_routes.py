@@ -403,3 +403,36 @@ class TestPermissionEnforcement:
             headers={"X-API-Key": token},
         )
         assert resp.status_code == 403
+
+
+class TestApiKeyRouteErrorPaths:
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/api-keys?cursor=not-a-uuid")).status_code == 400
+
+    async def test_batch_write_update_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api-keys/batch",
+            json={
+                "operations": [
+                    {"op": "update", "id": str(uuid.uuid4()), "data": {"name": "x"}},
+                ]
+            },
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_delete_missing_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api-keys/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/api-keys/{uuid.uuid4()}",
+            json={"name": "x"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        assert (await client.delete(f"/api-keys/{uuid.uuid4()}")).status_code == 404
