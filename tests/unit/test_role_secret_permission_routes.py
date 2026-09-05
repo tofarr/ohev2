@@ -9,16 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
 from openhands.ev2.secret.secret_models import Secret
-from openhands.ev2.user.user_models import User
 
 
 async def _seed_role_secret(session: AsyncSession, *, n: int = 0) -> tuple[Role, Secret]:
-    user = User(email=f"rsp{n}@example.com", username=f"rspu{n}")
     role = Role(name=f"rsp-role-{n}-{uuid.uuid4().hex[:4]}")
-    session.add(user)
     session.add(role)
     await session.flush()
-    secret = Secret(code=f"RSP_{n}_{uuid.uuid4().hex[:6]}", value="v", user_id=user.id)
+    secret = Secret(code=f"RSP_{n}_{uuid.uuid4().hex[:6]}", value="v")
     session.add(secret)
     await session.flush()
     return role, secret

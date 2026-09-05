@@ -4,12 +4,12 @@ The service holds the effective ``perm_filter`` (the search filter from the
 centralized permission checker) as a field, set at construction, that scopes
 search/get/update/delete SQL to secrets the principal may act on. For
 ``SecretAccess`` policies that filter is a :class:`SecretAccessFilter` keyed on
-the action's ``role_secret_permissions`` flag; for ``Permitted`` it is everything.
+the action's grant flag; for ``Permitted`` it is everything.
 
 The ``value`` is encrypted at rest via the encryption service (AGENTS.md §9)
-and decrypted only when materializing a :class:`SecretRead` DTO. ``user_id``
-is set to the creating principal and never taken from the payload, so a
-secret's provenance is trustworthy.
+and decrypted only when materializing a :class:`SecretRead` DTO. The creating
+principal receives a direct ``user_secret_permissions`` grant; the secret row
+itself has no singular owner.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import Secret
+from openhands.ev2.secret.secret_models import Secret, UserSecretPermission
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
@@ -78,7 +78,6 @@ class SecretService:
             code=secret.code,
             value=self._enc.decrypt_value(secret.value),
             description=secret.description,
-            user_id=secret.user_id,
             created_at=secret.created_at,
             updated_at=secret.updated_at,
         )
@@ -86,19 +85,28 @@ class SecretService:
     async def create(self, payload: SecretCreate, *, user_id: uuid.UUID) -> Secret:
         """Create a secret. Raises :class:`SecretCodeConflictError` on a duplicate code.
 
-        The value is encrypted at rest before persistence. ``user_id`` is set to
-        the creating principal, never read from the payload.
+        The value is encrypted at rest before persistence. The creating
+        principal receives a direct read/update/delete grant.
         """
         secret = Secret(
             code=payload.code,
             value=self._enc.encrypt_value(payload.value.get_secret_value()),
             description=payload.description,
-            user_id=user_id,
         )
         if not self._perm_filter.matches(secret):
             raise SecretPermissionScopeError(str(payload.code))
         self._session.add(secret)
         try:
+            await self._session.flush()
+            self._session.add(
+                UserSecretPermission(
+                    user_id=user_id,
+                    secret_id=secret.id,
+                    read_enabled=True,
+                    update_enabled=True,
+                    delete_enabled=True,
+                )
+            )
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()

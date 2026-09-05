@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role, UserRole
-from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret
+from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret, UserSecretPermission
 from openhands.ev2.secret.secret_security import SecretAccess, SecretAccessFilter
 from openhands.ev2.security.security_models import Action, Permitted
 from openhands.ev2.user.user_models import User
@@ -27,7 +27,7 @@ async def _seed_grant(
     session.add(user)
     session.add(role)
     await session.flush()
-    secret = Secret(code="S_" + uuid.uuid4().hex[:6], value="v", user_id=user.id)
+    secret = Secret(code="S_" + uuid.uuid4().hex[:6], value="v")
     session.add(secret)
     await session.flush()
     session.add(UserRole(role_id=role.id, user_id=user.id))
@@ -78,14 +78,14 @@ class TestSecretAccessReduction:
     def test_matches_is_permissive(self) -> None:
         # In-memory matches is intentionally permissive; SQL is authoritative.
         filt = SecretAccessFilter(user_id=uuid.uuid4(), flag="read_enabled")
-        assert filt.matches(Secret(code="x", value="v", user_id=uuid.uuid4())) is True
+        assert filt.matches(Secret(code="x", value="v")) is True
 
 
 class TestSecretAccessFilterSql:
     async def test_read_filter_admits_only_granted(self, session: AsyncSession) -> None:
         user, secret, _ = await _seed_grant(session, read=True)
-        # An ungranted secret (same user) must be excluded.
-        other = Secret(code="OTHER", value="v", user_id=user.id)
+        # An ungranted secret must be excluded.
+        other = Secret(code="OTHER", value="v")
         session.add(other)
         await session.flush()
 
@@ -116,6 +116,19 @@ class TestSecretAccessFilterSql:
         stmt = filt.filter_sql(select(Secret))
         result = (await session.execute(stmt)).scalars().all()
         assert secret.id not in {s.id for s in result}
+
+    async def test_read_filter_admits_direct_user_grant(self, session: AsyncSession) -> None:
+        user = User(email="direct@example.com", username="direct")
+        secret = Secret(code="DIRECT_" + uuid.uuid4().hex[:6], value="v")
+        session.add(user)
+        session.add(secret)
+        await session.flush()
+        session.add(UserSecretPermission(user_id=user.id, secret_id=secret.id, read_enabled=True))
+        await session.flush()
+
+        filt = SecretAccessFilter(user_id=user.id, flag="read_enabled")
+        result = (await session.execute(filt.filter_sql(select(Secret)))).scalars().all()
+        assert secret.id in {s.id for s in result}
 
 
 class TestPermittedBypassesGrants:
