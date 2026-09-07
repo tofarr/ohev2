@@ -79,12 +79,10 @@ from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountR
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/feature-flags", tags=["feature-flags"])
-overrides_router = APIRouter(
-    prefix="/feature-flag-role-assignments", tags=["feature-flag-role-assignments"]
-)
-user_overrides_router = APIRouter(
-    prefix="/feature-flag-user-assignments", tags=["feature-flag-user-assignments"]
-)
+# Assignments are grouped under the feature-flags tag (AGENTS.md §3) so the
+# OpenAPI doc surfaces them under the entity they relate to.
+overrides_router = APIRouter(prefix="/feature-flag-role-assignments", tags=["feature-flags"])
+user_overrides_router = APIRouter(prefix="/feature-flag-user-assignments", tags=["feature-flags"])
 
 
 def _cursor(value: str) -> str:

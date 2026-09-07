@@ -41,7 +41,8 @@ from openhands.ev2.util.search_filter import AllSearchFilter, SearchFilter
 
 router = APIRouter(
     prefix="/role-sandbox-permissions",
-    tags=["role-sandbox-permissions"],
+    # Grouped under sandboxes (the entity these grants relate to).
+    tags=["sandboxes"],
 )
 
 

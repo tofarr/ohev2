@@ -235,11 +235,38 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await task
 
 
+# OpenAPI tag groups, in display order. Each tag carries a short description so
+# the rendered docs explain what the group covers. Assignment/permission
+# sub-resources are folded into the tag of the entity they relate to
+# (AGENTS.md §3), so the group list is the canonical entity surface.
+_OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": "auth", "description": "Authentication, sessions, and token minting/refresh."},
+    {"name": "auth-clients", "description": "First-party OAuth client registrations."},
+    {
+        "name": "oidc-discovery",
+        "description": "OIDC/OAuth authorization-server discovery metadata.",
+    },
+    {"name": "auth-dev", "description": "Built-in dev identity provider (non-production only)."},
+    {"name": "users", "description": "User accounts and profiles."},
+    {"name": "roles", "description": "Roles and role-to-user assignments."},
+    {"name": "api-keys", "description": "API keys for programmatic access."},
+    {"name": "cors-origins", "description": "CORS allow-list origins."},
+    {"name": "secrets", "description": "Secrets and role/user secret-access grants."},
+    {"name": "feature-flags", "description": "Feature flags and their role/user assignments."},
+    {"name": "llm", "description": "LLM models and usage tracking."},
+    {"name": "mcp-server-configs", "description": "MCP server configs and role access grants."},
+    {"name": "sandbox-templates", "description": "Sandbox templates and role access grants."},
+    {"name": "sandboxes", "description": "Sandboxes and role access grants."},
+    {"name": "sandbox-snapshots", "description": "Sandbox snapshots and role access grants."},
+]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="OpenHands Enterprise",
         version=__version__,
         description="OpenHands Enterprise v2",
+        openapi_tags=_OPENAPI_TAGS,
         lifespan=lifespan,
     )
 

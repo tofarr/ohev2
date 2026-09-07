@@ -38,7 +38,7 @@ from openhands.ev2.user.user_models import User
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/user-secret-permissions", tags=["user-secret-permissions"])
+router = APIRouter(prefix="/user-secret-permissions", tags=["secrets"])
 
 
 def _cursor(value: str) -> uuid.UUID:
