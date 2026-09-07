@@ -109,7 +109,7 @@ and comment style.
 ## Setup
 
 ```bash
-uv sync --all-extras
+uv sync --all-groups --all-extras   # dev group + dev extra (pytest) both needed; see Testing below
 uv run playwright install --with-deps chromium
 uv run alembic upgrade head
 uv run uvicorn openhands.ev2.app:app --reload
@@ -162,6 +162,54 @@ Start the app with:
 
 ```bash
 uv run uvicorn openhands.ev2.app:app --reload
+```
+
+## Testing
+
+### Unit tests
+
+Unit tests run against an **embedded PostgreSQL** server spawned per session by
+the [`pytest-postgresql`](https://pytest-postgresql.readthedocs.io/) plugin
+(`postgresql_proc` fixture in `tests/conftest.py`). The fixture resolves the
+server binaries (`pg_ctl`, `initdb`, …) via `pg_config --bindir`, so a native
+PostgreSQL install providing `pg_config` on your `PATH` is required to run the
+unit suite. This is separate from the Docker-based dev database above — the
+Docker container is for running the app; the unit tests manage their own
+short-lived server process and do not use it.
+
+Install PostgreSQL locally if you haven't already:
+
+```bash
+# macOS (Homebrew)
+brew install postgresql            # unversioned — links pg_config onto PATH
+# or, if a versioned keg-only formula is used:
+#   brew install postgresql@17
+#   brew link --force postgresql@17   # or export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+
+# Debian / Ubuntu
+sudo apt-get install postgresql
+```
+
+Verify `pg_config` is resolvable, then run the suite:
+
+```bash
+which pg_config                    # must return a path
+uv sync --all-groups --all-extras  # pytest lives in the [project.optional-dependencies] dev extra
+uv run pytest                      # or: uv run pytest tests/unit -q
+```
+
+A coverage gate of 94% is enforced (`--cov-fail-under=94`).
+
+### E2E tests
+
+Playwright end-to-end tests live in `tests/e2e/` and exercise the app against
+the Docker service stack. They require a running database (the Docker dev
+database above, or `docker compose up -d`):
+
+```bash
+uv run playwright install --with-deps chromium
+docker compose up -d
+uv run pytest tests/e2e -q --no-cov
 ```
 
 ## Federated authentication
