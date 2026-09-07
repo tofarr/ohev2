@@ -60,6 +60,45 @@ module rest {
       | KBatchWrite => true
     }
 
+  // A route is protected iff it carries an auth/permission dependency.
+  // Every registered route must satisfy this unless it is a member of the
+  // public exemption set (AGENTS.md §9). Enforced in code by
+  // tests/unit/test_route_permissions.py.
+  type RouteWithProtection = {
+    route: Route,
+    protected: bool,
+  }
+
+  // The intentionally-public exemption set, modeled as a predicate over a
+  // route's resource and kind (Quint has no string concatenation, so paths
+  // are not assembled; the resource/kind pair identifies the route). These
+  // are the only routes that may bypass the permission-dependency requirement:
+  // the liveness probe, OIDC discovery, the OAuth2 credential-minting flow,
+  // the built-in dev IdP, and the OpenAI-compatible completion passthrough.
+  pure def isPublicRoute(route: Route): bool =
+    (route.kind == KCollection and route.resource == "health")
+    or (route.resource == ".well-known" and route.kind == KCollection)
+    or (route.resource == "auth" and route.actionName == "authorize")
+    or (route.resource == "auth" and route.actionName == "callback")
+    or (route.resource == "auth" and route.actionName == "token")
+    or (route.resource == "auth" and route.actionName == "refresh")
+    or (route.resource == "auth" and route.actionName == "revoke")
+    or (route.resource == "auth" and route.actionName == "logout")
+    or (route.resource == "auth-dev" and route.actionName == "authorize")
+    or (route.resource == "auth-dev" and route.actionName == "login")
+    or (route.resource == "auth-dev" and route.actionName == "token")
+    or (route.resource == "auth-dev" and route.actionName == "refresh")
+    or (route.resource == "llm-completion-proxy" and route.actionName == "chat-completions")
+
+  // A route satisfies the protection invariant iff it is protected or it is
+  // a member of the public exemption set.
+  pure def satisfiesProtection(rwp: RouteWithProtection): bool =
+    rwp.protected or isPublicRoute(rwp.route)
+
+  // Invariant: every registered route is protected unless explicitly exempted.
+  pure def allRoutesProtected(rwps: Set[RouteWithProtection]): bool =
+    rwps.forall(satisfiesProtection)
+
   // Helpers to construct routes concisely.
   pure def collection(resource: str): Route =
     { kind: KCollection, resource: resource, id: "", actionName: "", child: "" }
@@ -78,6 +117,22 @@ module rest {
 
   pure def batchWriteRoute(resource: str): Route =
     { kind: KBatchWrite, resource: resource, id: "", actionName: "", child: "" }
+
+  // Helpers to construct protected/unprotected route wrappers concisely.
+  pure def protected(route: Route): RouteWithProtection =
+    { route: route, protected: true }
+
+  pure def unprotected(route: Route): RouteWithProtection =
+    { route: route, protected: false }
+
+  // A /health-style collection route (resource "health") used to exercise the
+  // public-route exemption.
+  pure def healthRoute: Route =
+    collection("health")
+
+  // An auth OAuth-flow action route, used to exercise the public-route exemption.
+  pure def authTokenRoute: Route =
+    actionRoute("auth", "{id}", "token")
 
   // Tests
 
@@ -129,5 +184,24 @@ module rest {
     assert(isStandard(batchWriteRoute("feature-flag-user-assignments"))),
     assert(isStandard(batchWriteRoute("mcp-server-configs"))),
     assert(isStandard(batchWriteRoute("role-mcp-server-config-permissions"))),
+  }
+
+  // Protection invariant (AGENTS.md §9): every route is protected unless it is
+  // a member of the public exemption set (isPublicRoute).
+
+  run protectedRouteSatisfiesInvariant = {
+    assert(allRoutesProtected(Set(protected(collection("users")))))
+  }
+
+  run healthIsExempted = {
+    assert(allRoutesProtected(Set(unprotected(healthRoute))))
+  }
+
+  run authTokenIsExempted = {
+    assert(allRoutesProtected(Set(unprotected(authTokenRoute))))
+  }
+
+  run unprotectedNonExemptedViolates = {
+    assert(not(allRoutesProtected(Set(unprotected(collection("users"))))))
   }
 }
