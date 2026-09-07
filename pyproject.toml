@@ -68,7 +68,11 @@ filterwarnings = ["error"]
 branch = false
 core = "sysmon"
 source = ["openhands.ev2"]
-omit = ["tests/*"]
+omit = [
+    "tests/*",
+    # Local-only dev convenience script; not shipped as production code.
+    "*/scripts/reset_local_dev_db.py",
+]
 
 [tool.coverage.report]
 exclude_lines = [
