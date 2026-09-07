@@ -59,7 +59,7 @@ def _map_exception_to_status(exc: Exception) -> HTTPException:
     if isinstance(exc, RoleSandboxSnapshotPermissionConflictError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, RoleSandboxSnapshotPermissionOrphanError):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, RoleSandboxSnapshotPermissionScopeError):
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if isinstance(exc, RoleSandboxSnapshotPermissionNotFoundError):
@@ -89,6 +89,7 @@ async def create_role_sandbox_snapshot_permission(
         )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxSnapshotPermissionRead.model_validate(link)
 
 
@@ -162,8 +163,8 @@ async def batch_read_role_sandbox_snapshot_permissions(
 ) -> BatchReadResult[RoleSandboxSnapshotPermissionRead]:
     if len(ids) > 100:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A batch read accepts at most 100 ids.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
         )
     service = RoleSandboxSnapshotPermissionService(session, perm_filter or AllSearchFilter[Any]())
     links = await service.get_many(ids)
@@ -202,6 +203,7 @@ async def batch_write_role_sandbox_snapshot_permissions(
         results = await service.apply_batch(payload.operations, perm_filters)
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return BatchWriteResult(
         items=[
             RoleSandboxSnapshotPermissionRead.model_validate(link) if link else None
@@ -227,6 +229,7 @@ async def get_role_sandbox_snapshot_permission(
         link = await service.get(role_sandbox_snapshot_permission_id)
     except RoleSandboxSnapshotPermissionNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxSnapshotPermissionRead.model_validate(link)
 
 
@@ -248,6 +251,7 @@ async def update_role_sandbox_snapshot_permission(
         link = await service.update(role_sandbox_snapshot_permission_id, payload)
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxSnapshotPermissionRead.model_validate(link)
 
 
@@ -265,3 +269,4 @@ async def delete_role_sandbox_snapshot_permission(
         await service.delete(role_sandbox_snapshot_permission_id)
     except RoleSandboxSnapshotPermissionNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()

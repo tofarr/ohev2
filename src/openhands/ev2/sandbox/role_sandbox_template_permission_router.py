@@ -59,7 +59,7 @@ def _map_exception_to_status(exc: Exception) -> HTTPException:
     if isinstance(exc, RoleSandboxTemplatePermissionConflictError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, RoleSandboxTemplatePermissionOrphanError):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, RoleSandboxTemplatePermissionScopeError):
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if isinstance(exc, RoleSandboxTemplatePermissionNotFoundError):
@@ -89,6 +89,7 @@ async def create_role_sandbox_template_permission(
         )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxTemplatePermissionRead.model_validate(link)
 
 
@@ -162,8 +163,8 @@ async def batch_read_role_sandbox_template_permissions(
 ) -> BatchReadResult[RoleSandboxTemplatePermissionRead]:
     if len(ids) > 100:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A batch read accepts at most 100 ids.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ids: at most 100 ids are allowed per batch read.",
         )
     service = RoleSandboxTemplatePermissionService(session, perm_filter or AllSearchFilter[Any]())
     links = await service.get_many(ids)
@@ -202,6 +203,7 @@ async def batch_write_role_sandbox_template_permissions(
         results = await service.apply_batch(payload.operations, perm_filters)
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return BatchWriteResult(
         items=[
             RoleSandboxTemplatePermissionRead.model_validate(link) if link else None
@@ -226,6 +228,7 @@ async def get_role_sandbox_template_permission(
         link = await service.get(role_sandbox_template_permission_id)
     except RoleSandboxTemplatePermissionNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxTemplatePermissionRead.model_validate(link)
 
 
@@ -247,6 +250,7 @@ async def update_role_sandbox_template_permission(
         link = await service.update(role_sandbox_template_permission_id, payload)
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return RoleSandboxTemplatePermissionRead.model_validate(link)
 
 
@@ -264,3 +268,4 @@ async def delete_role_sandbox_template_permission(
         await service.delete(role_sandbox_template_permission_id)
     except RoleSandboxTemplatePermissionNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
