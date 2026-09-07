@@ -206,6 +206,23 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
     `total_duration_ms` sums + `invocations` counts, gated by
     `mcp_aggregated_usage_permission`).
 * Authorization checks live in services (not just routers) — defense in depth.
+* **Every route is protected by an auth dependency.** Each registered API route
+  must transitively depend on a protecting dependency from `auth_dependencies`
+  — `depends_access_token`, `depends_user_id`, `depends_role_ids`,
+  `depends_permissions`, or `depends_permissions_or_none`. A route that has
+  none of these is anonymous and must be added to
+  `PERMISSION_DEPENDENCY_OVERRIDES` in
+  `tests/unit/test_route_permissions.py`, with a comment explaining why the
+  standard auth dependency does not apply. The override set is audited in
+  review and the test fails if an override no longer matches a registered
+  route (so stale exemptions are caught). The invariant is mirrored in
+  `specs/rest.qnt` (`allRoutesProtected`). Genuinely public routes are few:
+  `/health`, OIDC discovery (`.well-known/*`), the OAuth2 flow entry points
+  that mint/revoke credentials (`/auth/authorize`, `/auth/callback`,
+  `/auth/token`, `/auth/refresh`, `/auth/revoke`, `/auth/logout`), the built-in
+  dev IdP (`/auth/dev/*`), and the OpenAI-compatible completion passthrough
+  (`/llm/completion/{llm_id}/chat/completions`, authenticated by the provider
+  API key via a custom proxy header).
 
 ## 11. Roles & per-entity permission columns
 
@@ -284,4 +301,5 @@ column.**
 - [ ] New governed entity: column added to `Role` + `ROLE_ENTITY_COLUMNS` (full `<entity>_permission` name) + migration + registered in `auth_dependencies` + field added to `RoleCreate`/`RoleUpdate`/`RoleRead` (§11; `TestEntityColumnParity` enforces).
 - [ ] Link tables guarded by their own entity column, not a parent's (§11.1); every endpoint's guard names the entity it actually mutates.
 - [ ] Every router passes the resolved permission filter to its service, and the service scopes SQL with it (§9).
+- [ ] Every new route is protected by an auth dependency, or listed (with comment) in `PERMISSION_DEPENDENCY_OVERRIDES` (§9; `test_route_permissions.py` enforces).
 - [ ] Comments follow §6.
