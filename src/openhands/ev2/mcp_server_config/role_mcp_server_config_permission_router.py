@@ -53,7 +53,8 @@ from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(
     prefix="/role-mcp-server-config-permissions",
-    tags=["role-mcp-server-config-permissions"],
+    # Grouped under mcp-server-configs (the entity these grants relate to).
+    tags=["mcp-server-configs"],
 )
 
 

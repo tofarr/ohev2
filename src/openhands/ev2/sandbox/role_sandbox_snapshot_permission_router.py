@@ -41,7 +41,8 @@ from openhands.ev2.util.search_filter import AllSearchFilter, SearchFilter
 
 router = APIRouter(
     prefix="/role-sandbox-snapshot-permissions",
-    tags=["role-sandbox-snapshot-permissions"],
+    # Grouped under sandbox-snapshots (the entity these grants relate to).
+    tags=["sandbox-snapshots"],
 )
 
 

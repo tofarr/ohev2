@@ -48,7 +48,7 @@ from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/role-secret-permissions", tags=["role-secret-permissions"])
+router = APIRouter(prefix="/role-secret-permissions", tags=["secrets"])
 
 
 def _cursor(value: str) -> uuid.UUID:
