@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -72,157 +72,147 @@ _DEV_IDP_URL = "/auth/dev"
 
 logger = logging.getLogger(__name__)
 
+# Type for sweep callables: return an optional info message (None = nothing happened).
+SweepFn = Callable[[], Awaitable[str | None]]
 
-async def _cleanup_loop() -> None:
-    """Background sweep that deletes expired IdP refresh tokens.
 
-    Runs every ``cleanup_interval`` seconds. A failure in one sweep is logged
-    and the loop continues; the loop is cancelled on shutdown. When
-    ``cleanup_interval`` is 0 the loop is not started and cleanup must be
-    driven by an external scheduler (cron) — see README 'Cleanup processes'.
+async def _background_sweep(interval: float, task_name: str, sweep: SweepFn) -> None:
+    """Run *sweep* every *interval* seconds until cancelled.
+
+    Failures are logged and the loop continues; the loop is cancelled on
+    shutdown.  When *interval* is 0 the loop is not started and the work must
+    be driven by an external scheduler — see README.
     """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            message = await sweep()
+        except Exception:
+            logger.exception("%s sweep failed; will retry next interval", task_name)
+        else:
+            if message:
+                logger.info("%s: %s", task_name, message)
+
+
+async def _sweep_expired_tokens() -> str | None:
+    """Delete expired IdP refresh tokens and return a summary message."""
     from openhands.ev2.auth.auth_service import AuthService
 
+    factory = get_session_factory()
+    async with factory() as session:
+        service = AuthService(session)
+        try:
+            deleted = await service.delete_expired_tokens()
+        finally:
+            await service.aclose()
+    return f"deleted {deleted} expired IdP refresh tokens" if deleted else None
+
+
+async def _sweep_llm_partitions() -> str | None:
+    """Manage daily ``llm_usage`` partitions and return a summary message."""
+    from openhands.ev2.llm.llm_usage_service import LlmUsageService
+
+    cfg = get_config()
+    factory = get_session_factory()
+    async with factory() as session:
+        service = LlmUsageService(session)
+        created, dropped = await service.ensure_partitions(
+            preallocate_days=cfg.llm.usage.preallocate_days,
+            retention_days=cfg.llm.usage.retention_days,
+        )
+    return _partition_message(created, dropped)
+
+
+async def _sweep_llm_aggregate() -> str | None:
+    """Roll ``llm_aggregated_usage`` from ``llm_usage`` and return a summary message."""
+    from openhands.ev2.llm.llm_usage_service import LlmUsageService
+
+    factory = get_session_factory()
+    async with factory() as session:
+        service = LlmUsageService(session)
+        count = await service.aggregate_behind_now(lag_minutes=1)
+    return f"rolled {count} per-user minute rows" if count else None
+
+
+async def _sweep_mcp_partitions() -> str | None:
+    """Manage daily ``mcp_usage`` partitions and return a summary message."""
+    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
+
+    cfg = get_config()
+    factory = get_session_factory()
+    async with factory() as session:
+        service = McpUsageService(session)
+        created, dropped = await service.ensure_partitions(
+            preallocate_days=cfg.mcp.usage.preallocate_days,
+            retention_days=cfg.mcp.usage.retention_days,
+        )
+    return _partition_message(created, dropped)
+
+
+async def _sweep_mcp_aggregate() -> str | None:
+    """Roll ``mcp_aggregated_usage`` from ``mcp_usage`` and return a summary message."""
+    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
+
+    factory = get_session_factory()
+    async with factory() as session:
+        service = McpUsageService(session)
+        count = await service.aggregate_behind_now(lag_minutes=1)
+    return f"rolled {count} per-user minute rows" if count else None
+
+
+def _partition_message(created: list[str], dropped: list[str]) -> str | None:
+    """Build a log message from partition sweep results."""
+    parts: list[str] = []
+    if created:
+        parts.append(f"created {len(created)} partitions")
+    if dropped:
+        parts.append(f"dropped {len(dropped)} partitions")
+    return "; ".join(parts) if parts else None
+
+
+async def _cleanup_loop() -> None:
+    """Background sweep that deletes expired IdP refresh tokens."""
     cfg = get_config()
     interval = cfg.cleanup_interval
     if interval <= 0:
         return
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            factory = get_session_factory()
-            async with factory() as session:
-                service = AuthService(session)
-                try:
-                    deleted = await service.delete_expired_tokens()
-                finally:
-                    await service.aclose()
-            if deleted:
-                logger.info("auth cleanup deleted %d expired IdP refresh tokens", deleted)
-        except Exception:
-            logger.exception("auth cleanup sweep failed; will retry next interval")
+    await _background_sweep(interval, "auth cleanup", _sweep_expired_tokens)
 
 
 async def _llm_usage_partition_loop() -> None:
-    """Background sweep that manages daily ``llm_usage`` partitions.
-
-    Allocates ``preallocate_days`` future daily partitions and drops partitions
-    older than ``retention_days`` every ``llm.usage.partition_interval`` seconds.
-    A failure in one sweep is logged and the loop continues. When
-    ``partition_interval`` is 0 the loop is not started and partition management
-    must be driven by an external scheduler — see README 'LLM usage logging'.
-    """
-    from openhands.ev2.llm.llm_usage_service import LlmUsageService
-
+    """Background sweep that manages daily ``llm_usage`` partitions."""
     cfg = get_config()
     interval = cfg.llm.usage.partition_interval
     if interval <= 0:
         return
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            factory = get_session_factory()
-            async with factory() as session:
-                service = LlmUsageService(session)
-                created, dropped = await service.ensure_partitions(
-                    preallocate_days=cfg.llm.usage.preallocate_days,
-                    retention_days=cfg.llm.usage.retention_days,
-                )
-            if created:
-                logger.info("llm_usage partition manager created %d partitions", len(created))
-            if dropped:
-                logger.info("llm_usage partition manager dropped %d partitions", len(dropped))
-        except Exception:
-            logger.exception("llm_usage partition sweep failed; will retry next interval")
+    await _background_sweep(interval, "llm_usage partition manager", _sweep_llm_partitions)
 
 
 async def _llm_usage_aggregate_loop() -> None:
-    """Background sweep that rolls ``llm_aggregated_usage`` from ``llm_usage``.
-
-    Aggregates the most recent finished minute (at least one minute behind
-    wall-clock time) every ``llm.usage.aggregate_interval`` seconds. A failure in
-    one sweep is logged and the loop continues. When ``aggregate_interval`` is 0
-    the loop is not started and aggregation must be driven by an external
-    scheduler — see README 'LLM usage logging'.
-    """
-    from openhands.ev2.llm.llm_usage_service import LlmUsageService
-
+    """Background sweep that rolls ``llm_aggregated_usage`` from ``llm_usage``."""
     cfg = get_config()
     interval = cfg.llm.usage.aggregate_interval
     if interval <= 0:
         return
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            factory = get_session_factory()
-            async with factory() as session:
-                service = LlmUsageService(session)
-                count = await service.aggregate_behind_now(lag_minutes=1)
-            if count:
-                logger.info("llm_usage aggregator rolled %d per-user minute rows", count)
-        except Exception:
-            logger.exception("llm_usage aggregate sweep failed; will retry next interval")
+    await _background_sweep(interval, "llm_usage aggregator", _sweep_llm_aggregate)
 
 
 async def _mcp_usage_partition_loop() -> None:
-    """Background sweep that manages daily ``mcp_usage`` partitions.
-
-    Allocates ``preallocate_days`` future daily partitions and drops partitions
-    older than ``retention_days`` every ``mcp.usage.partition_interval`` seconds.
-    A failure in one sweep is logged and the loop continues. When
-    ``partition_interval`` is 0 the loop is not started and partition management
-    must be driven by an external scheduler — see README 'MCP usage logging'.
-    """
-    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
-
+    """Background sweep that manages daily ``mcp_usage`` partitions."""
     cfg = get_config()
     interval = cfg.mcp.usage.partition_interval
     if interval <= 0:
         return
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            factory = get_session_factory()
-            async with factory() as session:
-                service = McpUsageService(session)
-                created, dropped = await service.ensure_partitions(
-                    preallocate_days=cfg.mcp.usage.preallocate_days,
-                    retention_days=cfg.mcp.usage.retention_days,
-                )
-            if created:
-                logger.info("mcp_usage partition manager created %d partitions", len(created))
-            if dropped:
-                logger.info("mcp_usage partition manager dropped %d partitions", len(dropped))
-        except Exception:
-            logger.exception("mcp_usage partition sweep failed; will retry next interval")
+    await _background_sweep(interval, "mcp_usage partition manager", _sweep_mcp_partitions)
 
 
 async def _mcp_usage_aggregate_loop() -> None:
-    """Background sweep that rolls ``mcp_aggregated_usage`` from ``mcp_usage``.
-
-    Aggregates the most recent finished minute (at least one minute behind
-    wall-clock time) every ``mcp.usage.aggregate_interval`` seconds. A failure in
-    one sweep is logged and the loop continues. When ``aggregate_interval`` is 0
-    the loop is not started and aggregation must be driven by an external
-    scheduler — see README 'MCP usage logging'.
-    """
-    from openhands.ev2.mcp_server_config.mcp_usage_service import McpUsageService
-
+    """Background sweep that rolls ``mcp_aggregated_usage`` from ``mcp_usage``."""
     cfg = get_config()
     interval = cfg.mcp.usage.aggregate_interval
     if interval <= 0:
         return
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            factory = get_session_factory()
-            async with factory() as session:
-                service = McpUsageService(session)
-                count = await service.aggregate_behind_now(lag_minutes=1)
-            if count:
-                logger.info("mcp_usage aggregator rolled %d per-user minute rows", count)
-        except Exception:
-            logger.exception("mcp_usage aggregate sweep failed; will retry next interval")
+    await _background_sweep(interval, "mcp_usage aggregator", _sweep_mcp_aggregate)
 
 
 @asynccontextmanager
