@@ -17,7 +17,16 @@ from typing import Any, Literal, TypeVar
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -463,6 +472,182 @@ class SandboxCompute(Base):
     terminated_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
 
 
+class RoleSandboxTemplatePermission(Base):
+    """Per-role grant of access to a :class:`SandboxTemplate`.
+
+    Links a :class:`Role` to a :class:`SandboxTemplate` with independent
+    read/update/delete flags. The ``(role_id, sandbox_template_id)`` pair is
+    unique so a role is granted a template at most once.
+    """
+
+    __tablename__ = "role_sandbox_template_permissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id",
+            "sandbox_template_id",
+            name="uq_role_sandbox_tpl_perm_role_sandbox_tpl",
+        ),
+        {"comment": "Per-role grants of access to sandbox templates"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    sandbox_template_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sandbox_templates.id", ondelete="CASCADE"),
+        index=True,
+    )
+    read_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    update_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    delete_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class RoleSandboxPermission(Base):
+    """Per-role grant of access to a :class:`Sandbox`.
+
+    Links a :class:`Role` to a :class:`Sandbox` with independent
+    read/update/delete flags. The ``(role_id, sandbox_id)`` pair is unique.
+    """
+
+    __tablename__ = "role_sandbox_permissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id",
+            "sandbox_id",
+            name="uq_role_sandbox_perm_role_id_sandbox_id",
+        ),
+        {"comment": "Per-role grants of access to sandboxes"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    sandbox_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sandboxes.id", ondelete="CASCADE"),
+        index=True,
+    )
+    read_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    update_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    delete_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class RoleSandboxSnapshotPermission(Base):
+    """Per-role grant of access to a :class:`SandboxSnapshot`.
+
+    Links a :class:`Role` to a :class:`SandboxSnapshot` with independent
+    read/update/delete flags. The ``(role_id, sandbox_snapshot_id)`` pair is
+    unique.
+    """
+
+    __tablename__ = "role_sandbox_snapshot_permissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id",
+            "sandbox_snapshot_id",
+            name="uq_role_sandbox_snap_perm_role_sandbox_snap",
+        ),
+        {"comment": "Per-role grants of access to sandbox snapshots"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        init=False,
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    sandbox_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sandbox_snapshots.id", ondelete="CASCADE"),
+        index=True,
+    )
+    read_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    update_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    delete_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 __all__ = [
     "DiscriminatedUnionJSON",
     "DockerSandboxRuntimeState",
@@ -471,6 +656,9 @@ __all__ = [
     "FuseySandboxStorageSpec",
     "OpenHandsAgentServerSpec",
     "OpenHandsAgentServerState",
+    "RoleSandboxPermission",
+    "RoleSandboxSnapshotPermission",
+    "RoleSandboxTemplatePermission",
     "Sandbox",
     "SandboxCompute",
     "SandboxComputeStatus",

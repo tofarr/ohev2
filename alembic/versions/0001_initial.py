@@ -445,6 +445,24 @@ def upgrade() -> None:
             comment="Permission policy for sandbox_snapshot resources; null = deny.",
         ),
         sa.Column(
+            "sandbox_template_grant_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for role-sandbox-template grant resources; null = deny.",
+        ),
+        sa.Column(
+            "sandbox_grant_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for role-sandbox grant resources; null = deny.",
+        ),
+        sa.Column(
+            "sandbox_snapshot_grant_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for role-sandbox-snapshot grant resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -1175,6 +1193,172 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
+    # role_sandbox_template_permissions
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "role_sandbox_template_permissions",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
+        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_template_permissions_role_id_roles",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_template_id"],
+            ["sandbox_templates.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_tpl_perm_template_id_sandbox_templates",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "role_id",
+            "sandbox_template_id",
+            name="uq_role_sandbox_tpl_perm_role_sandbox_tpl",
+        ),
+        comment="Per-role grants of access to sandbox templates",
+    )
+    op.create_index(
+        "ix_role_sandbox_template_permissions_role_id",
+        "role_sandbox_template_permissions",
+        ["role_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_role_sandbox_template_permissions_sandbox_template_id",
+        "role_sandbox_template_permissions",
+        ["sandbox_template_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
+    # role_sandbox_permissions
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "role_sandbox_permissions",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column("sandbox_id", sa.Uuid(), nullable=False),
+        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_permissions_role_id_roles",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_id"],
+            ["sandboxes.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_permissions_sandbox_id_sandboxes",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "role_id", "sandbox_id", name="uq_role_sandbox_perm_role_id_sandbox_id"
+        ),
+        comment="Per-role grants of access to sandboxes",
+    )
+    op.create_index(
+        "ix_role_sandbox_permissions_role_id",
+        "role_sandbox_permissions",
+        ["role_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_role_sandbox_permissions_sandbox_id",
+        "role_sandbox_permissions",
+        ["sandbox_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
+    # role_sandbox_snapshot_permissions
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "role_sandbox_snapshot_permissions",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("role_id", sa.Uuid(), nullable=False),
+        sa.Column("sandbox_snapshot_id", sa.Uuid(), nullable=False),
+        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_snapshot_permissions_role_id_roles",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_snapshot_id"],
+            ["sandbox_snapshots.id"],
+            ondelete="CASCADE",
+            name="fk_role_sandbox_snap_perm_snapshot_id_sandbox_snapshots",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "role_id",
+            "sandbox_snapshot_id",
+            name="uq_role_sandbox_snap_perm_role_sandbox_snap",
+        ),
+        comment="Per-role grants of access to sandbox snapshots",
+    )
+    op.create_index(
+        "ix_role_sandbox_snapshot_permissions_role_id",
+        "role_sandbox_snapshot_permissions",
+        ["role_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_role_sandbox_snapshot_permissions_sandbox_snapshot_id",
+        "role_sandbox_snapshot_permissions",
+        ["sandbox_snapshot_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
     # llm_usage (range-partitioned parent by created_at; partitions are
     # created by the background partition manager at runtime — see README
     # 'LLM usage logging'. A DEFAULT partition is created here so inserts
@@ -1450,6 +1634,29 @@ def downgrade() -> None:
     op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
     op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
     op.drop_table("llm_usage")
+
+    op.drop_index(
+        "ix_role_sandbox_snapshot_permissions_sandbox_snapshot_id",
+        table_name="role_sandbox_snapshot_permissions",
+    )
+    op.drop_index(
+        "ix_role_sandbox_snapshot_permissions_role_id",
+        table_name="role_sandbox_snapshot_permissions",
+    )
+    op.drop_table("role_sandbox_snapshot_permissions")
+    op.drop_index("ix_role_sandbox_permissions_sandbox_id", table_name="role_sandbox_permissions")
+    op.drop_index("ix_role_sandbox_permissions_role_id", table_name="role_sandbox_permissions")
+    op.drop_table("role_sandbox_permissions")
+    op.drop_index(
+        "ix_role_sandbox_template_permissions_sandbox_template_id",
+        table_name="role_sandbox_template_permissions",
+    )
+    op.drop_index(
+        "ix_role_sandbox_template_permissions_role_id",
+        table_name="role_sandbox_template_permissions",
+    )
+    op.drop_table("role_sandbox_template_permissions")
+
     op.drop_index("ix_sandbox_computes_sandbox_id", table_name="sandbox_computes")
     op.drop_index("ix_sandbox_computes_template_id", table_name="sandbox_computes")
     op.drop_index("ix_sandbox_computes_status", table_name="sandbox_computes")
