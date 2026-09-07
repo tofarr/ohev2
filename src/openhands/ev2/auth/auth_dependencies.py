@@ -580,6 +580,18 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: 
 )
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
+from openhands.ev2.sandbox import (  # noqa: E402,F401
+    sandbox_security as _sandbox_security,  # registers SandboxAccess in the Permission union
+)
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    RoleSandboxPermission as _RoleSandboxPermission,
+)
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    RoleSandboxSnapshotPermission as _RoleSandboxSnapshotPermission,
+)
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    RoleSandboxTemplatePermission as _RoleSandboxTemplatePermission,
+)
 from openhands.ev2.sandbox.sandbox_models import Sandbox as _Sandbox  # noqa: E402
 from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
     SandboxSnapshot as _SandboxSnapshot,
@@ -615,6 +627,9 @@ register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignme
 register_resource_policy(_SandboxTemplate, "sandbox_template_permission")
 register_resource_policy(_Sandbox, "sandbox_permission")
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
+register_resource_policy(_RoleSandboxTemplatePermission, "sandbox_template_grant_permission")
+register_resource_policy(_RoleSandboxPermission, "sandbox_grant_permission")
+register_resource_policy(_RoleSandboxSnapshotPermission, "sandbox_snapshot_grant_permission")
 
 
 def depends_permissions(

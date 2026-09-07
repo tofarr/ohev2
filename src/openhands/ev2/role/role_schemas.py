@@ -102,6 +102,18 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for sandbox_snapshot resources; null = deny.",
     )
+    sandbox_template_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox-template grant resources; null = deny.",
+    )
+    sandbox_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox grant resources; null = deny.",
+    )
+    sandbox_snapshot_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox-snapshot grant resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -194,6 +206,18 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for sandbox_snapshot resources; null = deny.",
     )
+    sandbox_template_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox-template grant resources; null = deny.",
+    )
+    sandbox_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox grant resources; null = deny.",
+    )
+    sandbox_snapshot_grant_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for role-sandbox-snapshot grant resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -232,6 +256,9 @@ class RoleRead(BaseModel):
     sandbox_template_permission: Permission | None
     sandbox_permission: Permission | None
     sandbox_snapshot_permission: Permission | None
+    sandbox_template_grant_permission: Permission | None
+    sandbox_grant_permission: Permission | None
+    sandbox_snapshot_grant_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 
