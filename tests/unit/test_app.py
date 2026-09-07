@@ -8,11 +8,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from openhands.ev2.app import (
+    _background_sweep,
     _cleanup_loop,
     _llm_usage_aggregate_loop,
     _llm_usage_partition_loop,
     _mcp_usage_aggregate_loop,
     _mcp_usage_partition_loop,
+    _partition_message,
+    _sweep_expired_tokens,
+    _sweep_llm_aggregate,
+    _sweep_llm_partitions,
+    _sweep_mcp_aggregate,
+    _sweep_mcp_partitions,
     create_app,
     lifespan,
 )
@@ -266,6 +273,195 @@ class TestMcpUsageAggregateLoop:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+
+class TestBackgroundSweep:
+    async def test_sweep_success_logs_message(self, caplog: pytest.LogCaptureFixture) -> None:
+        async def sweep() -> str | None:
+            return "did 3 things"
+
+        task = asyncio.create_task(_background_sweep(0.01, "test-task", sweep))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert any("test-task: did 3 things" in r.message for r in caplog.records)
+
+    async def test_sweep_returns_none_no_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        async def sweep() -> str | None:
+            return None
+
+        task = asyncio.create_task(_background_sweep(0.01, "test-task", sweep))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not any("test-task:" in r.message for r in caplog.records if r.levelname == "INFO")
+
+    async def test_sweep_exception_logged_and_continues(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        call_count = 0
+
+        async def sweep() -> str | None:
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("boom")
+
+        task = asyncio.create_task(_background_sweep(0.01, "test-task", sweep))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert call_count >= 2
+        assert any("test-task sweep failed" in r.message for r in caplog.records)
+
+
+class TestSweepFunctions:
+    async def test_sweep_expired_tokens(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch("openhands.ev2.auth.auth_service.AuthService") as mock_service_cls,
+        ):
+            mock_service = AsyncMock()
+            mock_service.delete_expired_tokens.return_value = 5
+            mock_service.aclose = AsyncMock()
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_expired_tokens()
+            assert result is not None
+            assert "5" in result
+            mock_service.delete_expired_tokens.assert_awaited_once()
+            mock_service.aclose.assert_awaited_once()
+
+    async def test_sweep_expired_tokens_none(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch("openhands.ev2.auth.auth_service.AuthService") as mock_service_cls,
+        ):
+            mock_service = AsyncMock()
+            mock_service.delete_expired_tokens.return_value = 0
+            mock_service.aclose = AsyncMock()
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_expired_tokens()
+            assert result is None
+
+    async def test_sweep_llm_partitions(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch("openhands.ev2.llm.llm_usage_service.LlmUsageService") as mock_service_cls,
+        ):
+            mock_cfg.return_value.llm.usage.preallocate_days = 3
+            mock_cfg.return_value.llm.usage.retention_days = 30
+
+            mock_service = AsyncMock()
+            mock_service.ensure_partitions.return_value = (["p1", "p2"], ["old"])
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_llm_partitions()
+            assert result is not None
+            assert "2" in result and "1" in result
+
+    async def test_sweep_llm_aggregate(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch("openhands.ev2.llm.llm_usage_service.LlmUsageService") as mock_service_cls,
+        ):
+            mock_service = AsyncMock()
+            mock_service.aggregate_behind_now.return_value = 10
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_llm_aggregate()
+            assert result is not None
+            assert "10" in result
+
+    async def test_sweep_mcp_partitions(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.mcp_server_config.mcp_usage_service.McpUsageService"
+            ) as mock_service_cls,
+        ):
+            mock_cfg.return_value.mcp.usage.preallocate_days = 3
+            mock_cfg.return_value.mcp.usage.retention_days = 30
+
+            mock_service = AsyncMock()
+            mock_service.ensure_partitions.return_value = (["p1"], ["old", "older"])
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_mcp_partitions()
+            assert result is not None
+            assert "1" in result and "2" in result
+
+    async def test_sweep_mcp_aggregate(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.mcp_server_config.mcp_usage_service.McpUsageService"
+            ) as mock_service_cls,
+        ):
+            mock_service = AsyncMock()
+            mock_service.aggregate_behind_now.return_value = 0
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_mcp_aggregate()
+            assert result is None
+
+
+class TestPartitionMessage:
+    def test_both_created_and_dropped(self) -> None:
+        msg = _partition_message(["p1"], ["p2"])
+        assert msg is not None
+        assert "created 1" in msg and "dropped 1" in msg
+
+    def test_only_created(self) -> None:
+        msg = _partition_message(["p1"], [])
+        assert msg is not None
+        assert "created" in msg
+        assert "dropped" not in msg
+
+    def test_only_dropped(self) -> None:
+        msg = _partition_message([], ["p1"])
+        assert msg is not None
+        assert "dropped" in msg
+        assert "created" not in msg
+
+    def test_neither(self) -> None:
+        msg = _partition_message([], [])
+        assert msg is None
 
 
 class TestLifespan:

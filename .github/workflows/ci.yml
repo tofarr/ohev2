@@ -38,8 +38,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
-      - name: McCabe complexity check (advisory)
-        continue-on-error: true
+      - name: McCabe complexity check
         run: uv run pylint src/openhands/ev2
       - name: Unit tests with coverage
         run: uv run pytest -q
