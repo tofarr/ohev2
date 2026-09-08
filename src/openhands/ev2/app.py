@@ -60,6 +60,7 @@ from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
 )
 from openhands.ev2.secret.secret_router import router as secret_router
+from openhands.ev2.secret.secret_value_router import router as secret_value_router
 from openhands.ev2.secret.user_secret_permission_router import (
     router as user_secret_permission_router,
 )
@@ -252,6 +253,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "api-keys", "description": "API keys for programmatic access."},
     {"name": "cors-origins", "description": "CORS allow-list origins."},
     {"name": "secrets", "description": "Secrets and role/user secret-access grants."},
+    {
+        "name": "secret-values",
+        "description": "Read-only reveal of decrypted secret values (requires both read access and value-reveal permission).",
+    },
     {"name": "feature-flags", "description": "Feature flags and their role/user assignments."},
     {"name": "llm", "description": "LLM models and usage tracking."},
     {"name": "mcp-server-configs", "description": "MCP server configs and role access grants."},
@@ -292,6 +297,7 @@ def create_app() -> FastAPI:
     app.include_router(role_router)
     app.include_router(user_role_router)
     app.include_router(secret_router)
+    app.include_router(secret_value_router)
     app.include_router(role_secret_permission_router)
     app.include_router(user_secret_permission_router)
     app.include_router(sandbox_template_router)

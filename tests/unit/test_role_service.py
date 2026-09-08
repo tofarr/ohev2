@@ -57,16 +57,29 @@ class TestEntityColumnParity:
             )
 
     def test_model_and_registry_cover_every_entity_column(self) -> None:
-        from openhands.ev2.auth.auth_dependencies import _RESOURCE_POLICY
+        from openhands.ev2.auth.auth_dependencies import (
+            _RESOURCE_POLICY,
+            depends_secret_value_permission,
+        )
         from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS
 
         for column in ROLE_ENTITY_COLUMNS:
             assert column in Role.__mapper__.columns, f"Role model missing {column}"
         registered = set(_RESOURCE_POLICY.values())
-        assert registered == set(ROLE_ENTITY_COLUMNS), (
-            f"resource-policy registry drifted: missing={set(ROLE_ENTITY_COLUMNS) - registered} "
-            f"extra={registered - set(ROLE_ENTITY_COLUMNS)}"
+        # secret_value_permission is the documented exception: it governs the
+        # /secret-values projection (not a table), so it is intentionally NOT
+        # registered 1:1 via register_resource_policy (Secret is already mapped
+        # to secret_permission). It is resolved by name via
+        # resolve_permission_filter_for_column / depends_secret_value_permission,
+        # which is asserted callable below so the column is not silently
+        # ungoverned (AGENTS.md §12).
+        non_registered = {"secret_value_permission"}
+        assert registered == set(ROLE_ENTITY_COLUMNS) - non_registered, (
+            f"resource-policy registry drifted: "
+            f"missing={set(ROLE_ENTITY_COLUMNS) - non_registered - registered} "
+            f"extra={registered - (set(ROLE_ENTITY_COLUMNS) - non_registered)}"
         )
+        assert callable(depends_secret_value_permission)
 
     async def test_create_and_update_round_trip_every_column(self, service: RoleService) -> None:
         """Every entity column set via the schemas survives create + update."""

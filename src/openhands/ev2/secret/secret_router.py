@@ -3,8 +3,13 @@
 Follows the uniform REST surface (AGENTS.md §3): GET /secrets (paginated),
 POST /secrets, GET/PATCH/DELETE /secrets/{id}, plus batch read/write.
 Handlers validate, call the service, and serialize — no business logic here.
-Every endpoint is guarded by the centralized permission checker (AGENTS.md §9)
-over the ``secret`` resource; for the :class:`SecretAccess` policy the
+
+``/secrets`` returns metadata only — the ``value`` is never exposed on this
+surface. Decrypted plaintext is revealed solely through the
+``/secret-values`` projection (AGENTS.md §12), which requires both read access
+to the secret and the separate ``secret_value_permission``. Every endpoint here
+is guarded by the centralized permission checker (AGENTS.md §9) over the
+``secret`` resource; for the :class:`SecretAccess` policy the
 read/update/delete filter is a :class:`SecretAccessFilter` keyed on the
 matching grant flag, so a principal sees only secrets granted directly or
 through one of their roles.
@@ -38,6 +43,7 @@ from openhands.ev2.secret.secret_service import (
     SecretNotFoundError,
     SecretPermissionScopeError,
     SecretService,
+    SecretValueTypeError,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
@@ -201,6 +207,11 @@ async def write_secrets_batch(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Secret with code already exists: {exc}",
         ) from exc
+    except SecretValueTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Value is not allowed for this secret type: {exc}",
+        ) from exc
     await session.commit()
     return BatchWriteResult(
         items=[service.to_read(s) if s is not None else None for s in results],
@@ -245,6 +256,11 @@ async def update_secret(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Secret with code already exists: {exc}",
+        ) from exc
+    except SecretValueTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Value is not allowed for this secret type: {exc}",
         ) from exc
     await session.commit()
     return service.to_read(secret)

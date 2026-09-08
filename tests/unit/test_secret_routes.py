@@ -31,8 +31,9 @@ class TestCreateSecretRoute:
         body = resp.json()
         assert body["code"] == "MY_KEY"
         assert uuid.UUID(body["id"])
-        # Value is decrypted on read.
-        assert body["value"] == "hunter2"
+        assert body["type"] == "static"
+        # /secrets returns metadata only — value is never present.
+        assert "value" not in body
         assert body["description"] == "the api key"
         assert body["created_at"] is not None
 
@@ -52,7 +53,8 @@ class TestGetSecretRoute:
         sid = (await client.post("/secrets", json=_create_payload("G"))).json()["id"]
         resp = await client.get(f"/secrets/{sid}")
         assert resp.status_code == 200
-        assert resp.json()["value"] == "hunter2"
+        # /secrets returns metadata only — value is never present.
+        assert "value" not in resp.json()
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
         resp = await client.get(f"/secrets/{uuid.uuid4()}")
@@ -88,8 +90,12 @@ class TestUpdateSecretRoute:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["value"] == "rotated"
+        assert "value" not in body
         assert body["description"] == "new"
+        # The rotated value is revealed via /secret-values (admin has value permission).
+        revealed = await client.get(f"/secret-values/{sid}")
+        assert revealed.status_code == 200
+        assert revealed.json()["value"] == "rotated"
 
     async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
         resp = await client.patch(f"/secrets/{uuid.uuid4()}", json={"description": "x"})
@@ -356,7 +362,13 @@ class TestUserSecretPermissionRoute:
         token = create_auth_token(principal.id)
         resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
-        assert resp.json()["value"] == "hunter2"
+        # /secrets returns metadata only — value is absent.
+        assert "value" not in resp.json()
+        # SecretAccess-only principals (no secret_value_permission) cannot reveal.
+        reveal = await client.get(
+            f"/secret-values/{sid}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert reveal.status_code == 403
 
 
 class TestSecretAccessPolicy:
@@ -406,7 +418,13 @@ class TestSecretAccessPolicy:
         token = create_auth_token(principal.id)
         resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
-        assert resp.json()["value"] == "hunter2"
+        # /secrets returns metadata only — value is absent.
+        assert "value" not in resp.json()
+        # SecretAccess-only principals (no secret_value_permission) cannot reveal.
+        reveal = await client.get(
+            f"/secret-values/{sid}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert reveal.status_code == 403
 
 
 class TestSecretGrantAuthorization:
@@ -471,6 +489,51 @@ class TestSecretGrantAuthorization:
         ).status_code == 404
         # Role administration is not conferred.
         assert (await client.get("/roles", headers=headers)).status_code == 403
+
+
+class TestSecretValueRoute:
+    """The /secret-values projection reveals plaintext (admin principal has
+    secret_value_permission=Permitted() via the seeded admin role)."""
+
+    async def test_reveal_value(self, client: AsyncClient) -> None:
+        sid = (await client.post("/secrets", json=_create_payload("RV"))).json()["id"]
+        resp = await client.get(f"/secret-values/{sid}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["id"] == sid
+        assert body["code"] == "RV"
+        assert body["type"] == "static"
+        assert body["value"] == "hunter2"
+
+    async def test_reveal_missing_returns_404(self, client: AsyncClient) -> None:
+        assert (await client.get(f"/secret-values/{uuid.uuid4()}")).status_code == 404
+
+    async def test_reveal_search(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await client.post("/secrets", json=_create_payload(f"VS{i}"))
+        resp = await client.get("/secret-values?limit=2")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["items"]) == 2
+        assert all("value" in item for item in body["items"])
+        assert body["next_cursor"] is not None
+
+    async def test_reveal_batch(self, client: AsyncClient) -> None:
+        a = (await client.post("/secrets", json=_create_payload("VBA"))).json()["id"]
+        b = (await client.post("/secrets", json=_create_payload("VBB"))).json()["id"]
+        resp = await client.get(f"/secret-values/batch?ids={a}&ids={b}&ids={uuid.uuid4()}")
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert items[0]["id"] == a and items[0]["value"] == "hunter2"
+        assert items[1]["id"] == b and items[1]["value"] == "hunter2"
+        assert items[2] is None
+
+    async def test_reveal_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        assert (await client.get("/secret-values?cursor=not-a-uuid")).status_code == 400
+
+    async def test_reveal_batch_too_many_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        assert (await client.get(f"/secret-values/batch?{ids}")).status_code == 422
 
 
 class TestSecretRouteErrorPaths:

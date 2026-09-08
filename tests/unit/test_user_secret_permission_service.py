@@ -28,7 +28,7 @@ def service(session: AsyncSession) -> UserSecretPermissionService:
 
 async def _seed_user_secret_permission(session: AsyncSession, *, n: int = 0) -> tuple[User, Secret]:
     user = User(email=f"usp{n}-{uuid.uuid4().hex[:4]}@example.com", username=f"usp{n}")
-    secret = Secret(code=f"USP_{n}_{uuid.uuid4().hex[:6]}", value="v")
+    secret = Secret(code=f"USP_{n}_{uuid.uuid4().hex[:6]}")
     session.add(user)
     session.add(secret)
     await session.flush()

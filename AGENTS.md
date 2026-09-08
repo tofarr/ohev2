@@ -303,3 +303,70 @@ column.**
 - [ ] Every router passes the resolved permission filter to its service, and the service scopes SQL with it (§9).
 - [ ] Every new route is protected by an auth dependency, or listed (with comment) in `PERMISSION_DEPENDENCY_OVERRIDES` (§9; `test_route_permissions.py` enforces).
 - [ ] Comments follow §6.
+
+## 12. Typed secrets & the value-reveal projection
+
+Secrets are typed: the umbrella `secrets` table carries a `type`
+discriminator (`SecretType` enum: `static` | `oauth`) and delegates the
+sensitive payload to a type-specific detail table. `static_secret_details`
+holds the JWE ciphertext for `type='static'` secrets (1:1 with `secrets`,
+`ON DELETE CASCADE`). Future `oauth_*` detail tables will hold
+access/refresh tokens; only the `OAUTH` enum value exists today so the
+type column is forward-compatible (OAuth refresh logic is explicitly out
+of scope until those tables land).
+
+### 12.1 Value reveal is a separate projection
+
+The typed secret tables (`secrets`, `static_secret_details`, …) **never**
+expose their sensitive values through their own CRUD endpoints. `SecretRead`
+omits `value` entirely; `/secrets` returns metadata only.
+
+Decrypted plaintext is revealed solely through the **`/secret-values`**
+projection, a read-only umbrella surface (`GET /secret-values`,
+`GET /secret-values/batch`, `GET /secret-values/{id}`) backed by
+`SecretValueService`. A secret is revealed only when the principal has
+**both**:
+
+1. read access to the secret (the `secret_permission` filter — same grant
+   logic as `/secrets`), **and**
+2. the value-reveal permission (`secret_value_permission`).
+
+`SecretValueService` ANDs the two filters (`AndSearchFilter(filters=[read,
+value])`); either being `None`/denying yields 404 (fail-closed — a 404, not
+a 403, so existence is not leaked). The Quint spec mirrors this in
+`canRevealValue` / `valueRevealRequiresBothPerms` (`specs/secret.qnt`).
+
+### 12.2 `secret_value_permission` is the documented registry exception
+
+`secret_value_permission` is a real entity column in `ROLE_ENTITY_COLUMNS`
+(and `Role`, the migration, and `RoleCreate`/`RoleUpdate`/`RoleRead`), so
+the admin seed role automatically receives `Permitted()` on it and
+`RoleService.create`/`update` copy it generically like every other column.
+
+It is **intentionally NOT registered** via
+`register_resource_policy(Secret, "secret_value_permission")`. The
+`_RESOURCE_POLICY` registry maps a model type to exactly one column, and
+`Secret` is already mapped to `secret_permission`. `secret_value_permission`
+governs a cross-type *projection* (`/secret-values`), not a table, so it is
+resolved **by column name** via
+`resolve_permission_filter_for_column("secret_value_permission", Action.READ,
+…)` and the `depends_secret_value_permission()` FastAPI dependency (which
+raises 403 when the resolved filter is `None`).
+
+`tests/unit/test_role_service.py::TestEntityColumnParity::test_model_and_registry_cover_every_entity_column`
+subtracts a documented `non_registered = {"secret_value_permission"}` set
+from the equality assertion and asserts `depends_secret_value_permission`
+is callable, so the column cannot be silently ungoverned. This is the only
+documented exception to the "every entity column is registered 1:1" rule in
+§11; do not add more without updating that test and this section.
+
+### 12.3 OAuth forward-compat
+
+`SecretCreate` rejects `value` when `type == oauth` (model validator) and
+requires it when `type == static`. `SecretService.update` raises
+`SecretValueTypeError` (→ 422) if a `value` is supplied for an oauth
+secret. `SecretValueService` raises `SecretValueNotFoundError` (→ 404) for
+an oauth secret with no detail table yet. When OAuth detail tables are
+added, the only schema change needed is a new detail table + a branch in
+`SecretValueService._decrypt_value` — the type column and projection
+surface already exist.

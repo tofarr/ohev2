@@ -367,6 +367,16 @@ def upgrade() -> None:
             comment="Permission policy for secret resources; null = deny.",
         ),
         sa.Column(
+            "secret_value_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment=(
+                "Permission policy for the /secret-values reveal projection; "
+                "null = deny. Not registered 1:1 (governs a projection); "
+                "resolved by name via resolve_permission_filter_for_column."
+            ),
+        ),
+        sa.Column(
             "secret_grant_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
@@ -513,7 +523,13 @@ def upgrade() -> None:
         "secrets",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("code", sa.String(length=255), nullable=False),
-        sa.Column("value", sa.Text(), nullable=False, comment="Encrypted value (JWE ciphertext)."),
+        sa.Column(
+            "type",
+            sa.String(length=16),
+            server_default=sa.text("'static'"),
+            nullable=False,
+            comment="Secret type discriminator (static | oauth).",
+        ),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
@@ -531,6 +547,45 @@ def upgrade() -> None:
         sa.UniqueConstraint("code"),
     )
     op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
+
+    # ------------------------------------------------------------------ #
+    # static_secret_details
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "static_secret_details",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("secret_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "value",
+            sa.Text(),
+            nullable=False,
+            comment="Encrypted value (JWE ciphertext).",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["secret_id"],
+            ["secrets.id"],
+            ondelete="CASCADE",
+            name="fk_static_secret_details_secret_id_secrets",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("secret_id", name="uq_static_secret_details_secret_id"),
+        comment="Encrypted plaintext for static secrets",
+    )
+    op.create_index(
+        "ix_static_secret_details_secret_id", "static_secret_details", ["secret_id"], unique=True
+    )
 
     # ------------------------------------------------------------------ #
     # role_secret_permissions
@@ -1725,6 +1780,8 @@ def downgrade() -> None:
     op.drop_index("ix_role_secret_permissions_secret_id", table_name="role_secret_permissions")
     op.drop_index("ix_role_secret_permissions_role_id", table_name="role_secret_permissions")
     op.drop_table("role_secret_permissions")
+    op.drop_index("ix_static_secret_details_secret_id", table_name="static_secret_details")
+    op.drop_table("static_secret_details")
     op.drop_index("ix_secrets_code", table_name="secrets")
     op.drop_table("secrets")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")

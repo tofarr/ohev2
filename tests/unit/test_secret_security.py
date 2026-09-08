@@ -27,7 +27,7 @@ async def _seed_grant(
     session.add(user)
     session.add(role)
     await session.flush()
-    secret = Secret(code="S_" + uuid.uuid4().hex[:6], value="v")
+    secret = Secret(code="S_" + uuid.uuid4().hex[:6])
     session.add(secret)
     await session.flush()
     session.add(UserRole(role_id=role.id, user_id=user.id))
@@ -78,14 +78,14 @@ class TestSecretAccessReduction:
     def test_matches_is_permissive(self) -> None:
         # In-memory matches is intentionally permissive; SQL is authoritative.
         filt = SecretAccessFilter(user_id=uuid.uuid4(), flag="read_enabled")
-        assert filt.matches(Secret(code="x", value="v")) is True
+        assert filt.matches(Secret(code="x")) is True
 
 
 class TestSecretAccessFilterSql:
     async def test_read_filter_admits_only_granted(self, session: AsyncSession) -> None:
         user, secret, _ = await _seed_grant(session, read=True)
         # An ungranted secret must be excluded.
-        other = Secret(code="OTHER", value="v")
+        other = Secret(code="OTHER")
         session.add(other)
         await session.flush()
 
@@ -119,7 +119,7 @@ class TestSecretAccessFilterSql:
 
     async def test_read_filter_admits_direct_user_grant(self, session: AsyncSession) -> None:
         user = User(email="direct@example.com", username="direct")
-        secret = Secret(code="DIRECT_" + uuid.uuid4().hex[:6], value="v")
+        secret = Secret(code="DIRECT_" + uuid.uuid4().hex[:6])
         session.add(user)
         session.add(secret)
         await session.flush()
