@@ -220,9 +220,12 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   `/health`, OIDC discovery (`.well-known/*`), the OAuth2 flow entry points
   that mint/revoke credentials (`/auth/authorize`, `/auth/callback`,
   `/auth/token`, `/auth/refresh`, `/auth/revoke`, `/auth/logout`), the built-in
-  dev IdP (`/auth/dev/*`), and the OpenAI-compatible completion passthrough
-  (`/llm/completion/{llm_id}/chat/completions`, authenticated by the provider
-  API key via a custom proxy header).
+  dev IdP (`/auth/dev/*`). The LLM completion forwarder
+  (`/llm/completion/{llm_id}/{path}`) and the MCP JSON-RPC proxy
+  (`POST|GET|DELETE /mcp/{config_id}`) are **not** exempted: they authenticate
+  the caller through the standard permission dependencies (`USE` on the stored
+  LLM / MCP server config) and inject the stored upstream provider/MCP
+  credential internally — the caller never presents the provider key.
 
 ## 11. Roles & per-entity permission columns
 

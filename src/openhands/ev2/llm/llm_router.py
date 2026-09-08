@@ -19,7 +19,6 @@ provider connection is resolved from the LLM purely to source credentials.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -655,17 +654,60 @@ async def completion(
 
 
 @router.post(
-    "/completion/{llm_id}/chat/completions",
+    "/completion/{llm_id}/{path:path}",
     response_model=None,
     include_in_schema=False,
 )
-async def chat_completions_proxy(
+async def completion_forwarder(
     llm_id: uuid.UUID,
+    path: str,
     request: Request,
     session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[StoredLLM],
+        Depends(depends_permissions(StoredLLM, Action.USE)),
+    ],
+    user_id: Annotated[uuid.UUID, Depends(depends_user_id)],
 ) -> Response | StreamingResponse:
-    """OpenAI-compatible passthrough for SDK clients using the proxy base URL."""
-    llm_service = LLMService(session)
+    """Provider-agnostic raw catch-all forwarder for SDK proxy clients.
+
+    Authenticates the caller through the standard auth dependencies (the
+    caller presents a user-scoped credential — an API key, access token, or
+    session cookie — never the provider key), authorizes ``USE`` on the stored
+    LLM, then forwards the raw request body to the stored provider connection's
+    upstream ``base_url`` with the decrypted provider API key injected via the
+    correct per-provider auth header. The trailing ``path`` captures whatever
+    resource path the SDK/LiteLLM appended (``chat/completions``,
+    ``v1/messages``, ``responses``, …) so the forwarder is provider-agnostic.
+
+    Usage is recorded best-effort for OpenAI-shaped responses (streaming and
+    non-streaming); non-OpenAI provider responses are forwarded without usage
+    parsing, since their shapes vary.
+    """
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required."
+        )
+    llm, conn = await _resolve_forwarder_llm(LLMService(session, perm_filter), llm_id)
+    provider_key = _provider_api_key(conn)
+    if provider_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Provider connection has no api_key to proxy.",
+        )
+    body = await request.body()
+    base_url = conn.base_url or ""
+    target = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = _forwarder_headers(request, conn.provider, provider_key)
+    if _body_requests_stream(body):
+        return await _forwarder_stream(session, user_id, conn, llm, request, target, headers, body)
+    return await _forwarder_json(session, user_id, conn, llm, request, target, headers, body)
+
+
+async def _resolve_forwarder_llm(
+    llm_service: LLMService,
+    llm_id: uuid.UUID,
+) -> tuple[StoredLLM, StoredProviderConnection]:
     try:
         llm = await llm_service.get(llm_id)
         conn = await llm_service.connection_for_llm(llm)
@@ -674,58 +716,63 @@ async def chat_completions_proxy(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"LLM not found: {exc}",
         ) from exc
-
-    provider_key = _provider_api_key(conn)
-    if provider_key is None or not _proxy_auth_matches(request, provider_key):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid proxy credentials.",
-        )
     if conn.base_url is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provider connection has no base_url to proxy.",
         )
+    return llm, conn
 
-    body = await request.body()
-    target = f"{conn.base_url.rstrip('/')}/chat/completions"
-    headers = _proxy_headers(request, provider_key)
-    if _body_requests_stream(body):
-        client = httpx.AsyncClient(timeout=None)
-        upstream = await client.send(
-            client.build_request(
-                "POST",
-                target,
-                content=body,
-                headers=headers,
-                params=request.query_params,
-            ),
-            stream=True,
-        )
-        if upstream.status_code >= 400:
-            content = await upstream.aread()
-            await upstream.aclose()
-            await client.aclose()
-            return Response(
-                content=content,
-                status_code=upstream.status_code,
-                media_type=upstream.headers.get("content-type"),
-            )
-        return StreamingResponse(
-            _proxy_stream_response(
-                session,
-                llm.user_id,
-                conn.id,
-                llm.id,
-                client,
-                upstream,
-                llm.model,
-                llm.config,
-            ),
+
+async def _forwarder_stream(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    conn: StoredProviderConnection,
+    llm: StoredLLM,
+    request: Request,
+    target: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> Response | StreamingResponse:
+    client = httpx.AsyncClient(timeout=None)
+    upstream = await client.send(
+        client.build_request(
+            "POST",
+            target,
+            content=body,
+            headers=headers,
+            params=request.query_params,
+        ),
+        stream=True,
+    )
+    if upstream.status_code >= 400:
+        content = await upstream.aread()
+        await upstream.aclose()
+        await client.aclose()
+        return Response(
+            content=content,
             status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "text/event-stream"),
+            media_type=upstream.headers.get("content-type"),
         )
+    return StreamingResponse(
+        _proxy_stream_response(
+            session, user_id, conn.id, llm.id, client, upstream, llm.model, llm.config
+        ),
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "text/event-stream"),
+    )
 
+
+async def _forwarder_json(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    conn: StoredProviderConnection,
+    llm: StoredLLM,
+    request: Request,
+    target: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> Response:
     async with httpx.AsyncClient(timeout=None) as client:
         upstream = await client.post(
             target,
@@ -735,13 +782,7 @@ async def chat_completions_proxy(
         )
     if 200 <= upstream.status_code < 300:
         await _record_openai_usage(
-            session,
-            llm.user_id,
-            conn.id,
-            llm.id,
-            llm.model,
-            llm.config,
-            upstream,
+            session, user_id, conn.id, llm.id, llm.model, llm.config, upstream
         )
     return Response(
         content=upstream.content,
@@ -758,20 +799,37 @@ def _provider_api_key(conn: StoredProviderConnection) -> str | None:
     return get_encryption_service().decrypt_value(conn.api_key)
 
 
-def _proxy_auth_matches(request: Request, expected_api_key: str) -> bool:
-    supplied = request.headers.get("x-api-key")
-    auth_header = request.headers.get("authorization", "")
-    if supplied is None and auth_header.lower().startswith("bearer "):
-        supplied = auth_header[7:].strip()
-    return supplied is not None and hmac.compare_digest(supplied, expected_api_key)
+# Providers whose native API authenticates with a custom ``x-api-key`` header
+# (and an ``anthropic-version`` header) rather than ``Authorization: Bearer``.
+# Every other supported provider (OpenAI, Deepseek, Mistral, Together, Groq,
+# OpenRouter, …) uses Bearer. Anthropic is the sole common outlier.
+_ANTHROPIC_PROVIDER = "anthropic"
 
 
-def _proxy_headers(request: Request, provider_key: str) -> dict[str, str]:
-    headers = {"authorization": f"Bearer {provider_key}"}
-    for name in ("accept", "content-type"):
+def _forwarder_headers(
+    request: Request,
+    provider: str,
+    provider_key: str,
+) -> dict[str, str]:
+    """Build upstream request headers with the provider key injected.
+
+    The caller's proxy-auth credential (``Authorization``/``x-api-key``) is
+    stripped; the decrypted provider key is injected via the header the
+    provider expects. Provider-specific headers the SDK/LiteLLM set on the
+    incoming request (e.g. ``anthropic-version``) are forwarded unchanged.
+    """
+    headers: dict[str, str] = {}
+    for name in ("accept", "content-type", "user-agent"):
         value = request.headers.get(name)
         if value is not None:
             headers[name] = value
+    if provider == _ANTHROPIC_PROVIDER:
+        headers["x-api-key"] = provider_key
+        anthropic_version = request.headers.get("anthropic-version")
+        if anthropic_version is not None:
+            headers["anthropic-version"] = anthropic_version
+    else:
+        headers["authorization"] = f"Bearer {provider_key}"
     return headers
 
 

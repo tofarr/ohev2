@@ -68,10 +68,6 @@ PERMISSION_DEPENDENCY_OVERRIDES: set[tuple[str, str]] = {
     ("POST", "/auth/dev/login"),
     ("POST", "/auth/dev/token"),
     ("POST", "/auth/dev/refresh"),
-    # OpenAI-compatible completion passthrough (include_in_schema=False). It is
-    # authenticated by the stored LLM's provider API key via a custom proxy
-    # auth header (_proxy_auth_matches), not the standard permission system.
-    ("POST", "/llm/completion/{llm_id}/chat/completions"),
 }
 
 

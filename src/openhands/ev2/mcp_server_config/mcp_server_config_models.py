@@ -116,13 +116,19 @@ class MCPServerConfig(Base):
         *,
         proxy_url: str | None = None,
         use_proxy: bool = True,
+        proxy_credential: str | None = None,
     ) -> dict[str, Any]:
         """Return plaintext SDK ``MCPServer`` constructor fields for this row.
 
         When ``enable_proxy`` and ``use_proxy`` are both ``True`` the effective
-        ``url`` is *proxy_url*; otherwise the stored ``url`` is used. Set
-        ``use_proxy=False`` when serving the proxy endpoint itself so forwarding
-        goes to the stored server URL.
+        ``url`` is *proxy_url* and the SDK ``auth`` is a bearer credential built
+        from *proxy_credential* — a user-scoped credential the proxy
+        authenticates via the standard auth dependencies — **not** the stored
+        upstream MCP auth/headers. The stored upstream credentials are never
+        handed to a proxying SDK client; the proxy resolves and injects them.
+
+        Set ``use_proxy=False`` when serving the proxy endpoint itself so the
+        stored upstream URL and credentials are returned for forwarding.
         """
         data: dict[str, Any] = {"enabled": self.enabled}
         for field in (
@@ -140,15 +146,21 @@ class MCPServerConfig(Base):
             value = getattr(self, field)
             if value is not None:
                 data[field] = value
-        # When proxy is enabled and requested, use the proxy URL instead.
-        if self.enable_proxy and use_proxy and proxy_url is not None:
+        proxying = self.enable_proxy and use_proxy
+        if proxying and proxy_url is not None:
             data["url"] = proxy_url
-        if self.env is not None:
-            data["env"] = decrypt_json_blob(enc, self.env)
-        if self.headers is not None:
-            data["headers"] = decrypt_json_blob(enc, self.headers)
-        if self.auth is not None:
-            data["auth"] = decrypt_json_blob(enc, self.auth)
+        if proxying:
+            # The proxy authenticates the caller's user-scoped credential; the
+            # stored upstream auth/headers are injected by the proxy itself.
+            if proxy_credential is not None:
+                data["auth"] = {"strategy": "bearer", "value": proxy_credential}
+        else:
+            if self.env is not None:
+                data["env"] = decrypt_json_blob(enc, self.env)
+            if self.headers is not None:
+                data["headers"] = decrypt_json_blob(enc, self.headers)
+            if self.auth is not None:
+                data["auth"] = decrypt_json_blob(enc, self.auth)
         return data
 
     def to_mcp_server(
@@ -157,18 +169,18 @@ class MCPServerConfig(Base):
         *,
         proxy_url: str | None = None,
         use_proxy: bool = True,
+        proxy_credential: str | None = None,
     ) -> MCPServer:
-        """Materialize the SDK :class:`MCPServer` represented by this row.
-
-        When ``enable_proxy`` and ``use_proxy`` are both ``True`` the effective
-        ``url`` is *proxy_url*; otherwise the stored ``url`` is used. Set
-        ``use_proxy=False`` when serving the proxy endpoint itself so forwarding
-        goes to the stored server URL.
-        """
+        """Materialize the SDK :class:`MCPServer` represented by this row."""
         from openhands.sdk.mcp.config import MCPServer
 
         return MCPServer.model_validate(
-            self.to_plain_mcp_dict(enc, proxy_url=proxy_url, use_proxy=use_proxy)
+            self.to_plain_mcp_dict(
+                enc,
+                proxy_url=proxy_url,
+                use_proxy=use_proxy,
+                proxy_credential=proxy_credential,
+            )
         )
 
 

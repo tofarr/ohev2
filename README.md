@@ -272,6 +272,58 @@ Expired IdP refresh tokens are pruned by a background sweep.
   `86400`): rows whose `expires_at` is older than this window are deleted.
   `0` deletes any already-expired row regardless of age.
 
+## Proxy endpoints (LLM & MCP)
+
+Both the LLM and MCP features expose a **raw forwarder** that lets an SDK
+client route provider traffic through this service without ever holding the
+upstream provider credential. The caller authenticates with its own
+user-scoped credential (an API key, access token, or session cookie) via the
+standard auth dependencies; the service resolves the stored upstream
+credential and injects it. The provider/MCP key is **never** sent to the
+caller.
+
+### LLM completion forwarder
+
+`POST /llm/completion/{llm_id}/{path}` (not in the OpenAPI schema) is a
+provider-agnostic catch-all: the trailing `{path}` captures whatever resource
+path the SDK/LiteLLM appended (`chat/completions`, `v1/messages`,
+`responses`, …). The endpoint:
+
+1. authenticates the caller via the standard permission dependency
+   (`depends_permissions(StoredLLM, Action.USE)` + `depends_user_id`);
+2. resolves the stored LLM and its provider connection;
+3. decrypts the provider API key and injects it via the correct per-provider
+   header — `Authorization: Bearer <key>` for OpenAI-style providers,
+   `x-api-key` (+ forwarded `anthropic-version`) for Anthropic;
+4. forwards the raw request body to `{connection.base_url}/{path}` and
+   streams the response back (SSE or JSON);
+5. records `llm_usage` best-effort for OpenAI-shaped responses.
+
+When `enable_proxy` is set on a provider connection, `materialize_llm` hands
+the SDK a `base_url` pointing at this forwarder and a **proxy credential**
+(the caller's user-scoped token), not the provider key. The provider key is
+resolved and injected only inside the forwarder.
+
+### MCP JSON-RPC proxy
+
+`POST|GET|DELETE /mcp/{config_id}` (not in the OpenAPI schema) is a streaming
+JSON-RPC proxy for the MCP streamable-http transport. It:
+
+1. authenticates the caller via `depends_permissions(MCPServerConfig,
+   Action.USE)` + `depends_user_id`;
+2. resolves the stored MCP server config and its encrypted upstream
+   auth/headers;
+3. injects the stored upstream credentials and forwards the JSON-RPC request,
+   passing `mcp-session-id` / `mcp-protocol-version` headers both ways;
+4. streams SSE responses back byte-for-byte (POST and GET), and terminates
+   the upstream session on DELETE;
+5. records `mcp_usage` best-effort for `tools/call` invocations (streaming
+   and JSON).
+
+When `enable_proxy` is set on an MCP server config, `materialize_mcp_server`
+hands the SDK a `url` pointing at this proxy and a **proxy credential** (the
+caller's user-scoped token), not the stored upstream auth/headers.
+
 ## LLM usage logging
 
 Every LLM completion is recorded to a daily-partitioned `llm_usage` table

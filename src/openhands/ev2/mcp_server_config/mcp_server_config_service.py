@@ -118,15 +118,25 @@ class MCPServerConfigService:
         config: MCPServerConfig,
         *,
         use_proxy: bool = True,
+        proxy_credential: str | None = None,
     ) -> Any:
         """Materialize the SDK :class:`MCPServer` for a stored config.
 
         When ``enable_proxy`` and ``use_proxy`` are both ``True``, the server's
-        ``url`` points to the MCP proxy endpoint. Set ``use_proxy=False`` when
-        serving the proxy endpoint itself so forwarding goes to the stored URL.
+        ``url`` points to the MCP proxy endpoint and the SDK ``auth`` is a bearer
+        credential built from *proxy_credential* (a user-scoped credential the
+        proxy authenticates via the standard auth dependencies), not the stored
+        upstream auth/headers. Set ``use_proxy=False`` when serving the proxy
+        endpoint itself so the stored upstream URL and credentials are used for
+        forwarding.
         """
         proxy = mcp_proxy_url_for(config.id, config=self._cfg) if config.enable_proxy else None
-        return config.to_mcp_server(self._enc, proxy_url=proxy, use_proxy=use_proxy)
+        return config.to_mcp_server(
+            self._enc,
+            proxy_url=proxy,
+            use_proxy=use_proxy,
+            proxy_credential=proxy_credential,
+        )
 
     async def create(
         self,
