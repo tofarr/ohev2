@@ -317,7 +317,6 @@ class TestCompletion:
 
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
-            headers={"authorization": "Bearer sk-test"},
             json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
         )
 
@@ -743,14 +742,17 @@ class TestChatCompletionsProxy:
         )
         assert resp.status_code == 404
 
-    async def test_invalid_proxy_credentials_returns_401(self, client: AsyncClient) -> None:
+    async def test_invalid_auth_returns_401(self, client: AsyncClient) -> None:
         conn = await _create_connection(
             client, api_key="sk-real", base_url="https://up.example.com"
         )
         llm = await _create_llm(client, conn["id"])
+        # The provider key must NOT authenticate the proxy; only a valid
+        # user-scoped credential (the default bearer token) is accepted.
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": []},
+            headers={"Authorization": "Bearer not-a-valid-token"},
         )
         assert resp.status_code == 401
 
@@ -760,7 +762,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": []},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 422
 
@@ -784,7 +785,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 200
         assert resp.json()["id"] == "chatcmpl-1"
@@ -809,7 +809,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 200
         assert b"hi" in resp.content
@@ -829,7 +828,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 429
 
@@ -846,7 +844,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 500
 
@@ -863,7 +860,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers={"Authorization": "Bearer sk-real"},
         )
         assert resp.status_code == 200
 
@@ -882,7 +878,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 200
 
@@ -902,7 +897,6 @@ class TestChatCompletionsProxy:
         resp = await client.post(
             f"/llm/completion/{llm['id']}/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
-            headers={"x-api-key": "sk-real"},
         )
         assert resp.status_code == 200
 

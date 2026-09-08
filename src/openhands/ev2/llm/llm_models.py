@@ -116,21 +116,33 @@ class StoredProviderConnection(Base):
         *,
         proxy_url: str | None = None,
         use_proxy: bool = True,
+        proxy_credential: str | None = None,
     ) -> ProviderConnection:
         """Materialize the SDK :class:`ProviderConnection` for this row.
 
-        ``api_key`` is decrypted via *enc* (returns ``None`` when unset). When
-        ``enable_proxy`` and ``use_proxy`` are ``True`` the effective
-        ``base_url`` is *proxy_url*; otherwise the stored ``base_url`` is used.
-        ``id`` is stringified and timestamps are Unix epoch seconds.
+        When ``enable_proxy`` and ``use_proxy`` are ``True`` the effective
+        ``base_url`` is *proxy_url* and the SDK ``api_key`` is *proxy_credential*
+        — a user-scoped credential the proxy authenticates via the standard auth
+        dependencies — **not** the provider key. The provider key is never handed
+        to a proxying SDK client; the proxy resolves and injects it upstream.
+
+        When ``use_proxy`` is ``False`` (serving the proxy endpoint itself, or
+        the SDK-mediated ``/completion`` endpoint), the stored ``base_url`` and
+        the decrypted provider ``api_key`` are used so the call goes direct to
+        the upstream provider.
         """
         from openhands.sdk.llm.provider_connection_store import ProviderConnection
 
-        api_key_plaintext: str | None = None
-        if self.api_key is not None:
-            api_key_plaintext = enc.decrypt_value(self.api_key)
-
-        effective_base_url = proxy_url if self.enable_proxy and use_proxy else self.base_url
+        proxying = self.enable_proxy and use_proxy
+        if proxying:
+            effective_base_url = proxy_url
+            api_key_value = proxy_credential
+        else:
+            effective_base_url = self.base_url
+            api_key_plaintext: str | None = None
+            if self.api_key is not None:
+                api_key_plaintext = enc.decrypt_value(self.api_key)
+            api_key_value = api_key_plaintext
 
         now = int(time.time())
         created = int(self.created_at.timestamp()) if self.created_at is not None else now
@@ -140,7 +152,7 @@ class StoredProviderConnection(Base):
             id=str(self.id),
             display_name=self.display_name,
             provider=self.provider,
-            api_key=SecretStr(api_key_plaintext) if api_key_plaintext else None,
+            api_key=SecretStr(api_key_value) if api_key_value else None,
             base_url=effective_base_url,
             created_at=created,
             updated_at=updated,

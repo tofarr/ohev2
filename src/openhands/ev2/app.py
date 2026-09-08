@@ -34,6 +34,9 @@ from openhands.ev2.feature_flag.feature_flag_router import (
     user_overrides_router as feature_flag_user_assignment_router,
 )
 from openhands.ev2.llm.llm_router import router as llm_router
+from openhands.ev2.mcp_server_config.mcp_proxy_router import (
+    router as mcp_proxy_router,
+)
 from openhands.ev2.mcp_server_config.mcp_server_config_router import (
     router as mcp_server_config_router,
 )
@@ -293,6 +296,7 @@ def create_app() -> FastAPI:
     app.include_router(feature_flag_user_assignment_router)
     app.include_router(llm_router)
     app.include_router(mcp_server_config_router)
+    app.include_router(mcp_proxy_router)
     app.include_router(role_mcp_server_config_permission_router)
     app.include_router(role_router)
     app.include_router(user_role_router)

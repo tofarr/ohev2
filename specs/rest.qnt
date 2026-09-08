@@ -74,7 +74,9 @@ module rest {
   // are not assembled; the resource/kind pair identifies the route). These
   // are the only routes that may bypass the permission-dependency requirement:
   // the liveness probe, OIDC discovery, the OAuth2 credential-minting flow,
-  // the built-in dev IdP, and the OpenAI-compatible completion passthrough.
+  // and the built-in dev IdP. The LLM/MCP proxy forwarders authenticate via
+  // the standard permission dependencies (USE on the stored profile), so they
+  // are NOT exempted.
   pure def isPublicRoute(route: Route): bool =
     (route.kind == KCollection and route.resource == "health")
     or (route.resource == ".well-known" and route.kind == KCollection)
@@ -88,7 +90,6 @@ module rest {
     or (route.resource == "auth-dev" and route.actionName == "login")
     or (route.resource == "auth-dev" and route.actionName == "token")
     or (route.resource == "auth-dev" and route.actionName == "refresh")
-    or (route.resource == "llm-completion-proxy" and route.actionName == "chat-completions")
 
   // A route satisfies the protection invariant iff it is protected or it is
   // a member of the public exemption set.

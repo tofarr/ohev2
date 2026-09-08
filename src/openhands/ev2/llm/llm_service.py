@@ -338,7 +338,7 @@ class LLMService:
             raise LLMPermissionScopeError(str(payload.display_name))
         # Validate the config blob materializes an SDK LLM before persisting.
         try:
-            llm.to_llm(conn.to_provider_connection(self._enc))
+            llm.to_llm(conn.to_provider_connection(self._enc, use_proxy=False))
         except Exception as exc:
             raise LLMConfigError(str(exc)) from exc
         self._session.add(llm)
@@ -398,7 +398,7 @@ class LLMService:
         if conn is None:
             raise LLMPermissionScopeError(str(llm.provider_connection_id))
         try:
-            llm.to_llm(conn.to_provider_connection(self._enc))
+            llm.to_llm(conn.to_provider_connection(self._enc, use_proxy=False))
         except Exception as exc:
             raise LLMConfigError(str(exc)) from exc
         await self._session.flush()
@@ -514,6 +514,7 @@ class LLMService:
         *,
         config: AppConfig | None = None,
         use_proxy: bool = True,
+        proxy_credential: str | None = None,
     ) -> LLM:
         """Materialize the SDK :class:`LLM` for a stored profile.
 
@@ -521,11 +522,22 @@ class LLMService:
         builds the SDK :class:`ProviderConnection`, and returns
         ``llm.to_llm(connection)``. Set ``use_proxy=False`` when serving the
         proxy endpoint itself so forwarding goes to the stored provider URL.
+
+        When proxying (``use_proxy=True`` on an ``enable_proxy`` connection),
+        *proxy_credential* — a user-scoped credential the proxy authenticates
+        via the standard auth dependencies — is used as the SDK ``api_key``
+        instead of the provider key. The provider key is never embedded in a
+        proxying SDK object; the proxy resolves and injects it upstream.
         """
         cfg = config or self._cfg
         conn = await self.connection_for_llm(llm)
         proxy = proxy_url_for(llm.id, config=cfg) if use_proxy and conn.enable_proxy else None
-        sdk_conn = conn.to_provider_connection(self._enc, proxy_url=proxy, use_proxy=use_proxy)
+        sdk_conn = conn.to_provider_connection(
+            self._enc,
+            proxy_url=proxy,
+            use_proxy=use_proxy,
+            proxy_credential=proxy_credential,
+        )
         return llm.to_llm(sdk_conn)
 
 
