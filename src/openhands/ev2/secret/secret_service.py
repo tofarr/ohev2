@@ -1,27 +1,39 @@
-"""Service layer for the secret feature (the ``secrets`` table).
+"""Service layer for the typed secret feature.
 
-The service holds the effective ``perm_filter`` (the search filter from the
-centralized permission checker) as a field, set at construction, that scopes
-search/get/update/delete SQL to secrets the principal may act on. For
-``SecretAccess`` policies that filter is a :class:`SecretAccessFilter` keyed on
-the action's grant flag; for ``Permitted`` it is everything.
+Two services live here:
 
-The ``value`` is encrypted at rest via the encryption service (AGENTS.md §9)
-and decrypted only when materializing a :class:`SecretRead` DTO. The creating
-principal receives a direct ``user_secret_permissions`` grant; the secret row
-itself has no singular owner.
+* :class:`SecretService` — CRUD over the ``secrets`` umbrella table. It holds
+  the effective ``perm_filter`` (the search filter from the centralized
+  permission checker) as a field, set at construction, that scopes
+  search/get/update/delete SQL to secrets the principal may act on. The
+  ``value`` is encrypted at rest via the encryption service (AGENTS.md §9) and
+  stored in a type-specific detail row (``static_secret_details``); it is never
+  returned by this service — :meth:`to_read` omits the value. The creating
+  principal receives a direct ``user_secret_permissions`` grant.
+
+* :class:`SecretValueService` — the read-only reveal projection behind
+  ``/secret-values``. It takes two filters (read-access + value-permission) and
+  ANDs them, so a secret is revealed only when *both* admit it (defense in
+  depth, AGENTS.md §12). It loads the detail row, decrypts, and returns
+  :class:`SecretValueRead`.
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import Secret, UserSecretPermission
+from openhands.ev2.secret.secret_models import (
+    Secret,
+    SecretType,
+    StaticSecretDetail,
+    UserSecretPermission,
+)
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
@@ -31,9 +43,10 @@ from openhands.ev2.secret.secret_schemas import (
     SecretRead,
     SecretSearchFilter,
     SecretUpdate,
+    SecretValueRead,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import ALL, SearchFilter
+from openhands.ev2.util.search_filter import ALL, AndSearchFilter, SearchFilter
 
 
 class SecretNotFoundError(Exception):
@@ -50,6 +63,23 @@ class SecretPermissionScopeError(Exception):
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted to the principal."""
+
+
+class SecretValueTypeError(Exception):
+    """Raised when a value is supplied for a secret whose type cannot hold one.
+
+    ``value`` is allowed only for ``type='static'`` secrets; supplying it on an
+    oauth secret (which has no detail table yet) is a 422 client error.
+    """
+
+
+class SecretValueNotFoundError(Exception):
+    """Raised when a reveal target has no decryptable detail row.
+
+    A static secret missing its ``static_secret_details`` row is a data
+    integrity break; an oauth secret has no detail table yet. Both surface as
+    404 from the reveal endpoints.
+    """
 
 
 class SecretService:
@@ -72,11 +102,11 @@ class SecretService:
         self._enc = encryption_service or get_encryption_service()
 
     def to_read(self, secret: Secret) -> SecretRead:
-        """Materialize a :class:`SecretRead`, decrypting the at-rest value."""
+        """Materialize a metadata-only :class:`SecretRead` (no value)."""
         return SecretRead(
             id=secret.id,
             code=secret.code,
-            value=self._enc.decrypt_value(secret.value),
+            type=secret.type,
             description=secret.description,
             created_at=secret.created_at,
             updated_at=secret.updated_at,
@@ -85,12 +115,13 @@ class SecretService:
     async def create(self, payload: SecretCreate, *, user_id: uuid.UUID) -> Secret:
         """Create a secret. Raises :class:`SecretCodeConflictError` on a duplicate code.
 
-        The value is encrypted at rest before persistence. The creating
-        principal receives a direct read/update/delete grant.
+        For ``type='static'`` the value is encrypted at rest and stored in a
+        :class:`StaticSecretDetail` row. The creating principal receives a
+        direct read/update/delete grant.
         """
         secret = Secret(
             code=payload.code,
-            value=self._enc.encrypt_value(payload.value.get_secret_value()),
+            type=payload.type,
             description=payload.description,
         )
         if not self._perm_filter.matches(secret):
@@ -98,21 +129,33 @@ class SecretService:
         self._session.add(secret)
         try:
             await self._session.flush()
-            self._session.add(
-                UserSecretPermission(
-                    user_id=user_id,
-                    secret_id=secret.id,
-                    read_enabled=True,
-                    update_enabled=True,
-                    delete_enabled=True,
-                )
-            )
+            if payload.type == SecretType.STATIC:
+                self._session.add(self._make_static_detail(secret.id, payload))
+            self._session.add(self._make_owner_grant(secret.id, user_id))
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()
             raise _classify_integrity_error(exc, payload) from exc
         await self._session.refresh(secret)
         return secret
+
+    def _make_static_detail(
+        self, secret_id: uuid.UUID, payload: SecretCreate
+    ) -> StaticSecretDetail:
+        value = payload.value.get_secret_value() if payload.value is not None else ""
+        return StaticSecretDetail(
+            secret_id=secret_id,
+            value=self._enc.encrypt_value(value),
+        )
+
+    def _make_owner_grant(self, secret_id: uuid.UUID, user_id: uuid.UUID) -> UserSecretPermission:
+        return UserSecretPermission(
+            user_id=user_id,
+            secret_id=secret_id,
+            read_enabled=True,
+            update_enabled=True,
+            delete_enabled=True,
+        )
 
     async def get(self, secret_id: uuid.UUID) -> Secret:
         """Retrieve a secret by id, scoped by ``perm_filter``.
@@ -160,12 +203,17 @@ class SecretService:
         return secrets, next_cursor
 
     async def update(self, secret_id: uuid.UUID, payload: SecretUpdate) -> Secret:
-        """Partially update a secret. Raises on missing/scoped-out secret or code conflict."""
+        """Partially update a secret. Raises on missing/scoped-out secret or code conflict.
+
+        If ``payload.value`` is set and the secret's type is ``oauth``, raises
+        :class:`SecretValueTypeError` (422). For ``static`` the detail row's
+        value is re-encrypted and upserted.
+        """
         secret = await self.get(secret_id)
         if payload.code is not None:
             secret.code = payload.code
         if payload.value is not None:
-            secret.value = self._enc.encrypt_value(payload.value.get_secret_value())
+            await self._apply_value_update(secret, payload.value)
         if payload.description is not None:
             secret.description = payload.description
         try:
@@ -175,6 +223,26 @@ class SecretService:
             raise _classify_integrity_error(exc, payload) from exc
         await self._session.refresh(secret)
         return secret
+
+    async def _apply_value_update(self, secret: Secret, value: object) -> None:
+        if secret.type == SecretType.OAUTH:
+            raise SecretValueTypeError(str(secret.id))
+        await self._upsert_static_detail(secret.id, value)
+
+    async def _upsert_static_detail(self, secret_id: uuid.UUID, value: object) -> None:
+        plaintext = getattr(value, "get_secret_value", lambda: str(value))()
+        detail = await self._load_static_detail(secret_id)
+        ciphertext = self._enc.encrypt_value(plaintext)
+        if detail is None:
+            self._session.add(StaticSecretDetail(secret_id=secret_id, value=ciphertext))
+        else:
+            detail.value = ciphertext
+
+    async def _load_static_detail(self, secret_id: uuid.UUID) -> StaticSecretDetail | None:
+        result = await self._session.execute(
+            select(StaticSecretDetail).where(StaticSecretDetail.secret_id == secret_id)
+        )
+        return result.scalar_one_or_none()
 
     async def delete(self, secret_id: uuid.UUID) -> None:
         """Delete a secret. Raises :class:`SecretNotFoundError` if missing/out of scope."""
@@ -254,6 +322,132 @@ class SecretService:
         return int(result.scalar_one())
 
 
+class SecretValueService:
+    """Read-only reveal projection behind ``/secret-values``.
+
+    Constructed per request with the request-scoped session, the read-access
+    filter (``secret_permission`` READ) and the value-reveal filter
+    (``secret_value_permission``). The two filters are ANDed so a secret is
+    revealed only when *both* admit it (defense in depth, AGENTS.md §12). It
+    loads the type-specific detail row, decrypts, and returns
+    :class:`SecretValueRead`.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        read_filter: SearchFilter[Secret],
+        value_filter: SearchFilter[Secret],
+        *,
+        encryption_service: EncryptionService | None = None,
+    ) -> None:
+        self._session = session
+        self._read_filter = read_filter
+        self._value_filter = value_filter
+        self._enc = encryption_service or get_encryption_service()
+
+    def _combined(self) -> SearchFilter[Secret]:
+        return AndSearchFilter(filters=[self._read_filter, self._value_filter])
+
+    async def get(self, secret_id: uuid.UUID) -> SecretValueRead:
+        """Reveal one secret by id. 404 (via :class:`SecretValueNotFoundError`) if
+        not both-admitted or missing a detail row."""
+        stmt = self._combined().filter_sql(select(Secret).where(Secret.id == secret_id))
+        secret = (await self._session.execute(stmt)).scalar_one_or_none()
+        if secret is None:
+            raise SecretValueNotFoundError(str(secret_id))
+        plaintext = await self._decrypt_value(secret)
+        return self._to_value_read(secret, plaintext)
+
+    async def get_many(self, secret_ids: list[uuid.UUID]) -> list[SecretValueRead | None]:
+        """Reveal secrets by ids in a single query, scoped by the combined filter.
+
+        Returns a list positionally aligned with *secret_ids*; ``None`` where
+        missing, out of scope, or missing a detail row. An empty input yields
+        an empty list.
+        """
+        if not secret_ids:
+            return []
+        stmt = self._combined().filter_sql(select(Secret).where(Secret.id.in_(secret_ids)))
+        secrets = list((await self._session.execute(stmt)).scalars().all())
+        by_id = {s.id: s for s in secrets}
+        results: list[SecretValueRead | None] = []
+        for sid in secret_ids:
+            secret = by_id.get(sid)
+            if secret is None:
+                results.append(None)
+                continue
+            plaintext = await self._decrypt_value_or_none(secret)
+            results.append(None if plaintext is None else self._to_value_read(secret, plaintext))
+        return results
+
+    async def search_values(
+        self,
+        *,
+        cursor: uuid.UUID | None = None,
+        limit: int = 50,
+        search_filter: SecretSearchFilter | None = None,
+    ) -> tuple[list[SecretValueRead], uuid.UUID | None]:
+        """Reveal secrets ordered by id, keyed-pagination via cursor."""
+        stmt = self._combined().filter_sql(select(Secret).order_by(Secret.id))
+        stmt = self._apply_optional_filter(stmt, search_filter)
+        if cursor is not None:
+            stmt = stmt.where(Secret.id > cursor)
+        stmt = stmt.limit(limit)
+        secrets = list((await self._session.execute(stmt)).scalars().all())
+        reads = await self._materialize_values(secrets)
+        next_cursor = secrets[-1].id if len(secrets) == limit else None
+        return reads, next_cursor
+
+    def _apply_optional_filter(
+        self,
+        stmt: Select[Any],
+        search_filter: SecretSearchFilter | None,
+    ) -> Select[Any]:
+        if search_filter is None:
+            return stmt
+        return search_filter.filter_sql(stmt)
+
+    async def _materialize_values(self, secrets: list[Secret]) -> list[SecretValueRead]:
+        reads: list[SecretValueRead] = []
+        for secret in secrets:
+            plaintext = await self._decrypt_value_or_none(secret)
+            if plaintext is None:
+                continue
+            reads.append(self._to_value_read(secret, plaintext))
+        return reads
+
+    def _to_value_read(self, secret: Secret, plaintext: str) -> SecretValueRead:
+        return SecretValueRead(
+            id=secret.id,
+            code=secret.code,
+            type=secret.type,
+            value=plaintext,
+        )
+
+    async def _decrypt_value(self, secret: Secret) -> str:
+        if secret.type == SecretType.OAUTH:
+            raise SecretValueNotFoundError(str(secret.id))
+        detail = await self._load_static_detail(secret.id)
+        if detail is None:
+            raise SecretValueNotFoundError(str(secret.id))
+        return self._enc.decrypt_value(detail.value)
+
+    async def _decrypt_value_or_none(self, secret: Secret) -> str | None:
+        if secret.type == SecretType.OAUTH:
+            return None
+        detail = await self._load_static_detail(secret.id)
+        if detail is None:
+            return None
+        return self._enc.decrypt_value(detail.value)
+
+    async def _load_static_detail(self, secret_id: uuid.UUID) -> StaticSecretDetail | None:
+        result = await self._session.execute(
+            select(StaticSecretDetail).where(StaticSecretDetail.secret_id == secret_id)
+        )
+        return result.scalar_one_or_none()
+
+
 def _classify_integrity_error(
     exc: IntegrityError, payload: SecretCreate | SecretUpdate
 ) -> Exception:
@@ -273,4 +467,7 @@ __all__ = [
     "SecretNotFoundError",
     "SecretPermissionScopeError",
     "SecretService",
+    "SecretValueNotFoundError",
+    "SecretValueService",
+    "SecretValueTypeError",
 ]

@@ -10,7 +10,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.secret.secret_models import RoleSecretPermission, Secret, UserSecretPermission
+from openhands.ev2.secret.secret_models import (
+    RoleSecretPermission,
+    Secret,
+    SecretType,
+    StaticSecretDetail,
+    UserSecretPermission,
+)
 from openhands.ev2.user.user_models import User
 
 
@@ -25,27 +31,27 @@ async def _seed_user(
 
 class TestSecretModel:
     async def test_create_secret_defaults(self, session: AsyncSession) -> None:
-        secret = Secret(code="API_KEY", value="enc-ciphertext")
+        secret = Secret(code="API_KEY")
         session.add(secret)
         await session.flush()
         await session.refresh(secret)
         assert isinstance(secret.id, uuid.UUID)
         assert secret.code == "API_KEY"
-        assert secret.value == "enc-ciphertext"
+        assert secret.type == SecretType.STATIC
         assert secret.description is None
         assert secret.created_at is not None
         assert secret.updated_at is not None
 
     async def test_code_is_unique(self, session: AsyncSession) -> None:
-        session.add(Secret(code="DUP", value="v1"))
+        session.add(Secret(code="DUP"))
         await session.flush()
-        session.add(Secret(code="DUP", value="v2"))
+        session.add(Secret(code="DUP"))
         with pytest.raises(IntegrityError):
             await session.flush()
         await session.rollback()
 
     async def test_description_round_trips(self, session: AsyncSession) -> None:
-        secret = Secret(code="WITH_DESC", value="v", description="db password")
+        secret = Secret(code="WITH_DESC", description="db password")
         session.add(secret)
         await session.flush()
         await session.refresh(secret)
@@ -55,7 +61,7 @@ class TestSecretModel:
         self, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        secret = Secret(code="CASC", value="v")
+        secret = Secret(code="CASC")
         session.add(secret)
         await session.flush()
         link = UserSecretPermission(user_id=user.id, secret_id=secret.id, read_enabled=True)
@@ -77,13 +83,43 @@ class TestSecretModel:
         assert found_link is None
 
 
+class TestStaticSecretDetailModel:
+    async def test_detail_is_one_to_one(self, session: AsyncSession) -> None:
+        secret = Secret(code="DET_UNIQ")
+        session.add(secret)
+        await session.flush()
+        session.add(StaticSecretDetail(secret_id=secret.id, value="enc-ciphertext"))
+        await session.flush()
+        session.add(StaticSecretDetail(secret_id=secret.id, value="enc-ciphertext-2"))
+        with pytest.raises(IntegrityError):
+            await session.flush()
+        await session.rollback()
+
+    async def test_secret_delete_cascades_to_detail(self, session: AsyncSession) -> None:
+        secret = Secret(code="DET_CASC")
+        session.add(secret)
+        await session.flush()
+        detail = StaticSecretDetail(secret_id=secret.id, value="enc-ciphertext")
+        session.add(detail)
+        await session.flush()
+        detail_id = detail.id
+        await session.delete(secret)
+        await session.flush()
+        found = (
+            await session.execute(
+                select(StaticSecretDetail).where(StaticSecretDetail.id == detail_id)
+            )
+        ).scalar_one_or_none()
+        assert found is None
+
+
 class TestRoleSecretPermissionModel:
     async def _seed_role_secret_permission_user(
         self, session: AsyncSession
     ) -> tuple[Role, Secret, User]:
         user = await _seed_user(session)
         role = Role(name="r-" + uuid.uuid4().hex[:8])
-        secret = Secret(code="S_" + uuid.uuid4().hex[:6], value="v")
+        secret = Secret(code="S_" + uuid.uuid4().hex[:6])
         session.add(role)
         session.add(secret)
         await session.flush()
@@ -151,7 +187,7 @@ class TestUserSecretPermissionModel:
             username="usp-" + uuid.uuid4().hex[:8],
             email=f"usp-{uuid.uuid4().hex[:8]}@example.com",
         )
-        secret = Secret(code="USP_" + uuid.uuid4().hex[:6], value="v")
+        secret = Secret(code="USP_" + uuid.uuid4().hex[:6])
         session.add(secret)
         await session.flush()
         return user, secret

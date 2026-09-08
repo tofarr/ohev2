@@ -130,3 +130,32 @@ class SecretAccess(Permission):
         if flag is None:
             return NoneSearchFilter[Any]()
         return SecretAccessFilter[Any](user_id=user_id, flag=flag)
+
+
+class SecretValueAccess(Permission):
+    """Permission policy for the ``/secret-values`` reveal projection.
+
+    Stored on the ``secret_value_permission`` column (separate from
+    ``secret_permission``), this policy reuses the same per-secret grant logic
+    as :class:`SecretAccess`: a secret's value is revealable iff the principal
+    has a direct :class:`UserSecretPermission` row or one of their roles has a
+    :class:`RoleSecretPermission` row for that secret with ``read_enabled``.
+    The ``/secret-values`` service ANDs this filter with the read-access
+    filter, so a secret is revealed only when *both* admit it (defense in
+    depth, AGENTS.md §12).
+
+    ``CREATE``/``UPDATE``/``DELETE`` are not meaningful for a read-only
+    projection; this policy reduces every action to the read grant shape
+    (keyed on ``read_enabled``), and ``Permitted`` on the column bypasses the
+    per-secret grants entirely (an admin role sees every secret's value).
+    """
+
+    def to_search_filter(
+        self,
+        user_id: uuid.UUID | None,
+        action: Action,
+    ) -> SearchFilter[Any]:
+        _ = action  # reveal is read-only; every action uses the read grant shape
+        if user_id is None:
+            return NoneSearchFilter[Any]()
+        return SecretAccessFilter[Any](user_id=user_id, flag="read_enabled")

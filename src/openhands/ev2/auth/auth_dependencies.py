@@ -719,7 +719,40 @@ async def resolve_permission_filter(
     column = _policy_attr_for(model_type)
     if column is None:
         return None
+    return await _resolve_column_filter(column, action, user_id, request, session, token)
 
+
+async def resolve_permission_filter_for_column(
+    column: str,
+    action: Action,
+    request: Request,
+    session: AsyncSession,
+    token: AuthToken | None,
+) -> SearchFilter[Any] | None:
+    """Reduce the principal's role policies for a named column to one filter.
+
+    Like :func:`resolve_permission_filter` but resolves a policy by its Role
+    ``Permission`` column name instead of by ORM model type. This is required
+    for ``secret_value_permission`` — a non-CRUD projection column that
+    governs the ``/secret-values`` reveal surface rather than a table. There is
+    no ORM model registered 1:1 against it via
+    :func:`register_resource_policy` (the registry maps a model type to one
+    column, and ``Secret`` is already mapped to ``secret_permission``), so the
+    value-permission is resolved by name only (AGENTS.md §12).
+    """
+    user_id = token.user_id if token is not None else None
+    return await _resolve_column_filter(column, action, user_id, request, session, token)
+
+
+async def _resolve_column_filter(
+    column: str,
+    action: Action,
+    user_id: uuid.UUID | None,
+    request: Request,
+    session: AsyncSession,
+    token: AuthToken | None,
+) -> SearchFilter[Any] | None:
+    """Shared reduction of a named column's policies to one filter, or ``None``."""
     filters: list[SearchFilter[Any]] = []
     async for role in depends_roles(request, session, token):
         policy = _role_policy_for(role, column)
@@ -731,6 +764,34 @@ async def resolve_permission_filter(
     if effective is None or isinstance(effective, NoneSearchFilter):
         return None
     return effective
+
+
+def depends_secret_value_permission() -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
+    """FastAPI dependency that authorizes value-reveal on the secret projection.
+
+    Resolves the ``secret_value_permission`` column (by name, not by model —
+    see :func:`resolve_permission_filter_for_column`) for ``READ`` and raises
+    403 when the result is ``None`` (fail-closed). The returned filter is ANDed
+    with the read-access filter inside :class:`SecretValueService`, so a secret
+    is revealed only when both admit it.
+    """
+
+    async def _guard(
+        request: Request,
+        session: SessionDep,
+        token: Annotated[AuthToken | None, Depends(depends_access_token)],
+    ) -> SearchFilter[Any]:
+        effective = await resolve_permission_filter_for_column(
+            "secret_value_permission", Action.READ, request, session, token
+        )
+        if effective is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: action=read resource=secret_value",
+            )
+        return effective
+
+    return _guard
 
 
 def _policy_attr_for(model_type: type) -> str | None:
@@ -781,7 +842,9 @@ __all__ = [
     "depends_permissions",
     "depends_permissions_or_none",
     "depends_roles",
+    "depends_secret_value_permission",
     "depends_user_id",
     "register_resource_policy",
     "resolve_permission_filter",
+    "resolve_permission_filter_for_column",
 ]

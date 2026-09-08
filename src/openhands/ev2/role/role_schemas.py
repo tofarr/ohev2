@@ -54,6 +54,14 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for secret resources; null = deny.",
     )
+    secret_value_permission: Permission | None = Field(
+        default=None,
+        description=(
+            "Permission policy for the /secret-values reveal projection; "
+            "null = deny. Not registered 1:1 (governs a projection); resolved "
+            "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
+        ),
+    )
     secret_grant_permission: Permission | None = Field(
         default=None,
         description="Permission policy for role-secret grant resources; null = deny.",
@@ -162,6 +170,14 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for secret resources; null = deny.",
     )
+    secret_value_permission: Permission | None = Field(
+        default=None,
+        description=(
+            "Permission policy for the /secret-values reveal projection; "
+            "null = deny. Not registered 1:1 (governs a projection); resolved "
+            "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
+        ),
+    )
     secret_grant_permission: Permission | None = Field(
         default=None,
         description="Permission policy for role-secret grant resources; null = deny.",
@@ -252,6 +268,7 @@ class RoleRead(BaseModel):
     oauth_client_permission: Permission | None
     cors_origin_permission: Permission | None
     secret_permission: Permission | None
+    secret_value_permission: Permission | None
     secret_grant_permission: Permission | None
     mcp_server_config_permission: Permission | None
     mcp_server_config_grant_permission: Permission | None

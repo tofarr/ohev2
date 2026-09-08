@@ -5,9 +5,16 @@
 // by the principal. Creating a secret also creates a full direct user grant for
 // the creator so they can manage the secret without making the secret row owned
 // by that user.
+//
+// Typed secrets: a Secret carries a secretType discriminator ("static" | "oauth").
+// The sensitive payload lives in a type-specific detail table (not modelled here
+// beyond its existence). The /secrets surface returns metadata only; decrypted
+// plaintext is revealed solely through the /secret-values projection, which
+// requires membership in both the read-grant set and the SecretValuePermission
+// set (defense in depth).
 
 module secret {
-  type Secret = { id: str, code: str }
+  type Secret = { id: str, code: str, secretType: str }
 
   type RoleSecretPermission = {
     roleId: str,
@@ -28,11 +35,13 @@ module secret {
   var secrets: Set[Secret]
   var roleSecretPermissions: Set[RoleSecretPermission]
   var userSecretPermissions: Set[UserSecretPermission]
+  var secretValuePermissions: Set[str]
 
   action init = all {
     secrets' = Set(),
     roleSecretPermissions' = Set(),
     userSecretPermissions' = Set(),
+    secretValuePermissions' = Set(),
   }
 
   pure def flagAllows(readEnabled: bool, updateEnabled: bool, deleteEnabled: bool, act: str): bool =
@@ -63,6 +72,26 @@ module secret {
           and grant.secretId == secretId
           and roleGrantAllows(grant, act))
 
+  pure def canReadSecret(
+    userId: str,
+    roleIds: Set[str],
+    secretId: str,
+    directGrants: Set[UserSecretPermission],
+    roleGrants: Set[RoleSecretPermission],
+  ): bool =
+    canAccessSecret(userId, roleIds, secretId, "read", directGrants, roleGrants)
+
+  pure def canRevealValue(
+    userId: str,
+    roleIds: Set[str],
+    secretId: str,
+    directGrants: Set[UserSecretPermission],
+    roleGrants: Set[RoleSecretPermission],
+    valuePermittedUsers: Set[str],
+  ): bool =
+    canReadSecret(userId, roleIds, secretId, directGrants, roleGrants)
+      and valuePermittedUsers.contains(userId)
+
   action createSecret(userId: str, newSecret: Secret): bool = all {
     not(secrets.exists(secret => secret.id == newSecret.id)),
     not(secrets.exists(secret => secret.code == newSecret.code)),
@@ -75,6 +104,7 @@ module secret {
       updateEnabled: true,
       deleteEnabled: true,
     })),
+    secretValuePermissions' = secretValuePermissions,
     true,
   }
 
@@ -85,6 +115,7 @@ module secret {
     secrets' = secrets,
     roleSecretPermissions' = roleSecretPermissions,
     userSecretPermissions' = userSecretPermissions.union(Set(grant)),
+    secretValuePermissions' = secretValuePermissions,
     true,
   }
 
@@ -95,6 +126,16 @@ module secret {
     secrets' = secrets,
     roleSecretPermissions' = roleSecretPermissions.union(Set(grant)),
     userSecretPermissions' = userSecretPermissions,
+    secretValuePermissions' = secretValuePermissions,
+    true,
+  }
+
+  action grantSecretValuePermission(userId: str): bool = all {
+    not(secretValuePermissions.contains(userId)),
+    secrets' = secrets,
+    roleSecretPermissions' = roleSecretPermissions,
+    userSecretPermissions' = userSecretPermissions,
+    secretValuePermissions' = secretValuePermissions.union(Set(userId)),
     true,
   }
 
@@ -103,6 +144,7 @@ module secret {
     secrets' = secrets.filter(secret => secret.id != secretId),
     roleSecretPermissions' = roleSecretPermissions.filter(grant => grant.secretId != secretId),
     userSecretPermissions' = userSecretPermissions.filter(grant => grant.secretId != secretId),
+    secretValuePermissions' = secretValuePermissions,
     true,
   }
 
@@ -110,11 +152,15 @@ module secret {
     secrets' = secrets,
     roleSecretPermissions' = roleSecretPermissions,
     userSecretPermissions' = userSecretPermissions.filter(grant => grant.userId != userId),
+    secretValuePermissions' = secretValuePermissions.filter(u => u != userId),
     true,
   }
 
   val secretCodesUnique: bool =
     secrets.forall(a => secrets.forall(b => (a.code == b.code) implies a.id == b.id))
+
+  val secretTypesValid: bool =
+    secrets.forall(secret => secret.secretType == "static" or secret.secretType == "oauth")
 
   val userSecretPermissionsUnique: bool =
     userSecretPermissions.forall(a => userSecretPermissions.forall(b =>
@@ -128,7 +174,7 @@ module secret {
 
   run creatorReceivesDirectGrant = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
+      .then(createSecret("u1", { id: "s1", code: "API_KEY", secretType: "static" }))
       .then(all {
         assert(canAccessSecret("u1", Set(), "s1", "read", userSecretPermissions, roleSecretPermissions)),
         assert(canAccessSecret("u1", Set(), "s1", "update", userSecretPermissions, roleSecretPermissions)),
@@ -136,12 +182,13 @@ module secret {
         secrets' = secrets,
         roleSecretPermissions' = roleSecretPermissions,
         userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
       })
   }
 
   run directUserGrantAllowsRead = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
+      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
       .then(grantUserSecretPermission({
         userId: "u2",
         secretId: "s1",
@@ -155,12 +202,13 @@ module secret {
         secrets' = secrets,
         roleSecretPermissions' = roleSecretPermissions,
         userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
       })
   }
 
   run roleGrantAllowsRead = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
+      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
       .then(grantRoleSecretPermission({
         roleId: "r1",
         secretId: "s1",
@@ -174,12 +222,13 @@ module secret {
         secrets' = secrets,
         roleSecretPermissions' = roleSecretPermissions,
         userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
       })
   }
 
   run secretHasNoSingularOwner = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
+      .then(createSecret("u1", { id: "s1", code: "API_KEY", secretType: "static" }))
       .then(deleteUser("u1"))
       .then(all {
         assert(secrets.exists(secret => secret.id == "s1")),
@@ -187,6 +236,38 @@ module secret {
         secrets' = secrets,
         roleSecretPermissions' = roleSecretPermissions,
         userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
+      })
+  }
+
+  run valueRevealRequiresBothPerms = {
+    init
+      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(grantUserSecretPermission({
+        userId: "u2",
+        secretId: "s1",
+        readEnabled: true,
+        updateEnabled: false,
+        deleteEnabled: false,
+      }))
+      .then(all {
+        // u2 can read the secret metadata...
+        assert(canReadSecret("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions)),
+        // ...but cannot reveal the value without the value-reveal permission.
+        assert(not(canRevealValue("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions, secretValuePermissions))),
+        secrets' = secrets,
+        roleSecretPermissions' = roleSecretPermissions,
+        userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
+      })
+      .then(grantSecretValuePermission("u2"))
+      .then(all {
+        // Now u2 can reveal (both read access and value permission).
+        assert(canRevealValue("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions, secretValuePermissions)),
+        secrets' = secrets,
+        roleSecretPermissions' = roleSecretPermissions,
+        userSecretPermissions' = userSecretPermissions,
+        secretValuePermissions' = secretValuePermissions,
       })
   }
 }

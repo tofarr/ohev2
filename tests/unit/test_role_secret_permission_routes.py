@@ -15,7 +15,7 @@ async def _seed_role_secret(session: AsyncSession, *, n: int = 0) -> tuple[Role,
     role = Role(name=f"rsp-role-{n}-{uuid.uuid4().hex[:4]}")
     session.add(role)
     await session.flush()
-    secret = Secret(code=f"RSP_{n}_{uuid.uuid4().hex[:6]}", value="v")
+    secret = Secret(code=f"RSP_{n}_{uuid.uuid4().hex[:6]}")
     session.add(secret)
     await session.flush()
     return role, secret
