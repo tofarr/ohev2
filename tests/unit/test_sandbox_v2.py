@@ -10,6 +10,15 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from openhands.ev2.sandbox_v2.docker_sandbox_service import (
+    DockerSandboxService,
+    _apply_template_update,
+    _docker_template_from_payload,
+    _label_int,
+    _parse_created,
+    _parse_env,
+    _template_from_image_attrs,
+)
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     DockerSandboxTemplate,
     SandboxTemplate,
@@ -20,14 +29,7 @@ from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
     SandboxTemplateUpdate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
-    DockerSandboxService,
     SandboxService,
-    _apply_template_update,
-    _docker_template_from_payload,
-    _label_int,
-    _parse_created,
-    _parse_env,
-    _template_from_image_attrs,
     build_sandbox_service,
     resolve_sandbox_service_class,
 )
@@ -219,7 +221,7 @@ def test_apply_template_update_partial() -> None:
 
 def test_resolve_docker_service_class() -> None:
     cls = resolve_sandbox_service_class(
-        "openhands.ev2.sandbox_v2.sandbox_v2_service.DockerSandboxService"
+        "openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService"
     )
     assert cls is DockerSandboxService
 
@@ -236,7 +238,7 @@ def test_resolve_rejects_missing_module() -> None:
 
 def test_build_docker_service() -> None:
     service = build_sandbox_service(
-        "openhands.ev2.sandbox_v2.sandbox_v2_service.DockerSandboxService"
+        "openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService"
     )
     assert isinstance(service, DockerSandboxService)
     assert isinstance(service, SandboxService)

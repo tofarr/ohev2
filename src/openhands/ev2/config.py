@@ -331,7 +331,7 @@ class AppConfig(BaseModel):
     # app lifespan). Later implementations (K8s, E2B, ...) register their own
     # FQCN here; the default selects the Docker-backed implementation.
     sandbox_service: str = Field(
-        default="openhands.ev2.sandbox_v2.sandbox_v2_service.DockerSandboxService",
+        default="openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService",
         description=(
             "Fully qualified class name of the SandboxService implementation "
             "instantiated at server startup."
