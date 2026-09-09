@@ -59,6 +59,11 @@ from openhands.ev2.sandbox.sandbox_router import (
     sandbox_snapshot_router,
     sandbox_template_router,
 )
+from openhands.ev2.sandbox_v2.role_sandbox_template_permission_router import (
+    router as sandbox_v2_role_sandbox_template_permission_router,
+)
+from openhands.ev2.sandbox_v2.sandbox_v2_router import router as sandbox_v2_template_router
+from openhands.ev2.sandbox_v2.sandbox_v2_service import build_sandbox_service
 from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
 )
@@ -221,7 +226,12 @@ async def _mcp_usage_aggregate_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Manage the background tasks across the app lifetime."""
+    """Manage the background tasks across the app lifetime.
+
+    Also constructs the configured :class:`SandboxService` (an async context
+    manager) and exposes it on ``app.state.sandbox_service`` so the sandbox_v2
+    routers can reach it.
+    """
     tasks = [
         asyncio.create_task(_cleanup_loop(), name="auth-cleanup"),
         asyncio.create_task(_llm_usage_partition_loop(), name="llm-usage-partition"),
@@ -230,7 +240,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
     ]
     try:
-        yield
+        sandbox_service = build_sandbox_service(get_config().sandbox_service)
+        async with sandbox_service:
+            app.state.sandbox_service = sandbox_service
+            yield
     finally:
         for task in tasks:
             task.cancel()
@@ -266,6 +279,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "sandbox-templates", "description": "Sandbox templates and role access grants."},
     {"name": "sandboxes", "description": "Sandboxes and role access grants."},
     {"name": "sandbox-snapshots", "description": "Sandbox snapshots and role access grants."},
+    {
+        "name": "sandbox-v2-templates",
+        "description": "Pluggable sandbox_v2 templates (provider-backed) and role access grants.",
+    },
 ]
 
 
@@ -310,6 +327,8 @@ def create_app() -> FastAPI:
     app.include_router(role_sandbox_template_permission_router)
     app.include_router(role_sandbox_permission_router)
     app.include_router(role_sandbox_snapshot_permission_router)
+    app.include_router(sandbox_v2_template_router)
+    app.include_router(sandbox_v2_role_sandbox_template_permission_router)
     app.include_router(user_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app

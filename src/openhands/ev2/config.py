@@ -326,6 +326,17 @@ class AppConfig(BaseModel):
         default_factory=McpConfig,
         description="MCP server proxy configuration (url for proxied MCP server configs).",
     )
+    # Fully qualified class name of the SandboxService implementation to
+    # instantiate at server startup (an async context manager tied to the
+    # app lifespan). Later implementations (K8s, E2B, ...) register their own
+    # FQCN here; the default selects the Docker-backed implementation.
+    sandbox_service: str = Field(
+        default="openhands.ev2.sandbox_v2.sandbox_v2_service.DockerSandboxService",
+        description=(
+            "Fully qualified class name of the SandboxService implementation "
+            "instantiated at server startup."
+        ),
+    )
     # Minted-token lifetimes are NOT configurable here: they are always synced
     # to the expiries advertised by the IdP (with idp.* fallbacks when the IdP
     # omits one). See IdpConfig.access_token_expires_in /

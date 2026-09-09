@@ -58,6 +58,14 @@ class TestEncryptionKeyConfig:
 class TestAppConfig:
     """Tests for AppConfig model."""
 
+    def test_sandbox_service_default(self) -> None:
+        config = _cfg()
+        assert config.sandbox_service.endswith(".DockerSandboxService")
+
+    def test_sandbox_service_override(self) -> None:
+        config = _cfg(sandbox_service="my.module.CustomSandboxService")
+        assert config.sandbox_service == "my.module.CustomSandboxService"
+
     def test_encryption_key_auto_added_to_decryption_keys(self) -> None:
         config = _cfg(
             encryption_key=EncryptionKeyConfig(id="primary", value=SecretStr("secret")),
