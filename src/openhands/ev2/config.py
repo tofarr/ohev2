@@ -12,6 +12,11 @@ from typing import Any, Literal, Self, cast
 from openhands.agent_server.env_parser import from_env
 from pydantic import BaseModel, Field, SecretStr, field_serializer, model_validator
 
+from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    SandboxService,
+    resolve_sandbox_service_class,
+)
+
 
 class EncryptionKeyConfig(BaseModel):
     """Configuration for a single encryption/decryption key."""
@@ -326,6 +331,17 @@ class AppConfig(BaseModel):
         default_factory=McpConfig,
         description="MCP server proxy configuration (url for proxied MCP server configs).",
     )
+    # Fully qualified class name of the SandboxService implementation to
+    # instantiate at server startup (an async context manager tied to the
+    # app lifespan). Later implementations (K8s, E2B, ...) register their own
+    # FQCN here; the default selects the Docker-backed implementation.
+    sandbox_service_class: str = Field(
+        default="openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService",
+        description=(
+            "Fully qualified class name of the SandboxService implementation "
+            "instantiated at server startup."
+        ),
+    )
     # Minted-token lifetimes are NOT configurable here: they are always synced
     # to the expiries advertised by the IdP (with idp.* fallbacks when the IdP
     # omits one). See IdpConfig.access_token_expires_in /
@@ -385,6 +401,16 @@ class AppConfig(BaseModel):
     def database_url(self) -> str:
         """Assembled async SQLAlchemy database URL (from ``db_config``)."""
         return self.db_config.database_url
+
+    def get_sandbox_service(self) -> SandboxService:
+        """Build the configured :class:`SandboxService` from the environment.
+
+        Resolves ``sandbox_service_class`` then instantiates that concrete class
+        by parsing environment variables under the ``OHE_SANDBOX`` prefix onto
+        it (so each implementation can read its own provider-specific knobs).
+        """
+        service_class = resolve_sandbox_service_class(self.sandbox_service_class)
+        return cast(SandboxService, from_env(service_class, "OHE_SANDBOX"))
 
 
 @lru_cache(maxsize=1)
