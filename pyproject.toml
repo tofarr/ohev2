@@ -72,6 +72,7 @@ omit = [
     "tests/*",
     # Local-only dev convenience script; not shipped as production code.
     "*/scripts/reset_local_dev_db.py",
+    "*/scripts/start_local_dev_sandbox.py",
 ]
 
 [tool.coverage.report]
