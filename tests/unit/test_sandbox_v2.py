@@ -353,11 +353,22 @@ def test_wildcard_match() -> None:
     assert _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/openhands/agent-canvas")
     assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-canvas")
     assert not _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/other/agent-canvas")
+    # A bare pattern (no wildcard) requires an exact match, so a tagged
+    # image is *not* matched by it — use ``:*`` to opt into tagged variants.
+    assert not _wildcard_match(
+        "ghcr.io/openhands/agent-canvas", "ghcr.io/openhands/agent-canvas:1.16.0"
+    )
+    assert _wildcard_match(
+        "ghcr.io/openhands/agent-canvas:*", "ghcr.io/openhands/agent-canvas:1.16.0"
+    )
 
 
 def test_docker_service_image_name_matching() -> None:
     service = DockerSandboxService()
-    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas")
+    # The default pattern is ``:*`` so tagged images match…
+    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas:1.16.0")
+    # …but a bare (tagless) image does not.
+    assert not service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas")
     assert not service._matches_image_name_patterns("ghcr.io/other/agent-canvas")
 
 

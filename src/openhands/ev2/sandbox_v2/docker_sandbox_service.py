@@ -53,7 +53,7 @@ class DockerSandboxService(SandboxService):
     """
 
     image_name_patterns: list[str] = Field(
-        default_factory=lambda: ["ghcr.io/openhands/agent-canvas"],
+        default_factory=lambda: ["ghcr.io/openhands/agent-canvas:*"],
         description="Glob patterns matching image names to treat as sandbox templates.",
     )
 
