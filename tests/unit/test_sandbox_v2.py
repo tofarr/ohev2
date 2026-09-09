@@ -259,7 +259,7 @@ def test_config_default_sandbox_service(monkeypatch: pytest.MonkeyPatch) -> None
 def test_exception_to_status_mapping() -> None:
     from fastapi import status as http_status
 
-    from openhands.ev2.sandbox_v2.sandbox_v2_router import _map_exception_to_status
+    from openhands.ev2.sandbox_v2.sandbox_template_router import _map_exception_to_status
     from openhands.ev2.sandbox_v2.sandbox_v2_service import (
         BatchPermissionDeniedError,
         SandboxTemplateConflictError,

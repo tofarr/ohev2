@@ -62,7 +62,7 @@ from openhands.ev2.sandbox.sandbox_router import (
 from openhands.ev2.sandbox_v2.role_sandbox_template_permission_router import (
     router as sandbox_v2_role_sandbox_template_permission_router,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_router import router as sandbox_v2_template_router
+from openhands.ev2.sandbox_v2.sandbox_template_router import router as sandbox_v2_template_router
 from openhands.ev2.sandbox_v2.sandbox_v2_service import build_sandbox_service
 from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
