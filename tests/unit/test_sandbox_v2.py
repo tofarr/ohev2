@@ -7,7 +7,10 @@ service factory/config wiring.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from docker.errors import ImageNotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from openhands.ev2.sandbox_v2.docker_sandbox_service import (
@@ -18,6 +21,7 @@ from openhands.ev2.sandbox_v2.docker_sandbox_service import (
     _parse_created,
     _parse_env,
     _template_from_image_attrs,
+    _wildcard_match,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     DockerSandboxTemplate,
@@ -30,7 +34,6 @@ from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     SandboxService,
-    build_sandbox_service,
     resolve_sandbox_service_class,
 )
 
@@ -215,6 +218,82 @@ def test_apply_template_update_partial() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Docker synchronous CRUD (using a fake in-process image client).
+# --------------------------------------------------------------------------- #
+
+
+class _FakeImage:
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+
+
+class _FakeImages:
+    def __init__(self, images: list[_FakeImage]) -> None:
+        self._images = {image.attrs["RepoTags"][0]: image for image in images}
+
+    def list(self) -> list[_FakeImage]:
+        return list(self._images.values())
+
+    def get(self, name: str) -> _FakeImage:
+        try:
+            return self._images[name]
+        except KeyError:
+            raise ImageNotFound(name) from None
+
+
+class _FakeDockerClient:
+    def __init__(self, images: list[_FakeImage]) -> None:
+        self.images = _FakeImages(images)
+
+
+def _image_attrs(repo_tag: str) -> dict[str, Any]:
+    return {
+        "RepoTags": [repo_tag],
+        "Created": "2024-01-02T03:04:05Z",
+        "Config": {"Cmd": None, "Env": None, "WorkingDir": None, "Labels": {}},
+        "HostConfig": {},
+    }
+
+
+def test_sync_list_templates_filters_by_image_name_patterns() -> None:
+    service = DockerSandboxService(
+        image_name_patterns=["ghcr.io/openhands/*"],
+    )
+    service._client = _FakeDockerClient(
+        [
+            _FakeImage(_image_attrs("ghcr.io/openhands/agent-canvas:latest")),
+            _FakeImage(_image_attrs("ghcr.io/other/agent:latest")),
+        ]
+    )
+    templates = service._sync_list_templates()
+    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-canvas:latest"]
+
+
+def test_sync_get_template_returns_matching_image() -> None:
+    service = DockerSandboxService(
+        image_name_patterns=["ghcr.io/openhands/*"],
+    )
+    service._client = _FakeDockerClient(
+        [_FakeImage(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
+    )
+    template = service._sync_get_template("ghcr.io/openhands/agent-canvas:latest")
+    assert template.id == "ghcr.io/openhands/agent-canvas:latest"
+
+
+def test_sync_get_template_rejects_non_matching_image() -> None:
+    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+        SandboxTemplateNotFoundError,
+    )
+
+    service = DockerSandboxService(
+        image_name_patterns=["ghcr.io/openhands/*"],
+    )
+    service._client = _FakeDockerClient([_FakeImage(_image_attrs("ghcr.io/other/agent:latest"))])
+    with pytest.raises(SandboxTemplateNotFoundError):
+        service._sync_get_template("ghcr.io/other/agent:latest")
+
+
+# --------------------------------------------------------------------------- #
 # Factory & config wiring.
 # --------------------------------------------------------------------------- #
 
@@ -237,9 +316,13 @@ def test_resolve_rejects_missing_module() -> None:
 
 
 def test_build_docker_service() -> None:
-    service = build_sandbox_service(
-        "openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService"
+    from openhands.ev2.config import AppConfig
+
+    config = AppConfig(
+        idp={"url": "https://idp.example.com", "client_id": "c", "client_secret": "s"},  # type: ignore[arg-type]
+        encryption_key={"id": "primary", "value": "test-secret-at-least-32-bytes-long!!"},  # type: ignore[arg-type]
     )
+    service = config.get_sandbox_service()
     assert isinstance(service, DockerSandboxService)
     assert isinstance(service, SandboxService)
 
@@ -250,7 +333,32 @@ def test_config_default_sandbox_service(monkeypatch: pytest.MonkeyPatch) -> None
     get_config.cache_clear()
     monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
     config = get_config()
-    assert "DockerSandboxService" in config.sandbox_service
+    assert "DockerSandboxService" in config.sandbox_service_class
+
+
+def test_sandbox_service_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openhands.ev2.config import AppConfig
+
+    monkeypatch.setenv("OHE_SANDBOX_IMAGE_NAME_PATTERNS_0", "ghcr.io/acme/agent-*")
+    config = AppConfig(
+        idp={"url": "https://idp.example.com", "client_id": "c", "client_secret": "s"},  # type: ignore[arg-type]
+        encryption_key={"id": "primary", "value": "test-secret-at-least-32-bytes-long!!"},  # type: ignore[arg-type]
+    )
+    service = config.get_sandbox_service()
+    assert isinstance(service, DockerSandboxService)
+    assert service.image_name_patterns == ["ghcr.io/acme/agent-*"]
+
+
+def test_wildcard_match() -> None:
+    assert _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/openhands/agent-canvas")
+    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-canvas")
+    assert not _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/other/agent-canvas")
+
+
+def test_docker_service_image_name_matching() -> None:
+    service = DockerSandboxService()
+    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas")
+    assert not service._matches_image_name_patterns("ghcr.io/other/agent-canvas")
 
 
 # --------------------------------------------------------------------------- #

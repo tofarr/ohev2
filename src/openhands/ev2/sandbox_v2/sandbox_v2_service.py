@@ -1,7 +1,7 @@
 """Service layer for the sandbox_v2 feature.
 
 The sandbox control plane is supplied by a pluggable :class:`SandboxService`
-implementation selected at startup via the ``sandbox_service`` config attribute
+implementation selected at startup via the ``sandbox_service_class`` config attribute
 (a fully qualified class name). The service is constructed once and held as an
 async context manager tied to the server lifespan; the concrete implementations
 (Docker, Kubernetes, E2B, ...) live in their own modules and are only imported
@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib
 from abc import ABC, abstractmethod
 from typing import Any
+
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
 from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxTemplate
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
@@ -44,7 +46,7 @@ class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
 
 
-class SandboxService(ABC):
+class SandboxService(DiscriminatedUnionMixin, ABC):
     """Abstract base for the sandbox control plane.
 
     Concrete subclasses provide provider-specific template persistence. The
@@ -268,18 +270,11 @@ def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
     return candidate
 
 
-def build_sandbox_service(fqcn: str) -> SandboxService:
-    """Instantiate a ``SandboxService`` from its fully qualified class name."""
-    service_class = resolve_sandbox_service_class(fqcn)
-    return service_class()
-
-
 __all__ = [
     "BatchPermissionDeniedError",
     "SandboxService",
     "SandboxTemplateConflictError",
     "SandboxTemplateNotFoundError",
     "SandboxTemplatePermissionScopeError",
-    "build_sandbox_service",
     "resolve_sandbox_service_class",
 ]

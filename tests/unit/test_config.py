@@ -60,11 +60,11 @@ class TestAppConfig:
 
     def test_sandbox_service_default(self) -> None:
         config = _cfg()
-        assert config.sandbox_service.endswith(".DockerSandboxService")
+        assert config.sandbox_service_class.endswith(".DockerSandboxService")
 
     def test_sandbox_service_override(self) -> None:
-        config = _cfg(sandbox_service="my.module.CustomSandboxService")
-        assert config.sandbox_service == "my.module.CustomSandboxService"
+        config = _cfg(sandbox_service_class="my.module.CustomSandboxService")
+        assert config.sandbox_service_class == "my.module.CustomSandboxService"
 
     def test_encryption_key_auto_added_to_decryption_keys(self) -> None:
         config = _cfg(

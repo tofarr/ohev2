@@ -63,7 +63,6 @@ from openhands.ev2.sandbox_v2.role_sandbox_template_permission_router import (
     router as sandbox_v2_role_sandbox_template_permission_router,
 )
 from openhands.ev2.sandbox_v2.sandbox_template_router import router as sandbox_v2_template_router
-from openhands.ev2.sandbox_v2.sandbox_v2_service import build_sandbox_service
 from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
 )
@@ -240,7 +239,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
     ]
     try:
-        sandbox_service = build_sandbox_service(get_config().sandbox_service)
+        sandbox_service = get_config().get_sandbox_service()
         async with sandbox_service:
             app.state.sandbox_service = sandbox_service
             yield

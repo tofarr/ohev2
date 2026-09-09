@@ -12,11 +12,13 @@ read from image labels.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 from docker.errors import ImageNotFound  # type: ignore[import-untyped]
+from pydantic import Field
 
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     DockerSandboxTemplate,
@@ -44,9 +46,19 @@ class DockerSandboxService(SandboxService):
     Template state is the Docker image inventory: ``id`` is the image name and
     the lifespan metadata are image labels. ``max_memory`` is read from the
     image's host config.
+
+    ``image_name_patterns`` restricts which images are treated as templates;
+    only images whose repository/tag matches one of the glob patterns (``*``
+    wildcard) are surfaced. This defaults to the Agent Canvas image prefix.
     """
 
-    def __init__(self) -> None:
+    image_name_patterns: list[str] = Field(
+        default_factory=lambda: ["ghcr.io/openhands/agent-canvas"],
+        description="Glob patterns matching image names to treat as sandbox templates.",
+    )
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
         self._client: Any = None
 
     async def __aenter__(self) -> DockerSandboxService:
@@ -99,10 +111,12 @@ class DockerSandboxService(SandboxService):
         templates: list[DockerSandboxTemplate] = []
         for image in self._images.list():
             try:
-                templates.append(_template_from_image_attrs(image.attrs))
+                template = _template_from_image_attrs(image.attrs)
             except SandboxTemplateNotFoundError:
                 # Untagged intermediate images are not templates.
                 continue
+            if self._matches_image_name_patterns(template.id):
+                templates.append(template)
         return templates
 
     def _sync_get_template(self, template_id: str) -> DockerSandboxTemplate:
@@ -110,7 +124,13 @@ class DockerSandboxService(SandboxService):
             image = self._images.get(template_id)
         except ImageNotFound:
             raise SandboxTemplateNotFoundError(template_id) from None
-        return _template_from_image_attrs(image.attrs)
+        template = _template_from_image_attrs(image.attrs)
+        if not self._matches_image_name_patterns(template.id):
+            raise SandboxTemplateNotFoundError(template_id)
+        return template
+
+    def _matches_image_name_patterns(self, image_name: str) -> bool:
+        return any(_wildcard_match(pattern, image_name) for pattern in self.image_name_patterns)
 
     def _sync_create_template(self, template_id: str) -> None:
         images = self._images
@@ -200,6 +220,20 @@ def _apply_template_update(
     )
 
 
+def _wildcard_match(pattern: str, target: str) -> bool:
+    """Match *target* against *pattern*, where ``*`` is a glob wildcard.
+
+    ``*`` matches any run of characters (including ``/``), so
+    ``ghcr.io/openhands/*`` matches any image under that prefix. A pattern
+    without wildcards must match exactly.
+    """
+    if "*" not in pattern:
+        return pattern == target
+    parts = pattern.split("*")
+    escaped = ".*".join(re.escape(part) for part in parts)
+    return re.fullmatch(escaped, target) is not None
+
+
 def _parse_env(env: list[str] | None) -> dict[str, str]:
     """Parse a Docker ``Config.Env`` list into a name/value mapping."""
     if not env:
@@ -245,4 +279,5 @@ __all__ = [
     "_parse_created",
     "_parse_env",
     "_template_from_image_attrs",
+    "_wildcard_match",
 ]
