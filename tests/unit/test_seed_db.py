@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.scripts.seed_db import _assign_role, _parse_args, seed_admin, seed_db
+from openhands.ev2.sandbox.sandbox_models import DockerSandboxTemplateSpec, SandboxTemplate
+from openhands.ev2.scripts.seed_db import (
+    _assign_role,
+    _ensure_server_template,
+    _parse_args,
+    seed_admin,
+    seed_db,
+)
 from openhands.ev2.security.security_models import Action, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
@@ -328,3 +335,56 @@ class TestParseArgs:
         monkeypatch.setenv("OHE_SEED_ADMIN_USERNAME", "envadmin")
         args = _parse_args([])
         assert args.admin_username == "envadmin"
+
+
+class TestEnsureServerTemplate:
+    async def test_skips_when_no_server_image(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        admin, _ = await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        monkeypatch.setattr(
+            "openhands.ev2.scripts.seed_db._most_recent_server_image",
+            lambda *args, **kwargs: None,
+        )
+        template = await _ensure_server_template(session, user_id=admin.id)
+        assert template is None
+        remaining = await session.scalars(select(SandboxTemplate))
+        assert remaining.all() == []
+
+    async def test_upserts_template_from_most_recent_image(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        admin, _ = await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        monkeypatch.setattr(
+            "openhands.ev2.scripts.seed_db._most_recent_server_image",
+            lambda *args, **kwargs: "ghcr.io/openhands/agent-server:test",
+        )
+        template = await _ensure_server_template(session, user_id=admin.id)
+        assert template is not None
+        assert template.name == "docker-agent-server"
+        assert template.user_id == admin.id
+        assert isinstance(template.template_spec, DockerSandboxTemplateSpec)
+        assert template.template_spec.image == "ghcr.io/openhands/agent-server:test"
+
+        # Re-running against an updated image updates the existing row.
+        monkeypatch.setattr(
+            "openhands.ev2.scripts.seed_db._most_recent_server_image",
+            lambda *args, **kwargs: "ghcr.io/openhands/agent-server:newer",
+        )
+        updated = await _ensure_server_template(session, user_id=admin.id)
+        assert updated is not None
+        assert updated.id == template.id
+        assert isinstance(updated.template_spec, DockerSandboxTemplateSpec)
+        assert updated.template_spec.image == "ghcr.io/openhands/agent-server:newer"
+        templates = await session.scalars(select(SandboxTemplate))
+        assert len(templates.all()) == 1

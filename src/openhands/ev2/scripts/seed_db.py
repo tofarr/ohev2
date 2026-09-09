@@ -33,6 +33,8 @@ import argparse
 import asyncio
 import os
 import re
+import shutil
+import subprocess
 import sys
 import uuid
 from collections.abc import Iterable
@@ -44,6 +46,13 @@ from openhands.ev2.api_key.api_key_security import ApiKeyAccess
 from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.sandbox.sandbox_models import (
+    DockerSandboxTemplateSpec,
+    FuseySandboxStorageSpec,
+    OpenHandsAgentServerSpec,
+    SandboxProviderKind,
+    SandboxTemplate,
+)
 from openhands.ev2.security.security_models import Permission, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
@@ -67,6 +76,11 @@ _DEFAULT_ADMIN_PASSWORD = "changeme"
 _DEFAULT_USER_USERNAME = "user"
 _DEFAULT_USER_EMAIL = "user@example.com"
 _DEFAULT_USER_PASSWORD = "changeme"
+
+# Sandbox template seeded from the most recent local Docker agent-server image.
+_DEFAULT_SANDBOX_TEMPLATE_NAME = "docker-agent-server"
+_DEFAULT_SANDBOX_SERVER_IMAGE = "ghcr.io/openhands/agent-server"
+_DEFAULT_SANDBOX_SERVER_PORT = 18000
 
 
 def _is_valid_email(email: str) -> bool:
@@ -262,6 +276,119 @@ async def _ensure_membership(
         await session.flush()
 
 
+def _docker_available() -> bool:
+    """Return whether a Docker daemon is reachable from this environment.
+
+    Uses the ``docker`` CLI when it is on ``PATH`` (so the check works even in
+    environments where the Python SDK's socket discovery differs from the CLI
+    context) and falls back to the Python SDK otherwise. Any failure (missing
+    binary, unreachable daemon, permission error) counts as unavailable so the
+    seed script degrades to users-only rather than failing bootstrap.
+    """
+    if shutil.which("docker") is not None:
+        try:
+            subprocess.run(
+                ["docker", "info"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return False
+        return True
+
+    try:
+        import docker  # type: ignore[import-untyped]
+    except ImportError:
+        return False
+
+    try:
+        docker.from_env().ping()
+    except Exception:
+        return False
+    return True
+
+
+def _most_recent_server_image(
+    repository: str = _DEFAULT_SANDBOX_SERVER_IMAGE,
+) -> str | None:
+    """Return the most recently created local image for *repository*.
+
+    Returns ``None`` when the Docker daemon is unreachable or no matching image
+    is present locally. The most recent image is chosen by the engine's
+    ``Created`` timestamp; a repo tag is preferred over a dangling digest-only
+    reference so the seeded template points at something reproducible.
+    """
+    try:
+        import docker
+    except ImportError:
+        return None
+
+    try:
+        images = docker.from_env().images.list(name=repository)
+    except Exception:
+        return None
+
+    tagged = [img for img in images if img.tags]
+    candidates = tagged or images
+    if not candidates:
+        return None
+
+    def created_epoch(image: object) -> int:
+        created = image.attrs.get("Created") if hasattr(image, "attrs") else None
+        if isinstance(created, (int, float)):
+            return int(created)
+        if isinstance(created, str) and created.replace(".", "").isdigit():
+            return int(float(created))
+        return 0
+
+    latest = max(candidates, key=created_epoch)
+    if latest.tags:
+        tag: str = latest.tags[0]
+        return tag
+    if latest.id:
+        return f"sha256:{latest.id.removeprefix('sha256:')}"
+    return None
+
+
+async def _ensure_server_template(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> SandboxTemplate | None:
+    """Upsert the Docker agent-server sandbox template, or skip if Docker is absent.
+
+    The template's image is the most recently created local ``agent-server``
+    image. When Docker is unavailable, or no matching image exists locally, this
+    returns ``None`` without writing anything.
+    """
+    image = _most_recent_server_image()
+    if image is None:
+        return None
+
+    template = await session.scalar(
+        select(SandboxTemplate).where(SandboxTemplate.name == _DEFAULT_SANDBOX_TEMPLATE_NAME)
+    )
+    spec = DockerSandboxTemplateSpec(image=image)
+    if template is None:
+        template = SandboxTemplate(
+            name=_DEFAULT_SANDBOX_TEMPLATE_NAME,
+            provider_kind=SandboxProviderKind.DOCKER,
+            template_spec=spec,
+            server_spec=OpenHandsAgentServerSpec(internal_port=_DEFAULT_SANDBOX_SERVER_PORT),
+            storage_spec=FuseySandboxStorageSpec(),
+            user_id=user_id,
+        )
+        session.add(template)
+        await session.flush()
+        await session.refresh(template)
+        return template
+
+    template.template_spec = spec
+    await session.flush()
+    await session.refresh(template)
+    return template
+
+
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Seed the database with admin and regular-user roles/users.",
@@ -335,6 +462,27 @@ async def main(argv: Iterable[str] | None = None) -> int:
                 print(
                     f"Seeded regular user: id={regular.id} username={regular.username} "
                     f"email={regular.email} enabled={regular.enabled}",
+                    file=sys.stderr,
+                )
+
+            if _docker_available():
+                template = await _ensure_server_template(session, user_id=admin.id)
+                if template is None:
+                    print(
+                        "Docker is available but no local agent-server image was found; "
+                        "skipping sandbox template seed.",
+                        file=sys.stderr,
+                    )
+                else:
+                    await session.commit()
+                    print(
+                        f"Seeded sandbox template: id={template.id} name={template.name} "
+                        f"provider={template.provider_kind}",
+                        file=sys.stderr,
+                    )
+            else:
+                print(
+                    "Docker is not available; skipping sandbox template seed.",
                     file=sys.stderr,
                 )
     finally:
