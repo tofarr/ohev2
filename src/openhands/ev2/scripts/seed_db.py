@@ -77,9 +77,10 @@ _DEFAULT_USER_USERNAME = "user"
 _DEFAULT_USER_EMAIL = "user@example.com"
 _DEFAULT_USER_PASSWORD = "changeme"
 
-# Sandbox template seeded from the most recent local Docker agent-server image.
+# Sandbox template seeded from the latest registry-published agent-server image.
 _DEFAULT_SANDBOX_TEMPLATE_NAME = "docker-agent-server"
 _DEFAULT_SANDBOX_SERVER_IMAGE = "ghcr.io/openhands/agent-server"
+_DEFAULT_SANDBOX_SERVER_TAG = "latest"
 _DEFAULT_SANDBOX_SERVER_PORT = 18000
 
 
@@ -310,46 +311,27 @@ def _docker_available() -> bool:
     return True
 
 
-def _most_recent_server_image(
+def _pull_server_image(
     repository: str = _DEFAULT_SANDBOX_SERVER_IMAGE,
+    tag: str = _DEFAULT_SANDBOX_SERVER_TAG,
 ) -> str | None:
-    """Return the most recently created local image for *repository*.
+    """Pull the agent-server image from its registry and return its full name.
 
-    Returns ``None`` when the Docker daemon is unreachable or no matching image
-    is present locally. The most recent image is chosen by the engine's
-    ``Created`` timestamp; a repo tag is preferred over a dangling digest-only
-    reference so the seeded template points at something reproducible.
+    Returns ``None`` when Docker is unreachable or the pull fails, so the seed
+    degrades gracefully. The returned reference is always the ``repository:tag``
+    requested (the registry is authoritative for what that tag resolves to).
     """
     try:
         import docker
     except ImportError:
         return None
 
+    full_name = f"{repository}:{tag}"
     try:
-        images = docker.from_env().images.list(name=repository)
+        docker.from_env().images.pull(repository, tag=tag)
     except Exception:
         return None
-
-    tagged = [img for img in images if img.tags]
-    candidates = tagged or images
-    if not candidates:
-        return None
-
-    def created_epoch(image: object) -> int:
-        created = image.attrs.get("Created") if hasattr(image, "attrs") else None
-        if isinstance(created, (int, float)):
-            return int(created)
-        if isinstance(created, str) and created.replace(".", "").isdigit():
-            return int(float(created))
-        return 0
-
-    latest = max(candidates, key=created_epoch)
-    if latest.tags:
-        tag: str = latest.tags[0]
-        return tag
-    if latest.id:
-        return f"sha256:{latest.id.removeprefix('sha256:')}"
-    return None
+    return full_name
 
 
 async def _ensure_server_template(
@@ -357,11 +339,12 @@ async def _ensure_server_template(
 ) -> SandboxTemplate | None:
     """Upsert the Docker agent-server sandbox template, or skip if Docker is absent.
 
-    The template's image is the most recently created local ``agent-server``
-    image. When Docker is unavailable, or no matching image exists locally, this
-    returns ``None`` without writing anything.
+    The template's image is the freshly pulled ``agent-server`` image from the
+    registry (so it tracks the latest externally published image rather than a
+    stale local copy). When Docker is unavailable or the pull fails, this returns
+    ``None`` without writing anything.
     """
-    image = _most_recent_server_image()
+    image = _pull_server_image()
     if image is None:
         return None
 
@@ -469,7 +452,7 @@ async def main(argv: Iterable[str] | None = None) -> int:
                 template = await _ensure_server_template(session, user_id=admin.id)
                 if template is None:
                     print(
-                        "Docker is available but no local agent-server image was found; "
+                        "Docker is available but pulling the agent-server image failed; "
                         "skipping sandbox template seed.",
                         file=sys.stderr,
                     )

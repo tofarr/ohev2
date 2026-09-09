@@ -338,7 +338,7 @@ class TestParseArgs:
 
 
 class TestEnsureServerTemplate:
-    async def test_skips_when_no_server_image(
+    async def test_skips_when_pull_fails(
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         admin, _ = await seed_db(
@@ -348,7 +348,7 @@ class TestEnsureServerTemplate:
             admin_password="pw",
         )
         monkeypatch.setattr(
-            "openhands.ev2.scripts.seed_db._most_recent_server_image",
+            "openhands.ev2.scripts.seed_db._pull_server_image",
             lambda *args, **kwargs: None,
         )
         template = await _ensure_server_template(session, user_id=admin.id)
@@ -356,7 +356,7 @@ class TestEnsureServerTemplate:
         remaining = await session.scalars(select(SandboxTemplate))
         assert remaining.all() == []
 
-    async def test_upserts_template_from_most_recent_image(
+    async def test_upserts_template_from_pulled_image(
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         admin, _ = await seed_db(
@@ -366,19 +366,19 @@ class TestEnsureServerTemplate:
             admin_password="pw",
         )
         monkeypatch.setattr(
-            "openhands.ev2.scripts.seed_db._most_recent_server_image",
-            lambda *args, **kwargs: "ghcr.io/openhands/agent-server:test",
+            "openhands.ev2.scripts.seed_db._pull_server_image",
+            lambda *args, **kwargs: "ghcr.io/openhands/agent-server:latest",
         )
         template = await _ensure_server_template(session, user_id=admin.id)
         assert template is not None
         assert template.name == "docker-agent-server"
         assert template.user_id == admin.id
         assert isinstance(template.template_spec, DockerSandboxTemplateSpec)
-        assert template.template_spec.image == "ghcr.io/openhands/agent-server:test"
+        assert template.template_spec.image == "ghcr.io/openhands/agent-server:latest"
 
-        # Re-running against an updated image updates the existing row.
+        # Re-running refreshes the image reference on the existing row.
         monkeypatch.setattr(
-            "openhands.ev2.scripts.seed_db._most_recent_server_image",
+            "openhands.ev2.scripts.seed_db._pull_server_image",
             lambda *args, **kwargs: "ghcr.io/openhands/agent-server:newer",
         )
         updated = await _ensure_server_template(session, user_id=admin.id)
