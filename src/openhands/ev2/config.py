@@ -389,6 +389,20 @@ class AppConfig(BaseModel):
         ),
     )
 
+    # ------------------------------------------------------------------ #
+    # Background pruning of orphaned ACL ids.
+    # ------------------------------------------------------------------ #
+    acl_prune_interval: int = Field(
+        default=3600,
+        ge=0,
+        description=(
+            "Seconds between background sweeps that remove orphaned item ids "
+            "from ACLPermission policies (ids referencing deleted entities). "
+            "When 0 the background loop is disabled and pruning must be driven "
+            "by an external scheduler (cron); see README 'ACL pruning'."
+        ),
+    )
+
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:
         """Ensure the encryption key is present in decryption_keys."""

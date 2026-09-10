@@ -31,10 +31,12 @@
 
 module rbac {
   // Simplified permission policies (mirrors role.qnt).
-  type Permission = Permitted | Denied | ReadOnly
+  // ACLPermission models the item-level grant policy: a bounded set of ids
+  // per action. The cap (ACL_MAX_IDS) forces large grants to custom classes.
+  type Permission = Permitted | Denied | ReadOnly | AclPerm(str -> Set[str])
 
   // Simplified search filter results.
-  type Filter = All | None | Custom
+  type Filter = All | None | Custom | AclFilter
 
   // A role with per-entity permissions.
   type Role = {
@@ -71,18 +73,29 @@ module rbac {
       | ReadOnly =>
           if (act == "read" or act == "search") All
           else None
+      | AclPerm(ids) =>
+          if (ids.keys().contains(act) and ids.get(act).size() > 0)
+            AclFilter
+          else None
     }
 
   // Combine two filters with OR semantics (disjunction).
-  // All OR x = All; None OR x = x; Custom OR Custom = Custom
+  // All OR x = All; None OR x = x; Custom OR Custom = Custom, AclFilter OR x = Custom
   pure def orFilters(f1: Filter, f2: Filter): Filter =
     match f1 {
       | All => All
       | None => f2
+      | AclFilter => match f2 {
+          | All => All
+          | None => AclFilter
+          | Custom => Custom
+          | AclFilter => Custom
+        }
       | Custom => match f2 {
           | All => All
           | None => Custom
           | Custom => Custom
+          | AclFilter => Custom
         }
     }
 
@@ -232,6 +245,62 @@ module rbac {
         assert(effectiveFilter("u1", "user", "read", roles, userRoles) == All),
         assert(effectiveFilter("u1", "user", "search", roles, userRoles) == All),
         assert(effectiveFilter("u1", "user", "create", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // ACLPermission grants access only to listed ids for the specified action.
+  run aclGrantsOnlyListedAction = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set("u2", "u3")))) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilter("u1", "user", "read", roles, userRoles) == AclFilter),
+        assert(effectiveFilter("u1", "user", "create", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "user", "update", roles, userRoles) == None),
+        assert(effectiveFilter("u1", "user", "delete", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // ACLPermission with empty id set denies (no ids = no access).
+  run aclEmptyDenies = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set()))) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilter("u1", "user", "read", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Union: ACL + Permitted = All (Permitted wins, as it should).
+  run aclPlusPermittedIsAll = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set("u2")))) }))
+      .then(createRole({ id: "r2", permissions: Map("user" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(assignRole("u1", "r2"))
+      .then(all {
+        assert(effectiveFilter("u1", "user", "read", roles, userRoles) == All),
+        assert(effectiveFilter("u1", "user", "create", roles, userRoles) == All),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Union: ACL + Denied = AclFilter (Denied contributes nothing).
+  run aclPlusDeniedIsAcl = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set("u2")))) }))
+      .then(createRole({ id: "r2", permissions: Map("user" -> Denied) }))
+      .then(assignRole("u1", "r1"))
+      .then(assignRole("u1", "r2"))
+      .then(all {
+        assert(effectiveFilter("u1", "user", "read", roles, userRoles) == AclFilter),
         roles' = roles,
         userRoles' = userRoles,
       })

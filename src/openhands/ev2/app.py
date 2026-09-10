@@ -156,6 +156,16 @@ async def _sweep_mcp_aggregate() -> str | None:
     return f"rolled {count} per-user minute rows" if count else None
 
 
+async def _sweep_acl_prune() -> str | None:
+    """Remove orphaned item ids from ACLPermission policies."""
+    from openhands.ev2.security.acl_prune_service import prune_orphaned_acl_ids
+
+    factory = get_session_factory()
+    async with factory() as session:
+        count = await prune_orphaned_acl_ids(session)
+    return f"pruned {count} roles with orphaned ACL ids" if count else None
+
+
 def _partition_message(created: list[str], dropped: list[str]) -> str | None:
     """Build a log message from partition sweep results."""
     parts: list[str] = []
@@ -211,6 +221,15 @@ async def _mcp_usage_aggregate_loop() -> None:
     await _background_sweep(interval, "mcp_usage aggregator", _sweep_mcp_aggregate)
 
 
+async def _acl_prune_loop() -> None:
+    """Background sweep that prunes orphaned ids from ACLPermission policies."""
+    cfg = get_config()
+    interval = cfg.acl_prune_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "acl prune", _sweep_acl_prune)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
@@ -225,6 +244,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_llm_usage_aggregate_loop(), name="llm-usage-aggregate"),
         asyncio.create_task(_mcp_usage_partition_loop(), name="mcp-usage-partition"),
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
+        asyncio.create_task(_acl_prune_loop(), name="acl-prune"),
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()
