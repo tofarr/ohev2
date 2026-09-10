@@ -224,11 +224,3 @@ class RoleMCPServerConfigPermission(Base):
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
-
-
-__all__ = [
-    "MCPServerConfig",
-    "RoleMCPServerConfigPermission",
-    "decrypt_json_blob",
-    "encrypt_json_blob",
-]

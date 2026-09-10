@@ -181,12 +181,3 @@ def _classify_integrity_error(
             return UserSecretPermissionOrphanError(f"user {user_id} does not exist")
         return UserSecretPermissionOrphanError(f"secret {secret_id} does not exist")
     return UserSecretPermissionConflictError(f"{user_id}/{secret_id}")
-
-
-__all__ = [
-    "UserSecretPermission",
-    "UserSecretPermissionConflictError",
-    "UserSecretPermissionNotFoundError",
-    "UserSecretPermissionOrphanError",
-    "UserSecretPermissionService",
-]

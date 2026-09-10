@@ -152,9 +152,3 @@ class McpAggregatedUsage(Base):
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
-
-
-__all__ = [
-    "McpAggregatedUsage",
-    "McpUsage",
-]

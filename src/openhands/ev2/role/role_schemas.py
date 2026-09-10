@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.security.security_models import Permission
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
@@ -347,15 +347,3 @@ class RoleBatchWriteRequest(BaseModel):
         max_length=100,
         description="Operations to apply atomically; create/update/delete mixed.",
     )
-
-
-__all__ = [
-    "ROLE_ENTITY_COLUMNS",
-    "Role",
-    "RoleBatchWriteRequest",
-    "RoleCreate",
-    "RoleRead",
-    "RoleSearchFilter",
-    "RoleSearchResult",
-    "RoleUpdate",
-]

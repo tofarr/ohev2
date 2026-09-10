@@ -251,6 +251,3 @@ async def delete_sandbox_snapshot(
         await service.delete_snapshot(snapshot_id, perm_filter=perm_filter)
     except SandboxSnapshotNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
-
-
-__all__ = ["router"]

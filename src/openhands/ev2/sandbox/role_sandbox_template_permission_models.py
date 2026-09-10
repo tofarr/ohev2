@@ -81,6 +81,3 @@ class RoleSandboxTemplatePermission(Base):
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
-
-
-__all__ = ["RoleSandboxTemplatePermission"]

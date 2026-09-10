@@ -324,12 +324,3 @@ def _classify_integrity_error(
 
 # Re-export for type-checking convenience in callers that import from the
 # service namespace.
-__all__ = [
-    "BatchPermissionDeniedError",
-    "User",
-    "UserEmailConflictError",
-    "UserNotFoundError",
-    "UserPermissionScopeError",
-    "UserService",
-    "UserUsernameConflictError",
-]
