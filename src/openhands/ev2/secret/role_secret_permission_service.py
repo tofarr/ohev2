@@ -256,14 +256,3 @@ def _classify_integrity_error(
             return RoleSecretPermissionOrphanError(f"secret {secret_id} does not exist")
         return RoleSecretPermissionOrphanError(f"role {role_id} does not exist")
     return RoleSecretPermissionConflictError(f"{role_id}/{secret_id}")
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "RoleSecretPermission",
-    "RoleSecretPermissionConflictError",
-    "RoleSecretPermissionNotFoundError",
-    "RoleSecretPermissionOrphanError",
-    "RoleSecretPermissionScopeError",
-    "RoleSecretPermissionService",
-]

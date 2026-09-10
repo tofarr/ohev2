@@ -265,13 +265,3 @@ def _classify_integrity_error(
             )
         return RoleMCPServerConfigPermissionOrphanError(f"role {role_id} does not exist")
     return RoleMCPServerConfigPermissionConflictError(f"{role_id}/{mcp_server_config_id}")
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "RoleMCPServerConfigPermissionConflictError",
-    "RoleMCPServerConfigPermissionNotFoundError",
-    "RoleMCPServerConfigPermissionOrphanError",
-    "RoleMCPServerConfigPermissionScopeError",
-    "RoleMCPServerConfigPermissionService",
-]

@@ -15,7 +15,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.ev2.sandbox.sandbox_models import RoleSandboxTemplatePermission
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (
+    RoleSandboxTemplatePermission,
+)
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 

@@ -536,7 +536,7 @@ class TestAggregatedUsageRoutes:
             transport=ASGITransport(app=application), base_url="http://t"
         ) as ac:
             # Override get_session to the test engine so the user lookup resolves.
-            application.dependency_overrides[_get_session] = _session_override(engine)
+            application.dependency_overrides[_get_session] = _session_override()
             ac.headers["Authorization"] = f"Bearer {token}"
             resp = await ac.get("/llm/aggregated-usage")
         assert resp.status_code == 403
@@ -553,10 +553,11 @@ class TestAggregatedUsageRoutes:
         assert resp.status_code == 200
 
 
-def _session_override(engine):
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+def _session_override():
 
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from openhands.ev2.db import get_session_factory
+
+    factory = get_session_factory()
 
     async def _override():
         async with factory() as s:

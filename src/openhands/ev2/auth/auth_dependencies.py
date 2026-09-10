@@ -42,8 +42,6 @@ from openhands.ev2.db import SessionDep
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.security.security_models import Action, Permission
 from openhands.ev2.util.search_filter import (
-    ALL,
-    AllSearchFilter,
     NoneSearchFilter,
     OrSearchFilter,
     SearchFilter,
@@ -583,19 +581,12 @@ from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: E402
 )
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
-from openhands.ev2.sandbox import (  # noqa: E402,F401
-    sandbox_security as _sandbox_security,  # registers SandboxAccess in the Permission union
-)
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
-    RoleSandboxPermission as _RoleSandboxPermission,
-)
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
-    RoleSandboxSnapshotPermission as _RoleSandboxSnapshotPermission,
-)
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (  # noqa: E402
     RoleSandboxTemplatePermission as _RoleSandboxTemplatePermission,
 )
-from openhands.ev2.sandbox.sandbox_models import Sandbox as _Sandbox  # noqa: E402
+from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+    Sandbox as _SandboxSandbox,
+)
 from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
     SandboxSnapshot as _SandboxSnapshot,
 )
@@ -629,11 +620,17 @@ register_resource_policy(_FeatureFlag, "feature_flag_permission")
 register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
 register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignment_permission")
 register_resource_policy(_SandboxTemplate, "sandbox_template_permission")
-register_resource_policy(_Sandbox, "sandbox_permission")
+# The sandbox sandbox model is a separate governed entity. It reuses the
+# existing ``sandbox_permission`` Role column: the sandbox sandboxes are the
+# successor surface for the same logical resource, and the per-resource grant
+# table already keys on the sandbox id string.
+register_resource_policy(_SandboxSandbox, "sandbox_permission")
+# The sandbox snapshot model is a separate governed entity. It reuses the
+# existing ``sandbox_snapshot_permission`` Role column: the sandbox snapshots
+# are the successor surface for the same logical resource, and the per-resource
+# grant table already keys on the snapshot id string.
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
 register_resource_policy(_RoleSandboxTemplatePermission, "sandbox_template_grant_permission")
-register_resource_policy(_RoleSandboxPermission, "sandbox_grant_permission")
-register_resource_policy(_RoleSandboxSnapshotPermission, "sandbox_snapshot_grant_permission")
 
 
 def depends_permissions(
@@ -830,21 +827,3 @@ def _combine(filters: list[SearchFilter[Any]]) -> SearchFilter[Any] | None:
 
 AccessToken = Annotated[AuthToken | None, Depends(depends_access_token)]
 UserId = Annotated[uuid.UUID | None, Depends(depends_user_id)]
-
-
-__all__ = [
-    "ALL",
-    "AccessToken",
-    "AllSearchFilter",
-    "NoneSearchFilter",
-    "UserId",
-    "depends_access_token",
-    "depends_permissions",
-    "depends_permissions_or_none",
-    "depends_roles",
-    "depends_secret_value_permission",
-    "depends_user_id",
-    "register_resource_policy",
-    "resolve_permission_filter",
-    "resolve_permission_filter_for_column",
-]

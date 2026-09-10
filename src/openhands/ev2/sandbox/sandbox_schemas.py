@@ -1,40 +1,36 @@
-"""Pydantic schemas for sandbox templates, sandboxes, and snapshots."""
+"""Pydantic schemas for the sandbox feature.
+
+The request/response surface is intentionally a faithful superset of the
+existing sandbox-template schemas, adapted to the new template shape (an ``id``
+that is the provider's identifier — a Docker image name — plus lifecycle knobs
+``idle_pause_seconds``, ``paused_delete_seconds`` and ``max_age_seconds``).
+``provider_kind`` is dropped because the service implementation is chosen by
+configuration, not per-request, and each service owns its template variant.
+
+Templates are functionally immutable (create and delete only); there is no
+``SandboxTemplateUpdate`` schema and no update batch op. Sandboxes, by
+contrast, expose a single mutable field — ``desired_status`` — which drives
+pause/resume.
+"""
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openhands.ev2.sandbox.sandbox_models import (
-    DockerSandboxTemplateSpec,
-    FuseySandboxSnapshotArtifact,
-    FuseySandboxStorageSpec,
-    OpenHandsAgentServerSpec,
+    ExposedPort,
+    ExposedUrl,
     Sandbox,
-    SandboxFilesystem,
-    SandboxFilesystemStatus,
-    SandboxProviderKind,
-    SandboxServerSpec,
     SandboxSnapshot,
-    SandboxSnapshotStatus,
     SandboxStatus,
-    SandboxStorageKind,
-    SandboxStorageSpec,
     SandboxTemplate,
-    SandboxTemplateSpec,
+    SnapshotMode,
+    VolumeMount,
 )
 from openhands.ev2.util.search_filter import BaseSearchFilter
-
-
-class ExposedSandboxUrl(BaseModel):
-    """Public URL exposed by an active sandbox."""
-
-    name: str = Field(min_length=1, max_length=64)
-    url: str = Field(min_length=1, max_length=2048)
-    protocol: Literal["http", "tcp"] = "http"
 
 
 class SandboxTemplateCreate(BaseModel):
@@ -42,52 +38,21 @@ class SandboxTemplateCreate(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: str = Field(min_length=1, max_length=255)
-    provider_kind: SandboxProviderKind = SandboxProviderKind.DOCKER
-    template_spec: SandboxTemplateSpec
-    server_spec: SandboxServerSpec = Field(default_factory=OpenHandsAgentServerSpec)
-    storage_spec: SandboxStorageSpec = Field(default_factory=FuseySandboxStorageSpec)
-    description: str | None = Field(default=None, max_length=4096)
-    idle_timeout_seconds: int | None = Field(default=None, gt=0)
-    max_lifetime_seconds: int | None = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def _validate_kinds(self) -> SandboxTemplateCreate:
-        if self.provider_kind != SandboxProviderKind.DOCKER:
-            raise ValueError("only the docker sandbox provider is supported initially")
-        if not isinstance(self.template_spec, DockerSandboxTemplateSpec):
-            raise ValueError(
-                "template_spec must be DockerSandboxTemplateSpec for provider_kind=docker"
-            )
-        if not isinstance(self.storage_spec, FuseySandboxStorageSpec):
-            raise ValueError("only FuseySandboxStorageSpec is supported initially")
-        return self
-
-
-class SandboxTemplateUpdate(BaseModel):
-    """Payload to partially update a sandbox template."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    template_spec: SandboxTemplateSpec | None = None
-    server_spec: SandboxServerSpec | None = None
-    storage_spec: SandboxStorageSpec | None = None
-    description: str | None = Field(default=None, max_length=4096)
-    idle_timeout_seconds: int | None = Field(default=None, gt=0)
-    max_lifetime_seconds: int | None = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def _validate_specs(self) -> SandboxTemplateUpdate:
-        if self.template_spec is not None and not isinstance(
-            self.template_spec, DockerSandboxTemplateSpec
-        ):
-            raise ValueError("only DockerSandboxTemplateSpec is supported initially")
-        if self.storage_spec is not None and not isinstance(
-            self.storage_spec, FuseySandboxStorageSpec
-        ):
-            raise ValueError("only FuseySandboxStorageSpec is supported initially")
-        return self
+    id: str = Field(min_length=1, max_length=1024)
+    command: list[str] | None = None
+    initial_env: dict[str, str] = Field(
+        default_factory=dict, description="Initial Environment Variables"
+    )
+    working_dir: str = "/home/openhands/workspace"
+    idle_pause_seconds: int | None = Field(default=None, gt=0)
+    paused_delete_seconds: int | None = Field(default=None, gt=0)
+    max_age_seconds: int | None = Field(default=None, gt=0)
+    max_memory: int | None = Field(default=None, gt=0)
+    exposed_ports: list[ExposedPort] = Field(default_factory=list)
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description="Snapshot strategy supported by sandboxes built from this template.",
+    )
 
 
 class SandboxTemplateRead(BaseModel):
@@ -95,26 +60,28 @@ class SandboxTemplateRead(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
-    name: str
-    provider_kind: SandboxProviderKind
-    template_spec: SandboxTemplateSpec
-    server_spec: SandboxServerSpec
-    storage_spec: SandboxStorageSpec
-    user_id: uuid.UUID
-    description: str | None
-    idle_timeout_seconds: int | None
-    max_lifetime_seconds: int | None
+    id: str
+    command: list[str] | None
+    initial_env: dict[str, str]
+    working_dir: str
+    idle_pause_seconds: int | None
+    paused_delete_seconds: int | None
+    max_age_seconds: int | None
+    max_memory: int | None
+    exposed_ports: list[ExposedPort]
+    snapshot_mode: SnapshotMode
     created_at: datetime
-    updated_at: datetime
 
 
 class SandboxTemplateSearchFilter(BaseSearchFilter[SandboxTemplate]):
-    """Optional filters for ``GET /sandbox-templates``."""
+    """Optional filters for ``GET /sandbox/sandbox-templates``."""
 
-    name__contains: str | None = Field(default=None)
-    provider_kind__eq: SandboxProviderKind | None = Field(default=None)
-    user_id__eq: uuid.UUID | None = Field(default=None)
+    id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
+    id__eq: str | None = Field(default=None, description="Exact id match.")
+    working_dir__eq: str | None = Field(default=None, description="Exact working_dir match.")
+    idle_pause_seconds__eq: int | None = Field(default=None)
+    paused_delete_seconds__eq: int | None = Field(default=None)
+    max_age_seconds__eq: int | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)
     created_at__lt: datetime | None = Field(default=None)
     created_at__gt: datetime | None = Field(default=None)
@@ -125,67 +92,76 @@ class SandboxTemplateSearchResult(BaseModel):
     """Paginated collection of sandbox templates."""
 
     items: list[SandboxTemplateRead]
-    next_cursor: str | None = None
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
     limit: int
 
 
 class SandboxTemplateBatchCreate(BaseModel):
-    """Create operation within a sandbox template batch."""
+    """Create operation within a sandbox template batch write."""
 
     op: Literal["create"] = "create"
     data: SandboxTemplateCreate
 
 
-class SandboxTemplateBatchUpdate(BaseModel):
-    """Update operation within a sandbox template batch."""
-
-    op: Literal["update"] = "update"
-    id: uuid.UUID
-    data: SandboxTemplateUpdate
-
-
 class SandboxTemplateBatchDelete(BaseModel):
-    """Delete operation within a sandbox template batch."""
+    """Delete operation within a sandbox template batch write."""
 
     op: Literal["delete"] = "delete"
-    id: uuid.UUID
+    id: str
 
 
 SandboxTemplateBatchOp = Annotated[
-    SandboxTemplateBatchCreate | SandboxTemplateBatchUpdate | SandboxTemplateBatchDelete,
+    SandboxTemplateBatchCreate | SandboxTemplateBatchDelete,
     Field(discriminator="op"),
 ]
 
 
 class SandboxTemplateBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandbox-templates/batch``."""
+    """Request body for ``POST /sandbox/sandbox-templates/batch``."""
 
-    operations: list[SandboxTemplateBatchOp] = Field(min_length=1, max_length=100)
+    operations: list[SandboxTemplateBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/delete mixed (no update).",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Sandboxes.
+# --------------------------------------------------------------------------- #
 
 
 class SandboxCreate(BaseModel):
-    """Payload to create a durable sandbox in the inactive state."""
+    """Payload to create a sandbox.
+
+    The sandbox is created from a template (``sandbox_template_id`` names the
+    template id) and starts in the ``inactive`` desired state. The sandbox
+    ``id`` is assigned by the sandbox service (the provider generates it —
+    e.g. Docker mints a humorous container name), never supplied by the
+    caller. Only ``desired_status`` is mutable after creation (via
+    :class:`SandboxUpdate`).
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: str = Field(min_length=1, max_length=255)
-    template_id: uuid.UUID
-    filesystem_id: uuid.UUID | None = None
-    snapshot_id: uuid.UUID | None = None
-    description: str | None = Field(default=None, max_length=4096)
-    idle_timeout_seconds: int | None = Field(default=None, gt=0)
-    max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    sandbox_template_id: str = Field(
+        min_length=1, max_length=1024, description="Template id to instantiate."
+    )
 
 
 class SandboxUpdate(BaseModel):
-    """Payload to partially update sandbox metadata."""
+    """Payload to partially update a sandbox.
+
+    The only mutable field is ``desired_status``; setting it drives
+    pause/resume (``active``/``inactive``) on the backing container.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=4096)
-    idle_timeout_seconds: int | None = Field(default=None, gt=0)
-    max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    desired_status: SandboxStatus
 
 
 class SandboxRead(BaseModel):
@@ -193,36 +169,28 @@ class SandboxRead(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
-    name: str
-    template_id: uuid.UUID
-    filesystem_id: uuid.UUID
-    current_snapshot_id: uuid.UUID | None
-    provider_kind: SandboxProviderKind
+    id: str
+    sandbox_template_id: str
     status: SandboxStatus
-    status_reason: str | None
-    exposed_urls: list[ExposedSandboxUrl]
-    description: str | None
-    idle_timeout_seconds: int | None
-    max_lifetime_seconds: int | None
-    user_id: uuid.UUID
-    last_activity_at: datetime | None
-    last_activated_at: datetime | None
-    last_deactivated_at: datetime | None
-    delete_started_at: datetime | None
+    desired_status: SandboxStatus
+    snapshot_mode: SnapshotMode
+    session_api_key: str | None
+    exposed_urls: list[ExposedUrl]
     created_at: datetime
-    updated_at: datetime
+    status_detail: str | None
+    volume_mounts: list[VolumeMount]
 
 
 class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
-    """Optional filters for ``GET /sandboxes``."""
+    """Optional filters for ``GET /sandbox/sandboxes``."""
 
-    name__contains: str | None = Field(default=None)
-    provider_kind__eq: SandboxProviderKind | None = Field(default=None)
+    id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
+    id__eq: str | None = Field(default=None, description="Exact id match.")
+    sandbox_template_id__eq: str | None = Field(
+        default=None, description="Exact template id match."
+    )
     status__eq: SandboxStatus | None = Field(default=None)
-    template_id__eq: uuid.UUID | None = Field(default=None)
-    filesystem_id__eq: uuid.UUID | None = Field(default=None)
-    user_id__eq: uuid.UUID | None = Field(default=None)
+    desired_status__eq: SandboxStatus | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)
     created_at__lt: datetime | None = Field(default=None)
     created_at__gt: datetime | None = Field(default=None)
@@ -233,95 +201,106 @@ class SandboxSearchResult(BaseModel):
     """Paginated collection of sandboxes."""
 
     items: list[SandboxRead]
-    next_cursor: str | None = None
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
     limit: int
 
 
 class SandboxBatchCreate(BaseModel):
-    """Create operation within a sandbox batch."""
+    """Create operation within a sandbox batch write."""
 
     op: Literal["create"] = "create"
     data: SandboxCreate
 
 
-class SandboxBatchUpdate(BaseModel):
-    """Update operation within a sandbox batch."""
-
-    op: Literal["update"] = "update"
-    id: uuid.UUID
-    data: SandboxUpdate
-
-
 class SandboxBatchDelete(BaseModel):
-    """Delete operation within a sandbox batch."""
+    """Delete operation within a sandbox batch write."""
 
     op: Literal["delete"] = "delete"
-    id: uuid.UUID
+    id: str
 
 
 SandboxBatchOp = Annotated[
-    SandboxBatchCreate | SandboxBatchUpdate | SandboxBatchDelete,
+    SandboxBatchCreate | SandboxBatchDelete,
     Field(discriminator="op"),
 ]
 
 
 class SandboxBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandboxes/batch``."""
+    """Request body for ``POST /sandbox/sandboxes/batch``."""
 
-    operations: list[SandboxBatchOp] = Field(min_length=1, max_length=100)
+    operations: list[SandboxBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Operations to apply atomically; create/delete mixed (no update).",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox snapshots.
+# --------------------------------------------------------------------------- #
 
 
 class SandboxSnapshotCreate(BaseModel):
-    """Payload to create a named Fusey generation snapshot from a sandbox."""
+    """Payload to create a sandbox snapshot.
+
+    Exactly one source is supplied: ``sandbox_id`` snapshots an existing
+    sandbox, while ``file`` (handled by the router as a multipart upload)
+    together with ``schema_type`` imports a snapshot from an uploaded artifact.
+    The service receives already-read file bytes via ``file_data`` when a file
+    import is requested.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: str = Field(min_length=1, max_length=255)
-    source_sandbox_id: uuid.UUID
-    description: str | None = Field(default=None, max_length=4096)
-    generation: str | None = Field(default=None, min_length=1, max_length=255)
-    expires_at: datetime | None = None
+    id: str = Field(min_length=1, max_length=255, description="Caller-chosen snapshot id.")
+    sandbox_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Sandbox id to snapshot. Mutually exclusive with file import.",
+    )
+    schema_type: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Schema type of an uploaded snapshot file (e.g. ``docker-image-tar``).",
+    )
+    file_data: bytes | None = Field(
+        default=None,
+        description="Raw bytes of an uploaded snapshot file; set by the router, not by callers.",
+    )
 
-
-class SandboxSnapshotUpdate(BaseModel):
-    """Payload to partially update snapshot metadata."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=4096)
-    expires_at: datetime | None = None
+    @model_validator(mode="after")
+    def _validate_exclusive_source(self) -> SandboxSnapshotCreate:
+        if self.sandbox_id is not None and self.file_data is not None:
+            raise ValueError("sandbox_id and file are mutually exclusive.")
+        if self.sandbox_id is None and self.file_data is None:
+            raise ValueError("Either sandbox_id or a file upload is required.")
+        if self.file_data is not None and not self.schema_type:
+            raise ValueError("schema_type is required when importing a file.")
+        return self
 
 
 class SandboxSnapshotRead(BaseModel):
-    """Sandbox snapshot representation returned by the API."""
+    """Sandbox snapshot representation returned by the public API."""
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
-    name: str
-    filesystem_id: uuid.UUID
-    source_sandbox_id: uuid.UUID | None
-    storage_kind: SandboxStorageKind
-    status: SandboxSnapshotStatus
-    generation: str
-    snapshot_artifact: FuseySandboxSnapshotArtifact
-    user_id: uuid.UUID
-    description: str | None
-    expires_at: datetime | None
+    id: str
     created_at: datetime
-    updated_at: datetime
+    download_url: str | None
+    image_id: str | None = None
+    sandbox_id: str | None = None
 
 
 class SandboxSnapshotSearchFilter(BaseSearchFilter[SandboxSnapshot]):
-    """Optional filters for ``GET /sandbox-snapshots``."""
+    """Optional filters for ``GET /sandbox/sandbox-snapshots``."""
 
-    name__contains: str | None = Field(default=None)
-    filesystem_id__eq: uuid.UUID | None = Field(default=None)
-    source_sandbox_id__eq: uuid.UUID | None = Field(default=None)
-    storage_kind__eq: SandboxStorageKind | None = Field(default=None)
-    status__eq: SandboxSnapshotStatus | None = Field(default=None)
-    user_id__eq: uuid.UUID | None = Field(default=None)
+    id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
+    id__eq: str | None = Field(default=None, description="Exact id match.")
+    sandbox_id__eq: str | None = Field(default=None, description="Exact source sandbox id match.")
     created_at__gte: datetime | None = Field(default=None)
     created_at__lt: datetime | None = Field(default=None)
     created_at__gt: datetime | None = Field(default=None)
@@ -332,72 +311,35 @@ class SandboxSnapshotSearchResult(BaseModel):
     """Paginated collection of sandbox snapshots."""
 
     items: list[SandboxSnapshotRead]
-    next_cursor: str | None = None
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
     limit: int
 
 
-class SandboxSnapshotBatchCreate(BaseModel):
-    """Create operation within a snapshot batch."""
-
-    op: Literal["create"] = "create"
-    data: SandboxSnapshotCreate
-
-
-class SandboxSnapshotBatchUpdate(BaseModel):
-    """Update operation within a snapshot batch."""
-
-    op: Literal["update"] = "update"
-    id: uuid.UUID
-    data: SandboxSnapshotUpdate
-
-
 class SandboxSnapshotBatchDelete(BaseModel):
-    """Delete operation within a snapshot batch."""
+    """Delete operation within a snapshot batch write."""
 
     op: Literal["delete"] = "delete"
-    id: uuid.UUID
+    id: str
 
 
 SandboxSnapshotBatchOp = Annotated[
-    SandboxSnapshotBatchCreate | SandboxSnapshotBatchUpdate | SandboxSnapshotBatchDelete,
+    SandboxSnapshotBatchDelete,
     Field(discriminator="op"),
 ]
 
 
 class SandboxSnapshotBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandbox-snapshots/batch``."""
+    """Request body for ``POST /sandbox/sandbox-snapshots/batch``.
 
-    operations: list[SandboxSnapshotBatchOp] = Field(min_length=1, max_length=100)
+    Snapshots are created through the multipart create endpoint (a file may be
+    involved), so the batch write supports delete operations only.
+    """
 
-
-class SandboxFilesystemSearchFilter(BaseSearchFilter[SandboxFilesystem]):
-    """Internal filesystem filter type used by services."""
-
-    storage_kind__eq: SandboxStorageKind | None = Field(default=None)
-    status__eq: SandboxFilesystemStatus | None = Field(default=None)
-    user_id__eq: uuid.UUID | None = Field(default=None)
-
-
-__all__ = [
-    "DockerSandboxTemplateSpec",
-    "FuseySandboxStorageSpec",
-    "OpenHandsAgentServerSpec",
-    "SandboxBatchWriteRequest",
-    "SandboxCreate",
-    "SandboxRead",
-    "SandboxSearchFilter",
-    "SandboxSearchResult",
-    "SandboxSnapshotBatchWriteRequest",
-    "SandboxSnapshotCreate",
-    "SandboxSnapshotRead",
-    "SandboxSnapshotSearchFilter",
-    "SandboxSnapshotSearchResult",
-    "SandboxSnapshotUpdate",
-    "SandboxTemplateBatchWriteRequest",
-    "SandboxTemplateCreate",
-    "SandboxTemplateRead",
-    "SandboxTemplateSearchFilter",
-    "SandboxTemplateSearchResult",
-    "SandboxTemplateUpdate",
-    "SandboxUpdate",
-]
+    operations: list[SandboxSnapshotBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Delete operations to apply atomically.",
+    )

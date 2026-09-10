@@ -101,12 +101,12 @@ class MCPServerConfig(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -216,19 +216,11 @@ class RoleMCPServerConfigPermission(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
-
-
-__all__ = [
-    "MCPServerConfig",
-    "RoleMCPServerConfigPermission",
-    "decrypt_json_blob",
-    "encrypt_json_blob",
-]

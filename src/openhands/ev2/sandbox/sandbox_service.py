@@ -1,630 +1,614 @@
-"""Service layer for sandbox templates, sandboxes, and snapshots."""
+"""Service layer for the sandbox feature.
+
+The sandbox control plane is supplied by a pluggable :class:`SandboxService`
+implementation selected at startup via the ``sandbox_service_class`` config
+attribute (a fully qualified class name). The service is constructed once and
+held as an async context manager tied to the server lifespan; the concrete
+implementations (Docker, Kubernetes, E2B, ...) live in their own modules and
+are only imported when selected via the factory below.
+
+The service owns two governed surfaces:
+
+* **Sandbox templates** — functionally immutable (create and delete only).
+  There is no ``update_template`` path; provider image/label metadata is set
+  at build time and cannot be patched.
+* **Sandboxes** — created from a template, deleted when no longer needed, and
+  paused/resumed by updating the single mutable field ``desired_status``.
+"""
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime
+import importlib
+from abc import ABC, abstractmethod
+from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.sandbox.sandbox_models import (
-    DockerSandboxRuntimeState,
-    FuseySandboxSnapshotArtifact,
-    FuseySandboxStorageSpec,
-    OpenHandsAgentServerState,
-    Sandbox,
-    SandboxCompute,
-    SandboxComputeStatus,
-    SandboxFilesystem,
-    SandboxFilesystemStatus,
-    SandboxSnapshot,
-    SandboxSnapshotStatus,
-    SandboxStatus,
-    SandboxStorageKind,
-    SandboxTemplate,
-)
+from openhands.ev2.sandbox.sandbox_models import Sandbox, SandboxSnapshot, SandboxTemplate
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchCreate,
     SandboxBatchDelete,
     SandboxBatchOp,
-    SandboxBatchUpdate,
     SandboxCreate,
-    SandboxSearchFilter,
-    SandboxSnapshotBatchCreate,
     SandboxSnapshotBatchDelete,
     SandboxSnapshotBatchOp,
-    SandboxSnapshotBatchUpdate,
     SandboxSnapshotCreate,
     SandboxSnapshotSearchFilter,
-    SandboxSnapshotUpdate,
     SandboxTemplateBatchCreate,
     SandboxTemplateBatchDelete,
     SandboxTemplateBatchOp,
-    SandboxTemplateBatchUpdate,
     SandboxTemplateCreate,
     SandboxTemplateSearchFilter,
-    SandboxTemplateUpdate,
     SandboxUpdate,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
+class SandboxTemplateNotFoundError(Exception):
+    """Raised when a sandbox template does not exist or is out of scope."""
+
+
+class SandboxTemplateConflictError(Exception):
+    """Raised when a create collides with an existing template."""
+
+
+class SandboxTemplatePermissionScopeError(Exception):
+    """Raised when a create payload falls outside the principal's scope."""
+
+
 class SandboxNotFoundError(Exception):
     """Raised when a sandbox does not exist or is out of scope."""
 
 
-class SandboxTemplateNotFoundError(Exception):
-    """Raised when a template does not exist or is out of scope."""
-
-
-class SandboxSnapshotNotFoundError(Exception):
-    """Raised when a snapshot does not exist or is out of scope."""
-
-
-class SandboxInvalidStateError(Exception):
-    """Raised when a lifecycle action is not valid for the current state."""
+class SandboxConflictError(Exception):
+    """Raised when a create collides with an existing sandbox."""
 
 
 class SandboxPermissionScopeError(Exception):
-    """Raised when a new sandbox row falls outside the principal's scope."""
+    """Raised when a sandbox create payload falls outside the principal's scope."""
 
 
-class SandboxTemplatePermissionScopeError(Exception):
-    """Raised when a new template row falls outside the principal's scope."""
+class SandboxSnapshotNotFoundError(Exception):
+    """Raised when a sandbox snapshot does not exist or is out of scope."""
+
+
+class SandboxSnapshotConflictError(Exception):
+    """Raised when a snapshot create collides with an existing id."""
 
 
 class SandboxSnapshotPermissionScopeError(Exception):
-    """Raised when a new snapshot row falls outside the principal's scope."""
+    """Raised when a snapshot create payload falls outside the principal's scope."""
+
+
+class SandboxSnapshotUnsupportedError(Exception):
+    """Raised when the provider does not support snapshots for a sandbox."""
 
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
 
 
-class SandboxTemplateService:
-    """CRUD operations over sandbox templates."""
+class SandboxService(DiscriminatedUnionMixin, ABC):
+    """Abstract base for the sandbox control plane.
 
-    def __init__(
+    Concrete subclasses provide provider-specific template and sandbox
+    persistence. The generic CRUD helpers (search, batch, count) are
+    implemented here over the provider hooks and are shared by every
+    implementation. The service is created once at startup and held as an
+    async context manager for the server's lifetime; every request resolves
+    the same instance and passes its own ``perm_filter`` so authorization
+    stays per-principal.
+
+    Templates are immutable: only ``create_template``/``delete_template`` are
+    exposed (no update). Sandboxes are mutable solely via ``desired_status``
+    (``update_sandbox``), which drives pause/resume.
+    """
+
+    # ------------------------------------------------------------------ #
+    # Async context manager (server lifecycle). Concrete subclasses hold
+    # provider clients; ``__aenter__`` acquires them and ``aclose`` releases.
+    # ------------------------------------------------------------------ #
+    async def __aenter__(self) -> SandboxService:
+        return self
+
+    async def __aexit__(
         self,
-        session: AsyncSession,
-        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: Any,
     ) -> None:
-        self._session = session
-        self._perm_filter = perm_filter
+        await self.aclose()
 
-    async def create(
-        self, payload: SandboxTemplateCreate, *, user_id: uuid.UUID
-    ) -> SandboxTemplate:
-        template = SandboxTemplate(
-            name=payload.name,
-            provider_kind=payload.provider_kind,
-            template_spec=payload.template_spec,
-            server_spec=payload.server_spec,
-            storage_spec=payload.storage_spec,
-            user_id=user_id,
-            description=payload.description,
-            idle_timeout_seconds=payload.idle_timeout_seconds,
-            max_lifetime_seconds=payload.max_lifetime_seconds,
-        )
-        if not self._perm_filter.matches(template):
-            raise SandboxTemplatePermissionScopeError(payload.name)
-        self._session.add(template)
-        await self._session.flush()
-        await self._session.refresh(template)
-        return template
+    async def aclose(self) -> None:
+        """Release any provider resources. Default is a no-op."""
+        return None
 
-    async def get(self, template_id: uuid.UUID) -> SandboxTemplate:
-        stmt = self._perm_filter.filter_sql(
-            select(SandboxTemplate).where(SandboxTemplate.id == template_id)
-        )
-        result = await self._session.execute(stmt)
-        template = result.scalar_one_or_none()
-        if template is None:
-            raise SandboxTemplateNotFoundError(str(template_id))
-        return template
-
-    async def get_many(self, template_ids: list[uuid.UUID]) -> list[SandboxTemplate | None]:
-        if not template_ids:
-            return []
-        stmt = self._perm_filter.filter_sql(
-            select(SandboxTemplate).where(SandboxTemplate.id.in_(template_ids))
-        )
-        result = await self._session.execute(stmt)
-        by_id = {template.id: template for template in result.scalars().all()}
-        return [by_id.get(template_id) for template_id in template_ids]
-
-    async def search(
+    # ------------------------------------------------------------------ #
+    # Generic public template CRUD (built on the provider hooks below).
+    # Templates are immutable: no update method.
+    # ------------------------------------------------------------------ #
+    async def list_templates(
         self,
         *,
-        cursor: uuid.UUID | None = None,
-        limit: int = 50,
-        search_filter: SandboxTemplateSearchFilter | None = None,
-    ) -> tuple[list[SandboxTemplate], uuid.UUID | None]:
-        stmt = self._perm_filter.filter_sql(select(SandboxTemplate).order_by(SandboxTemplate.id))
-        if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        if cursor is not None:
-            stmt = stmt.where(SandboxTemplate.id > cursor)
-        stmt = stmt.limit(limit)
-        result = await self._session.execute(stmt)
-        templates = list(result.scalars().all())
-        next_cursor = templates[-1].id if len(templates) == limit else None
-        return templates, next_cursor
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> list[SandboxTemplate]:
+        """List every template the principal may see."""
+        templates = await self._list_templates()
+        return [template for template in templates if perm_filter.matches(template)]
 
-    async def update(
-        self, template_id: uuid.UUID, payload: SandboxTemplateUpdate
+    async def get_template(
+        self,
+        template_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
     ) -> SandboxTemplate:
-        template = await self.get(template_id)
-        for field in payload.model_fields_set:
-            setattr(template, field, getattr(payload, field))
-        await self._session.flush()
-        await self._session.refresh(template)
+        """Retrieve a template, scoped by ``perm_filter``.
+
+        Raises :class:`SandboxTemplateNotFoundError` when missing or out of
+        scope so callers return 404 without leaking existence.
+        """
+        template = await self._get_template(template_id)
+        if not perm_filter.matches(template):
+            raise SandboxTemplateNotFoundError(template_id)
         return template
 
-    async def delete(self, template_id: uuid.UUID) -> None:
-        template = await self.get(template_id)
-        await self._session.delete(template)
-        await self._session.flush()
+    async def create_template(
+        self,
+        payload: SandboxTemplateCreate,
+        *,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> SandboxTemplate:
+        """Create a template. Raises on out-of-scope payload or duplicate id."""
+        template = self._template_from_create(payload)
+        if not perm_filter.matches(template):
+            raise SandboxTemplatePermissionScopeError(payload.id)
+        return await self._create_template(template)
 
-    async def count(self, search_filter: SandboxTemplateSearchFilter | None = None) -> int:
-        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(SandboxTemplate))
+    async def delete_template(
+        self,
+        template_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> None:
+        """Delete a template. Raises when missing or out of scope."""
+        await self.get_template(template_id, perm_filter=perm_filter)
+        await self._delete_template(template_id)
+
+    async def get_templates(
+        self,
+        template_ids: list[str],
+        *,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> list[SandboxTemplate | None]:
+        """Batch retrieve templates, positionally aligned with the ids."""
+        templates = await self.list_templates(perm_filter=perm_filter)
+        by_id = {template.id: template for template in templates}
+        return [by_id.get(template_id) for template_id in template_ids]
+
+    async def search_templates(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        search_filter: SandboxTemplateSearchFilter | None = None,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> tuple[list[SandboxTemplate], str | None]:
+        """Search templates ordered by id, key-paginated via an opaque id cursor."""
+        templates = await self.list_templates(perm_filter=perm_filter)
         if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
+            templates = [t for t in templates if search_filter.matches(t)]
+        templates.sort(key=lambda template: template.id)
+        if cursor is not None:
+            templates = [t for t in templates if t.id > cursor]
+        page = templates[:limit]
+        next_cursor = page[-1].id if len(templates) > limit else None
+        return page, next_cursor
+
+    async def count_templates(
+        self,
+        search_filter: SandboxTemplateSearchFilter | None = None,
+        *,
+        perm_filter: SearchFilter[SandboxTemplate] = ALL,
+    ) -> int:
+        """Count templates in scope, optionally narrowed by ``search_filter``."""
+        templates = await self.list_templates(perm_filter=perm_filter)
+        if search_filter is not None:
+            templates = [t for t in templates if search_filter.matches(t)]
+        return len(templates)
 
     async def apply_batch(
         self,
         operations: list[SandboxTemplateBatchOp],
         perm_filters: dict[Action, SearchFilter[SandboxTemplate] | None],
-        *,
-        user_id: uuid.UUID,
     ) -> list[SandboxTemplate | None]:
-        results: list[SandboxTemplate | None] = []
-        for op in operations:
-            if isinstance(op, SandboxTemplateBatchCreate):
-                filt = perm_filters.get(Action.CREATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("create")
-                results.append(
-                    await SandboxTemplateService(self._session, filt).create(
-                        op.data, user_id=user_id
-                    )
-                )
-            elif isinstance(op, SandboxTemplateBatchUpdate):
-                filt = perm_filters.get(Action.UPDATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("update")
-                results.append(
-                    await SandboxTemplateService(self._session, filt).update(op.id, op.data)
-                )
-            elif isinstance(op, SandboxTemplateBatchDelete):
-                filt = perm_filters.get(Action.DELETE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("delete")
-                await SandboxTemplateService(self._session, filt).delete(op.id)
-                results.append(None)
-        return results
+        """Apply a mix of create/delete template operations.
 
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter denies that operation. Operations are
+        applied sequentially — the provider has no transaction, so batch
+        atomicity cannot be guaranteed. Returns results positionally aligned
+        with *operations* (``None`` for deletes).
+        """
+        return [await self._apply_template_batch_op(op, perm_filters) for op in operations]
 
-class SandboxService:
-    """CRUD and lifecycle operations over durable sandboxes."""
-
-    def __init__(
+    async def _apply_template_batch_op(
         self,
-        session: AsyncSession,
+        op: SandboxTemplateBatchOp,
+        perm_filters: dict[Action, SearchFilter[SandboxTemplate] | None],
+    ) -> SandboxTemplate | None:
+        if isinstance(op, SandboxTemplateBatchCreate):
+            filt = self._require_action(perm_filters, Action.CREATE, "create")
+            return await self.create_template(op.data, perm_filter=filt)
+        if isinstance(op, SandboxTemplateBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_template(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown sandbox-template batch op: {type(op).__name__}")
+
+    # ------------------------------------------------------------------ #
+    # Generic public sandbox CRUD (built on the provider hooks below).
+    # Only ``desired_status`` is mutable (via ``update_sandbox``).
+    # ------------------------------------------------------------------ #
+    async def list_sandboxes(
+        self,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> list[Sandbox]:
+        """List every sandbox the principal may see."""
+        sandboxes = await self._list_sandboxes()
+        return [sandbox for sandbox in sandboxes if perm_filter.matches(sandbox)]
+
+    async def get_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Retrieve a sandbox, scoped by ``perm_filter``.
+
+        Raises :class:`SandboxNotFoundError` when missing or out of scope so
+        callers return 404 without leaking existence.
+        """
+        sandbox = await self._get_sandbox(sandbox_id)
+        if not perm_filter.matches(sandbox):
+            raise SandboxNotFoundError(sandbox_id)
+        return sandbox
+
+    async def create_sandbox(
+        self,
+        payload: SandboxCreate,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Create a sandbox. Raises on out-of-scope payload or provider conflict.
+
+        The sandbox ``id`` is assigned by the provider during creation; the
+        pre-persistence model built by ``_sandbox_from_create`` is checked
+        against ``perm_filter`` (the principal's create scope) before the
+        backing compute is started.
+        """
+        sandbox = self._sandbox_from_create(payload)
+        if not perm_filter.matches(sandbox):
+            raise SandboxPermissionScopeError(payload.sandbox_template_id)
+        return await self._create_sandbox(sandbox)
+
+    async def update_sandbox(
+        self,
+        sandbox_id: str,
+        payload: SandboxUpdate,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Update a sandbox's ``desired_status`` (pause/resume).
+
+        Raises :class:`SandboxNotFoundError` when missing or out of scope.
+        """
+        await self.get_sandbox(sandbox_id, perm_filter=perm_filter)
+        return await self._update_sandbox(sandbox_id, payload)
+
+    async def delete_sandbox(
+        self,
+        sandbox_id: str,
+        *,
         perm_filter: SearchFilter[Sandbox] = ALL,
     ) -> None:
-        self._session = session
-        self._perm_filter = perm_filter
+        """Delete a sandbox. Raises when missing or out of scope."""
+        await self.get_sandbox(sandbox_id, perm_filter=perm_filter)
+        await self._delete_sandbox(sandbox_id)
 
-    async def create(
+    async def get_sandboxes(
         self,
-        payload: SandboxCreate,
+        sandbox_ids: list[str],
         *,
-        user_id: uuid.UUID,
-        template_filter: SearchFilter[SandboxTemplate] = ALL,
-        snapshot_filter: SearchFilter[SandboxSnapshot] = ALL,
-    ) -> Sandbox:
-        template = await SandboxTemplateService(self._session, template_filter).get(
-            payload.template_id
-        )
-        snapshot = None
-        if payload.snapshot_id is not None:
-            snapshot = await SandboxSnapshotService(self._session, snapshot_filter).get(
-                payload.snapshot_id
-            )
-        filesystem = await self._filesystem_for_create(payload, template, snapshot, user_id=user_id)
-        sandbox = Sandbox(
-            name=payload.name,
-            template_id=template.id,
-            filesystem_id=filesystem.id,
-            provider_kind=template.provider_kind,
-            user_id=user_id,
-            status=SandboxStatus.INACTIVE,
-            description=payload.description,
-            status_reason=None,
-            current_snapshot_id=snapshot.id if snapshot is not None else None,
-            current_compute_id=None,
-            exposed_urls=[],
-            idle_timeout_seconds=payload.idle_timeout_seconds,
-            max_lifetime_seconds=payload.max_lifetime_seconds,
-        )
-        if not self._perm_filter.matches(sandbox):
-            raise SandboxPermissionScopeError(payload.name)
-        self._session.add(sandbox)
-        await self._session.flush()
-        await self._session.refresh(sandbox)
-        return sandbox
-
-    async def _filesystem_for_create(
-        self,
-        payload: SandboxCreate,
-        template: SandboxTemplate,
-        snapshot: SandboxSnapshot | None,
-        *,
-        user_id: uuid.UUID,
-    ) -> SandboxFilesystem:
-        if payload.filesystem_id is not None:
-            filesystem = await self._get_owned_filesystem(payload.filesystem_id, user_id=user_id)
-            if snapshot is not None and snapshot.filesystem_id != filesystem.id:
-                raise SandboxInvalidStateError(
-                    "snapshot does not belong to the requested filesystem"
-                )
-            return filesystem
-        if not isinstance(template.storage_spec, FuseySandboxStorageSpec):
-            raise SandboxInvalidStateError("only Fusey storage is supported")
-        filesystem = SandboxFilesystem(
-            storage_kind=SandboxStorageKind.FUSEY,
-            object_prefix=f"sandbox-filesystems/{uuid.uuid4()}/",
-            user_id=user_id,
-            status=SandboxFilesystemStatus.READY,
-            head_generation=snapshot.generation if snapshot is not None else None,
-            mount_path_default=template.storage_spec.mount_path,
-            max_size_bytes=template.storage_spec.max_size_bytes,
-            size_bytes_estimate=None,
-        )
-        self._session.add(filesystem)
-        await self._session.flush()
-        await self._session.refresh(filesystem)
-        return filesystem
-
-    async def _get_owned_filesystem(
-        self,
-        filesystem_id: uuid.UUID,
-        *,
-        user_id: uuid.UUID,
-    ) -> SandboxFilesystem:
-        result = await self._session.execute(
-            select(SandboxFilesystem).where(
-                SandboxFilesystem.id == filesystem_id,
-                SandboxFilesystem.user_id == user_id,
-            )
-        )
-        filesystem = result.scalar_one_or_none()
-        if filesystem is None:
-            raise SandboxInvalidStateError("filesystem not found")
-        return filesystem
-
-    async def get(self, sandbox_id: uuid.UUID) -> Sandbox:
-        stmt = self._perm_filter.filter_sql(select(Sandbox).where(Sandbox.id == sandbox_id))
-        result = await self._session.execute(stmt)
-        sandbox = result.scalar_one_or_none()
-        if sandbox is None:
-            raise SandboxNotFoundError(str(sandbox_id))
-        return sandbox
-
-    async def get_many(self, sandbox_ids: list[uuid.UUID]) -> list[Sandbox | None]:
-        if not sandbox_ids:
-            return []
-        stmt = self._perm_filter.filter_sql(select(Sandbox).where(Sandbox.id.in_(sandbox_ids)))
-        result = await self._session.execute(stmt)
-        by_id = {sandbox.id: sandbox for sandbox in result.scalars().all()}
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> list[Sandbox | None]:
+        """Batch retrieve sandboxes, positionally aligned with the ids."""
+        sandboxes = await self.list_sandboxes(perm_filter=perm_filter)
+        by_id = {sandbox.id: sandbox for sandbox in sandboxes}
         return [by_id.get(sandbox_id) for sandbox_id in sandbox_ids]
 
-    async def search(
-        self,
-        *,
-        cursor: uuid.UUID | None = None,
-        limit: int = 50,
-        search_filter: SandboxSearchFilter | None = None,
-    ) -> tuple[list[Sandbox], uuid.UUID | None]:
-        stmt = self._perm_filter.filter_sql(select(Sandbox).order_by(Sandbox.id))
-        if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        if cursor is not None:
-            stmt = stmt.where(Sandbox.id > cursor)
-        stmt = stmt.limit(limit)
-        result = await self._session.execute(stmt)
-        sandboxes = list(result.scalars().all())
-        next_cursor = sandboxes[-1].id if len(sandboxes) == limit else None
-        return sandboxes, next_cursor
-
-    async def update(self, sandbox_id: uuid.UUID, payload: SandboxUpdate) -> Sandbox:
-        sandbox = await self.get(sandbox_id)
-        for field in payload.model_fields_set:
-            setattr(sandbox, field, getattr(payload, field))
-        await self._session.flush()
-        await self._session.refresh(sandbox)
-        return sandbox
-
-    async def activate(self, sandbox_id: uuid.UUID) -> Sandbox:
-        sandbox = await self.get(sandbox_id)
-        if sandbox.status not in (SandboxStatus.INACTIVE, SandboxStatus.ERROR):
-            raise SandboxInvalidStateError(f"cannot activate sandbox from {sandbox.status}")
-        now = datetime.now(UTC)
-        sandbox.status = SandboxStatus.ACTIVATING
-        sandbox.status_reason = None
-        compute = SandboxCompute(
-            provider_kind=sandbox.provider_kind,
-            status=SandboxComputeStatus.SERVING,
-            runtime_state=DockerSandboxRuntimeState(
-                container_id=f"docker-placeholder-{sandbox.id}"
-            ),
-            server_state=OpenHandsAgentServerState(initialized=True, healthy=True),
-            template_id=sandbox.template_id,
-            sandbox_id=sandbox.id,
-            mount_lease_id=None,
-            claimed_at=now,
-            last_health_check_at=now,
-        )
-        self._session.add(compute)
-        await self._session.flush()
-        sandbox.current_compute_id = compute.id
-        sandbox.status = SandboxStatus.ACTIVE
-        sandbox.last_activated_at = now
-        sandbox.last_activity_at = now
-        sandbox.filesystem.status = SandboxFilesystemStatus.MOUNTED
-        await self._session.flush()
-        await self._session.refresh(sandbox)
-        return sandbox
-
-    async def deactivate(self, sandbox_id: uuid.UUID) -> Sandbox:
-        sandbox = await self.get(sandbox_id)
-        if sandbox.status not in (SandboxStatus.ACTIVE, SandboxStatus.ERROR):
-            raise SandboxInvalidStateError(f"cannot deactivate sandbox from {sandbox.status}")
-        now = datetime.now(UTC)
-        sandbox.status = SandboxStatus.DEACTIVATING
-        if sandbox.current_compute_id is not None:
-            compute = await self._load_compute(sandbox.current_compute_id)
-            if compute is not None:
-                compute.status = SandboxComputeStatus.RELEASED
-                compute.sandbox_id = None
-                compute.terminated_at = now
-        sandbox.current_compute_id = None
-        sandbox.status = SandboxStatus.INACTIVE
-        sandbox.last_deactivated_at = now
-        sandbox.filesystem.status = SandboxFilesystemStatus.READY
-        await self._session.flush()
-        await self._session.refresh(sandbox)
-        return sandbox
-
-    async def delete(self, sandbox_id: uuid.UUID) -> None:
-        sandbox = await self.get(sandbox_id)
-        now = datetime.now(UTC)
-        sandbox.status = SandboxStatus.DELETING
-        sandbox.delete_started_at = now
-        if sandbox.current_compute_id is not None:
-            compute = await self._load_compute(sandbox.current_compute_id)
-            if compute is not None:
-                compute.status = SandboxComputeStatus.DELETED
-                compute.terminated_at = now
-        filesystem = sandbox.filesystem
-        await self._session.flush()
-        await self._session.delete(sandbox)
-        await self._session.flush()
-        await self._session.delete(filesystem)
-        await self._session.flush()
-
-    async def _load_compute(self, compute_id: uuid.UUID) -> SandboxCompute | None:
-        result = await self._session.execute(
-            select(SandboxCompute).where(SandboxCompute.id == compute_id)
-        )
-        return result.scalar_one_or_none()
-
-    async def count(self, search_filter: SandboxSearchFilter | None = None) -> int:
-        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(Sandbox))
-        if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
-
-    async def apply_batch(
+    async def apply_sandbox_batch(
         self,
         operations: list[SandboxBatchOp],
         perm_filters: dict[Action, SearchFilter[Sandbox] | None],
-        *,
-        user_id: uuid.UUID,
-        template_filter: SearchFilter[SandboxTemplate] = ALL,
-        snapshot_filter: SearchFilter[SandboxSnapshot] = ALL,
     ) -> list[Sandbox | None]:
-        results: list[Sandbox | None] = []
-        for op in operations:
-            if isinstance(op, SandboxBatchCreate):
-                filt = perm_filters.get(Action.CREATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("create")
-                results.append(
-                    await SandboxService(self._session, filt).create(
-                        op.data,
-                        user_id=user_id,
-                        template_filter=template_filter,
-                        snapshot_filter=snapshot_filter,
-                    )
-                )
-            elif isinstance(op, SandboxBatchUpdate):
-                filt = perm_filters.get(Action.UPDATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("update")
-                results.append(await SandboxService(self._session, filt).update(op.id, op.data))
-            elif isinstance(op, SandboxBatchDelete):
-                filt = perm_filters.get(Action.DELETE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("delete")
-                await SandboxService(self._session, filt).delete(op.id)
-                results.append(None)
-        return results
+        """Apply a mix of create/delete sandbox operations.
 
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter denies that operation. Returns results
+        aligned with *operations* (the sandbox for create, ``None`` for delete).
+        """
+        return [await self._apply_sandbox_batch_op(op, perm_filters) for op in operations]
 
-class SandboxSnapshotService:
-    """CRUD operations over named Fusey filesystem snapshots."""
-
-    def __init__(
+    async def _apply_sandbox_batch_op(
         self,
-        session: AsyncSession,
-        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
-    ) -> None:
-        self._session = session
-        self._perm_filter = perm_filter
+        op: SandboxBatchOp,
+        perm_filters: dict[Action, SearchFilter[Sandbox] | None],
+    ) -> Sandbox | None:
+        if isinstance(op, SandboxBatchCreate):
+            filt = self._require_action(perm_filters, Action.CREATE, "create")
+            return await self.create_sandbox(op.data, perm_filter=filt)
+        if isinstance(op, SandboxBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_sandbox(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown sandbox batch op: {type(op).__name__}")
 
-    async def create(
+    # ------------------------------------------------------------------ #
+    # Generic public snapshot CRUD (built on the provider hooks below).
+    # Snapshots support create, read, and delete only (no update).
+    # ------------------------------------------------------------------ #
+    async def list_snapshots(
+        self,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> list[SandboxSnapshot]:
+        """List every snapshot the principal may see."""
+        snapshots = await self._list_snapshots()
+        return [snapshot for snapshot in snapshots if perm_filter.matches(snapshot)]
+
+    async def get_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> SandboxSnapshot:
+        """Retrieve a snapshot, scoped by ``perm_filter``.
+
+        Raises :class:`SandboxSnapshotNotFoundError` when missing or out of
+        scope so callers return 404 without leaking existence.
+        """
+        snapshot = await self._get_snapshot(snapshot_id)
+        if not perm_filter.matches(snapshot):
+            raise SandboxSnapshotNotFoundError(snapshot_id)
+        return snapshot
+
+    async def create_snapshot(
         self,
         payload: SandboxSnapshotCreate,
         *,
-        user_id: uuid.UUID,
-        sandbox_filter: SearchFilter[Sandbox] = ALL,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+        sandbox_perm_filter: SearchFilter[Sandbox] = ALL,
     ) -> SandboxSnapshot:
-        sandbox = await SandboxService(self._session, sandbox_filter).get(payload.source_sandbox_id)
-        generation = (
-            payload.generation or sandbox.filesystem.head_generation or f"generation-{uuid.uuid4()}"
-        )
-        sandbox.filesystem.head_generation = generation
-        artifact = FuseySandboxSnapshotArtifact(
-            filesystem_id=sandbox.filesystem_id,
-            generation=generation,
-        )
-        snapshot = SandboxSnapshot(
-            name=payload.name,
-            filesystem_id=sandbox.filesystem_id,
-            storage_kind=SandboxStorageKind.FUSEY,
-            generation=generation,
-            snapshot_artifact=artifact,
-            user_id=user_id,
-            description=payload.description,
-            source_sandbox_id=sandbox.id,
-            status=SandboxSnapshotStatus.READY,
-            expires_at=payload.expires_at,
-        )
-        if not self._perm_filter.matches(snapshot):
-            raise SandboxSnapshotPermissionScopeError(payload.name)
-        self._session.add(snapshot)
-        await self._session.flush()
-        sandbox.current_snapshot_id = snapshot.id
-        await self._session.flush()
-        await self._session.refresh(snapshot)
-        return snapshot
+        """Create a snapshot from a sandbox or an uploaded file.
 
-    async def get(self, snapshot_id: uuid.UUID) -> SandboxSnapshot:
-        stmt = self._perm_filter.filter_sql(
-            select(SandboxSnapshot).where(SandboxSnapshot.id == snapshot_id)
-        )
-        result = await self._session.execute(stmt)
-        snapshot = result.scalar_one_or_none()
-        if snapshot is None:
-            raise SandboxSnapshotNotFoundError(str(snapshot_id))
-        return snapshot
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider does
+        not support snapshots, :class:`SandboxSnapshotPermissionScopeError`
+        when the resulting snapshot is out of scope, or
+        :class:`SandboxNotFoundError` when ``sandbox_id`` names a sandbox the
+        principal cannot use.
+        """
+        if payload.sandbox_id is not None:
+            sandbox = await self.get_sandbox(payload.sandbox_id, perm_filter=sandbox_perm_filter)
+            snapshot = await self._snapshot_from_sandbox(payload, sandbox)
+        else:
+            snapshot = await self._snapshot_from_file(payload)
+        if not perm_filter.matches(snapshot):
+            raise SandboxSnapshotPermissionScopeError(payload.id)
+        return await self._create_snapshot(snapshot, payload)
 
-    async def get_many(self, snapshot_ids: list[uuid.UUID]) -> list[SandboxSnapshot | None]:
-        if not snapshot_ids:
-            return []
-        stmt = self._perm_filter.filter_sql(
-            select(SandboxSnapshot).where(SandboxSnapshot.id.in_(snapshot_ids))
-        )
-        result = await self._session.execute(stmt)
-        by_id = {snapshot.id: snapshot for snapshot in result.scalars().all()}
+    async def delete_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> None:
+        """Delete a snapshot. Raises when missing or out of scope."""
+        await self.get_snapshot(snapshot_id, perm_filter=perm_filter)
+        await self._delete_snapshot(snapshot_id)
+
+    async def get_snapshots(
+        self,
+        snapshot_ids: list[str],
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> list[SandboxSnapshot | None]:
+        """Batch retrieve snapshots, positionally aligned with the ids."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
+        by_id = {snapshot.id: snapshot for snapshot in snapshots}
         return [by_id.get(snapshot_id) for snapshot_id in snapshot_ids]
 
-    async def search(
+    async def search_snapshots(
         self,
         *,
-        cursor: uuid.UUID | None = None,
+        cursor: str | None = None,
         limit: int = 50,
         search_filter: SandboxSnapshotSearchFilter | None = None,
-    ) -> tuple[list[SandboxSnapshot], uuid.UUID | None]:
-        stmt = self._perm_filter.filter_sql(select(SandboxSnapshot).order_by(SandboxSnapshot.id))
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> tuple[list[SandboxSnapshot], str | None]:
+        """Search snapshots ordered by id, key-paginated via an opaque id cursor."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
         if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
+            snapshots = [s for s in snapshots if search_filter.matches(s)]
+        snapshots.sort(key=lambda snapshot: snapshot.id)
         if cursor is not None:
-            stmt = stmt.where(SandboxSnapshot.id > cursor)
-        stmt = stmt.limit(limit)
-        result = await self._session.execute(stmt)
-        snapshots = list(result.scalars().all())
-        next_cursor = snapshots[-1].id if len(snapshots) == limit else None
-        return snapshots, next_cursor
+            snapshots = [s for s in snapshots if s.id > cursor]
+        page = snapshots[:limit]
+        next_cursor = page[-1].id if len(snapshots) > limit else None
+        return page, next_cursor
 
-    async def update(
-        self, snapshot_id: uuid.UUID, payload: SandboxSnapshotUpdate
-    ) -> SandboxSnapshot:
-        snapshot = await self.get(snapshot_id)
-        for field in payload.model_fields_set:
-            setattr(snapshot, field, getattr(payload, field))
-        await self._session.flush()
-        await self._session.refresh(snapshot)
-        return snapshot
-
-    async def delete(self, snapshot_id: uuid.UUID) -> None:
-        snapshot = await self.get(snapshot_id)
-        snapshot.status = SandboxSnapshotStatus.DELETING
-        await self._session.flush()
-        await self._session.delete(snapshot)
-        await self._session.flush()
-
-    async def count(self, search_filter: SandboxSnapshotSearchFilter | None = None) -> int:
-        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(SandboxSnapshot))
+    async def count_snapshots(
+        self,
+        search_filter: SandboxSnapshotSearchFilter | None = None,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> int:
+        """Count snapshots in scope, optionally narrowed by ``search_filter``."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
         if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
+            snapshots = [s for s in snapshots if search_filter.matches(s)]
+        return len(snapshots)
 
-    async def apply_batch(
+    async def apply_snapshot_batch(
         self,
         operations: list[SandboxSnapshotBatchOp],
         perm_filters: dict[Action, SearchFilter[SandboxSnapshot] | None],
-        *,
-        user_id: uuid.UUID,
-        sandbox_filter: SearchFilter[Sandbox] = ALL,
     ) -> list[SandboxSnapshot | None]:
-        results: list[SandboxSnapshot | None] = []
-        for op in operations:
-            if isinstance(op, SandboxSnapshotBatchCreate):
-                filt = perm_filters.get(Action.CREATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("create")
-                results.append(
-                    await SandboxSnapshotService(self._session, filt).create(
-                        op.data,
-                        user_id=user_id,
-                        sandbox_filter=sandbox_filter,
-                    )
-                )
-            elif isinstance(op, SandboxSnapshotBatchUpdate):
-                filt = perm_filters.get(Action.UPDATE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("update")
-                results.append(
-                    await SandboxSnapshotService(self._session, filt).update(op.id, op.data)
-                )
-            elif isinstance(op, SandboxSnapshotBatchDelete):
-                filt = perm_filters.get(Action.DELETE)
-                if filt is None:
-                    raise BatchPermissionDeniedError("delete")
-                await SandboxSnapshotService(self._session, filt).delete(op.id)
-                results.append(None)
-        return results
+        """Apply a batch of delete snapshot operations.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter denies that operation. Returns results
+        aligned with *operations* (``None`` for deletes).
+        """
+        return [await self._apply_snapshot_batch_op(op, perm_filters) for op in operations]
+
+    async def _apply_snapshot_batch_op(
+        self,
+        op: SandboxSnapshotBatchOp,
+        perm_filters: dict[Action, SearchFilter[SandboxSnapshot] | None],
+    ) -> SandboxSnapshot | None:
+        if isinstance(op, SandboxSnapshotBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_snapshot(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown sandbox-snapshot batch op: {type(op).__name__}")
+
+    @staticmethod
+    def _require_action(
+        perm_filters: dict[Action, SearchFilter[Any] | None],
+        action: Action,
+        label: str,
+    ) -> SearchFilter[Any]:
+        filt = perm_filters.get(action)
+        if filt is None:
+            raise BatchPermissionDeniedError(label)
+        return filt
+
+    # ------------------------------------------------------------------ #
+    # Provider hooks — templates (overridden by implementations).
+    # ------------------------------------------------------------------ #
+    @abstractmethod
+    async def _list_templates(self) -> list[SandboxTemplate]:
+        """Return all templates known to the provider (unfiltered)."""
+
+    @abstractmethod
+    async def _get_template(self, template_id: str) -> SandboxTemplate:
+        """Return a template, raising ``SandboxTemplateNotFoundError`` if absent."""
+
+    @abstractmethod
+    def _template_from_create(self, payload: SandboxTemplateCreate) -> SandboxTemplate:
+        """Build a provider template model from a create payload (no persistence)."""
+
+    @abstractmethod
+    async def _create_template(self, template: SandboxTemplate) -> SandboxTemplate:
+        """Persist a freshly-built template."""
+
+    @abstractmethod
+    async def _delete_template(self, template_id: str) -> None:
+        """Remove a template from the provider."""
+
+    # ------------------------------------------------------------------ #
+    # Provider hooks — sandboxes (overridden by implementations).
+    # ------------------------------------------------------------------ #
+    @abstractmethod
+    async def _list_sandboxes(self) -> list[Sandbox]:
+        """Return all sandboxes known to the provider (unfiltered)."""
+
+    @abstractmethod
+    async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
+        """Return a sandbox, raising ``SandboxNotFoundError`` if absent."""
+
+    @abstractmethod
+    def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
+        """Build a provider sandbox model from a create payload (no persistence).
+
+        The returned sandbox has no ``id`` yet (it defaults to ``""``); the
+        provider assigns the id during ``_create_sandbox``.
+        """
+
+    @abstractmethod
+    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+        """Persist a freshly-built sandbox, assign its id, and start backing compute."""
+
+    @abstractmethod
+    async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
+        """Apply a ``desired_status`` change (pause/resume) and return the sandbox."""
+
+    @abstractmethod
+    async def _delete_sandbox(self, sandbox_id: str) -> None:
+        """Remove a sandbox (and its backing compute) from the provider."""
+
+    # ------------------------------------------------------------------ #
+    # Provider hooks - snapshots (overridden by implementations).
+    # A provider that does not support snapshots raises
+    # ``SandboxSnapshotUnsupportedError`` from each hook.
+    # ------------------------------------------------------------------ #
+    async def _list_snapshots(self) -> list[SandboxSnapshot]:
+        """Return all snapshots known to the provider (unfiltered)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _get_snapshot(self, snapshot_id: str) -> SandboxSnapshot:
+        """Return a snapshot, raising ``SandboxSnapshotNotFoundError`` if absent."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _snapshot_from_sandbox(
+        self,
+        payload: SandboxSnapshotCreate,
+        sandbox: Sandbox,
+    ) -> SandboxSnapshot:
+        """Build a snapshot model from a sandbox (no persistence)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _snapshot_from_file(
+        self,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        """Build a snapshot model from an uploaded file (no persistence)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _create_snapshot(
+        self,
+        snapshot: SandboxSnapshot,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        """Persist a freshly-built snapshot."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _delete_snapshot(self, snapshot_id: str) -> None:
+        """Remove a snapshot from the provider."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def stream_snapshot(self, snapshot_id: str) -> Any:
+        """Return an iterable of bytes for downloading a snapshot artifact.
+
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider cannot
+        stream snapshots. The base implementation is unsupported; providers that
+        back snapshots with a downloadable artifact override this.
+        """
+        raise SandboxSnapshotUnsupportedError("snapshot download is not supported")
 
 
-__all__ = [
-    "BatchPermissionDeniedError",
-    "SandboxInvalidStateError",
-    "SandboxNotFoundError",
-    "SandboxPermissionScopeError",
-    "SandboxService",
-    "SandboxSnapshotNotFoundError",
-    "SandboxSnapshotPermissionScopeError",
-    "SandboxSnapshotService",
-    "SandboxTemplateNotFoundError",
-    "SandboxTemplatePermissionScopeError",
-    "SandboxTemplateService",
-]
+def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
+    """Resolve a fully qualified class name to a ``SandboxService`` subclass."""
+    module_name, _, class_name = fqcn.rpartition(".")
+    if not module_name or not class_name:
+        raise ValueError(f"Invalid sandbox_service class name: {fqcn!r}")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(f"Cannot import sandbox_service module {module_name!r}") from exc
+    candidate = getattr(module, class_name, None)
+    if not (isinstance(candidate, type) and issubclass(candidate, SandboxService)):
+        raise TypeError(f"{fqcn!r} is not a SandboxService subclass.")
+    return candidate

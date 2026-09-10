@@ -1,86 +1,28 @@
-"""ORM models and polymorphic types for sandbox resources.
+"""Pydantic models for the sandbox feature.
 
-The public sandbox resource represents durable user state. Compute is a
-replaceable internal attachment, while persisted files live in a Fusey-backed
-filesystem. Provider-specific and storage-specific payloads use the SDK
-``DiscriminatedUnionMixin`` to match the rest of the codebase's polymorphism
-pattern.
+The public shape of a sandbox template (and, now, a sandbox) lives here
+rather than in the ORM models: template/sandbox state is owned by the
+configured ``SandboxService`` implementation (see
+:mod:`openhands.ev2.sandbox.sandbox_service`), not by a database
+table. ``SandboxTemplate`` and ``Sandbox`` are therefore plain
+``DiscriminatedUnionMixin`` Pydantic models whose concrete subclasses
+(:class:`DockerSandboxTemplate`, :class:`DockerSandbox`) contribute
+implementation-specific parameters.
+
+``SandboxStatus`` is the provider-neutral public lifecycle state, moved here
+from the phasing-out :mod:`openhands.ev2.sandbox` package; the old module
+re-exports it so existing callers keep working while it is retired.
 """
 
 from __future__ import annotations
 
 import enum
-import uuid
 from abc import ABC
 from datetime import datetime
-from typing import Any, Literal, TypeVar
 
+from openhands.sdk.utils import utc_now
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import (
-    BigInteger,
-    Boolean,
-    DateTime,
-    ForeignKey,
-    String,
-    Text,
-    UniqueConstraint,
-    func,
-)
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.types import TypeDecorator
-
-from openhands.ev2.db import Base
-from openhands.ev2.user.user_models import User
-
-_TZ = DateTime(timezone=True)
-_T = TypeVar("_T", bound=DiscriminatedUnionMixin)
-
-
-class DiscriminatedUnionJSON(TypeDecorator[_T | None]):
-    """Persist a SDK discriminated-union model as JSONB."""
-
-    impl = JSONB
-    cache_ok = True
-
-    def __init__(self, union_base: type[_T]) -> None:
-        super().__init__()
-        self._union_base = union_base
-
-    def process_bind_param(
-        self,
-        value: DiscriminatedUnionMixin | dict[str, Any] | None,
-        dialect: Any,
-    ) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            return value
-        return value.model_dump(mode="json")
-
-    def process_result_value(
-        self,
-        value: dict[str, Any] | None,
-        dialect: Any,
-    ) -> _T | None:
-        if value is None:
-            return None
-        return self._union_base.model_validate(value)
-
-
-class SandboxProviderKind(enum.StrEnum):
-    """Compute provider kinds supported by the sandbox control plane."""
-
-    DOCKER = "docker"
-    KUBERNETES = "kubernetes"
-    E2B = "e2b"
-
-
-class SandboxStorageKind(enum.StrEnum):
-    """Persistent storage implementations for sandbox filesystems."""
-
-    FUSEY = "fusey"
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SandboxStatus(enum.StrEnum):
@@ -94,587 +36,157 @@ class SandboxStatus(enum.StrEnum):
     ERROR = "error"
 
 
-class SandboxFilesystemStatus(enum.StrEnum):
-    """Lifecycle states for Fusey-backed durable filesystems."""
+class SnapshotMode(enum.StrEnum):
+    """Provider-neutral snapshot support strategy for a sandbox.
 
-    READY = "ready"
-    MOUNTED = "mounted"
-    DELETING = "deleting"
-    ERROR = "error"
+    ``UNSUPPORTED`` — snapshots are not available. ``MANUAL`` — snapshots are
+    created on demand (a caller invokes the create endpoint). ``AUTOMATIC`` —
+    the provider maintains a rolling snapshot in the background and updates it
+    as the sandbox evolves; callers may still create explicit pins.
+    """
 
-
-class SandboxSnapshotStatus(enum.StrEnum):
-    """Lifecycle states for named Fusey generation pins."""
-
-    CREATING = "creating"
-    READY = "ready"
-    DELETING = "deleting"
-    ERROR = "error"
+    UNSUPPORTED = "unsupported"
+    MANUAL = "manual"
+    AUTOMATIC = "automatic"
 
 
-class SandboxComputeStatus(enum.StrEnum):
-    """Internal lifecycle states for replaceable compute attachments."""
+class ExposedPort(BaseModel):
+    """Exposed port within a container to be matched to a free port on the host.
 
-    WARMING = "warming"
-    DORMANT = "dormant"
-    CLAIMED = "claimed"
-    MOUNTING = "mounting"
-    INITIALIZING = "initializing"
-    SERVING = "serving"
-    DRAINING = "draining"
-    RELEASED = "released"
-    FAILED = "failed"
-    DELETED = "deleted"
+    Declared on a sandbox template; the service allocates a host port per
+    container at runtime and surfaces the resulting URL via
+    :class:`ExposedUrl`.
+    """
 
+    name: str
+    description: str
+    container_port: int = 8000
 
-class SandboxPortSpec(BaseModel):
-    """A user-visible service port exposed by a sandbox runtime."""
-
-    name: str = Field(min_length=1, max_length=64)
-    port: int = Field(ge=1, le=65535)
-    protocol: Literal["http", "tcp"] = "http"
+    model_config = ConfigDict(frozen=True)
 
 
-class SandboxResourceLimits(BaseModel):
-    """Portable resource caps for sandbox compute."""
+class ExposedUrl(BaseModel):
+    """URL to access some named service within the container."""
 
-    cpu_cores: float | None = Field(default=None, gt=0)
-    memory_mb: int | None = Field(default=None, gt=0)
-    disk_mb: int | None = Field(default=None, gt=0)
-
-
-class SandboxTemplateSpec(DiscriminatedUnionMixin, ABC):
-    """Base class for provider-specific sandbox template definitions."""
+    name: str
+    url: str
+    port: int
 
 
-class DockerSandboxTemplateSpec(SandboxTemplateSpec):
-    """Docker-specific compute definition for a sandbox template."""
+class VolumeMount(BaseModel):
+    """Mounted volume within the container."""
 
-    provider_kind: Literal["docker"] = "docker"
-    image: str = Field(min_length=1, max_length=1024)
+    host_path: str
+    container_path: str
+    mode: str = "rw"
+
+
+class SandboxTemplate(DiscriminatedUnionMixin, ABC):
+    """A template for creating a Sandbox (e.g: A Docker Image vs Container).
+
+    Templates are functionally immutable: they are created and deleted only,
+    never updated — image/label metadata is set at build time.
+
+    ``snapshot_mode`` declares the snapshot strategy a sandbox built from this
+    template supports; when a provider supports multiple modes the one in use
+    is recorded on the template so callers can discover it without a separate
+    probe.
+    """
+
+    id: str
     command: list[str] | None = None
-    working_dir: str | None = Field(default=None, max_length=1024)
-    ports: list[SandboxPortSpec] = Field(default_factory=list, max_length=32)
-    resources: SandboxResourceLimits = Field(default_factory=SandboxResourceLimits)
-
-
-class SandboxServerSpec(DiscriminatedUnionMixin, ABC):
-    """Base class for server protocols hosted inside sandbox compute."""
-
-
-class OpenHandsAgentServerSpec(SandboxServerSpec):
-    """Configuration for the openhands-agent-server process in a sandbox."""
-
-    server_kind: Literal["openhands_agent_server"] = "openhands_agent_server"
-    internal_port: int = Field(default=18000, ge=1, le=65535)
-    health_path: str = Field(default="/health", min_length=1, max_length=255)
-    init_path: str = Field(default="/init", min_length=1, max_length=255)
-    files_path: str = Field(default="/files", min_length=1, max_length=255)
-
-
-class SandboxStorageSpec(DiscriminatedUnionMixin, ABC):
-    """Base class for persisted sandbox filesystem definitions."""
-
-
-class FuseySandboxStorageSpec(SandboxStorageSpec):
-    """Fusey-backed filesystem mounted into sandbox compute."""
-
-    storage_kind: Literal["fusey"] = "fusey"
-    mount_path: str = Field(default="/workspace", min_length=1, max_length=1024)
-    max_size_bytes: int | None = Field(default=None, gt=0)
-    persist_interval_seconds: int | None = Field(default=None, gt=0)
-
-    @field_validator("mount_path")
-    @classmethod
-    def _absolute_mount_path(cls, value: str) -> str:
-        if not value.startswith("/"):
-            raise ValueError("mount_path must be absolute")
-        return value.rstrip("/") or "/"
-
-
-class SandboxRuntimeState(DiscriminatedUnionMixin, ABC):
-    """Base class for provider runtime handles stored on internal compute rows."""
-
-
-class DockerSandboxRuntimeState(SandboxRuntimeState):
-    """Docker runtime handle for an internal compute attachment."""
-
-    provider_kind: Literal["docker"] = "docker"
-    container_id: str = Field(min_length=1, max_length=255)
-    internal_url: str | None = Field(default=None, max_length=2048)
-
-
-class SandboxServerState(DiscriminatedUnionMixin, ABC):
-    """Base class for sandbox server observations."""
-
-
-class OpenHandsAgentServerState(SandboxServerState):
-    """Observed state for an openhands-agent-server process."""
-
-    server_kind: Literal["openhands_agent_server"] = "openhands_agent_server"
-    base_url: str | None = Field(default=None, max_length=2048)
-    initialized: bool = False
-    healthy: bool = False
-
-
-class SandboxSnapshotArtifact(DiscriminatedUnionMixin, ABC):
-    """Base class for storage-specific snapshot artifact references."""
-
-
-class FuseySandboxSnapshotArtifact(SandboxSnapshotArtifact):
-    """A named pin of a Fusey filesystem generation."""
-
-    storage_kind: Literal["fusey"] = "fusey"
-    filesystem_id: uuid.UUID
-    generation: str = Field(min_length=1, max_length=255)
-    index_object_key: str | None = Field(default=None, max_length=2048)
-
-
-class SandboxTemplate(Base):
-    """Reusable template describing how to activate a sandbox."""
-
-    __tablename__ = "sandbox_templates"
-    __table_args__ = {"comment": "Reusable sandbox activation templates"}  # noqa: RUF012
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
+    created_at: datetime = Field(default_factory=utc_now)
+    initial_env: dict[str, str] = Field(
+        default_factory=dict, description="Initial Environment Variables"
     )
-    name: Mapped[str] = mapped_column(String(255), index=True)
-    provider_kind: Mapped[SandboxProviderKind] = mapped_column(String(32), index=True)
-    template_spec: Mapped[SandboxTemplateSpec] = mapped_column(
-        DiscriminatedUnionJSON(SandboxTemplateSpec),
+    working_dir: str = "/home/openhands/workspace"
+    idle_pause_seconds: int | None = Field(
+        default=None, description="Idle time before a sandbox should be automatically paused."
     )
-    server_spec: Mapped[SandboxServerSpec] = mapped_column(
-        DiscriminatedUnionJSON(SandboxServerSpec),
-    )
-    storage_spec: Mapped[SandboxStorageSpec] = mapped_column(
-        DiscriminatedUnionJSON(SandboxStorageSpec),
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
-    )
-    description: Mapped[str | None] = mapped_column(Text, default=None, nullable=True)
-    idle_timeout_seconds: Mapped[int | None] = mapped_column(default=None, nullable=True)
-    max_lifetime_seconds: Mapped[int | None] = mapped_column(default=None, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZ, init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-    user: Mapped[User] = relationship(init=False, lazy="selectin")
-
-
-class SandboxFilesystem(Base):
-    """Durable Fusey-backed filesystem for sandbox files."""
-
-    __tablename__ = "sandbox_filesystems"
-    __table_args__ = {"comment": "Durable Fusey-backed sandbox filesystems"}  # noqa: RUF012
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    storage_kind: Mapped[SandboxStorageKind] = mapped_column(String(32), index=True)
-    object_prefix: Mapped[str] = mapped_column(String(2048), unique=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
-    )
-    status: Mapped[SandboxFilesystemStatus] = mapped_column(
-        String(32),
-        default=SandboxFilesystemStatus.READY,
-        server_default=SandboxFilesystemStatus.READY.value,
-        index=True,
-    )
-    head_generation: Mapped[str | None] = mapped_column(String(255), default=None, nullable=True)
-    mount_path_default: Mapped[str] = mapped_column(String(1024), default="/workspace")
-    max_size_bytes: Mapped[int | None] = mapped_column(BigInteger, default=None, nullable=True)
-    size_bytes_estimate: Mapped[int | None] = mapped_column(BigInteger, default=None, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZ, init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-
-    user: Mapped[User] = relationship(init=False, lazy="selectin")
-
-
-class Sandbox(Base):
-    """Durable user-facing sandbox whose compute can be replaced."""
-
-    __tablename__ = "sandboxes"
-    __table_args__ = {"comment": "Durable user-facing sandbox environments"}  # noqa: RUF012
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    name: Mapped[str] = mapped_column(String(255), index=True)
-    template_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandbox_templates.id", ondelete="RESTRICT"),
-        index=True,
-    )
-    filesystem_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandbox_filesystems.id", ondelete="RESTRICT"),
-        index=True,
-    )
-    provider_kind: Mapped[SandboxProviderKind] = mapped_column(String(32), index=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
-    )
-    status: Mapped[SandboxStatus] = mapped_column(
-        String(32),
-        default=SandboxStatus.INACTIVE,
-        server_default=SandboxStatus.INACTIVE.value,
-        index=True,
-    )
-    description: Mapped[str | None] = mapped_column(Text, default=None, nullable=True)
-    status_reason: Mapped[str | None] = mapped_column(Text, default=None, nullable=True)
-    current_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(default=None, nullable=True)
-    current_compute_id: Mapped[uuid.UUID | None] = mapped_column(default=None, nullable=True)
-    exposed_urls: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default_factory=list)
-    idle_timeout_seconds: Mapped[int | None] = mapped_column(default=None, nullable=True)
-    max_lifetime_seconds: Mapped[int | None] = mapped_column(default=None, nullable=True)
-    last_activity_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    last_activated_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    last_deactivated_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    delete_started_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZ, init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-    filesystem: Mapped[SandboxFilesystem] = relationship(init=False, lazy="selectin")
-    template: Mapped[SandboxTemplate] = relationship(init=False, lazy="selectin")
-    user: Mapped[User] = relationship(init=False, lazy="selectin")
-
-
-class SandboxSnapshot(Base):
-    """User-visible named pin of a Fusey filesystem generation."""
-
-    __tablename__ = "sandbox_snapshots"
-    __table_args__ = (
-        UniqueConstraint(
-            "filesystem_id",
-            "generation",
-            "name",
-            name="uq_sandbox_snapshots_filesystem_generation_name",
-        ),
-        {"comment": "Named Fusey filesystem generation snapshots"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    name: Mapped[str] = mapped_column(String(255), index=True)
-    filesystem_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandbox_filesystems.id", ondelete="CASCADE"),
-        index=True,
-    )
-    storage_kind: Mapped[SandboxStorageKind] = mapped_column(String(32), index=True)
-    generation: Mapped[str] = mapped_column(String(255), index=True)
-    snapshot_artifact: Mapped[SandboxSnapshotArtifact] = mapped_column(
-        DiscriminatedUnionJSON(SandboxSnapshotArtifact),
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
-    )
-    description: Mapped[str | None] = mapped_column(Text, default=None, nullable=True)
-    source_sandbox_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("sandboxes.id", ondelete="SET NULL"),
+    paused_delete_seconds: int | None = Field(
         default=None,
-        nullable=True,
-        index=True,
+        description="Idle time before a paused sandbox should be automatically deleted.",
     )
-    status: Mapped[SandboxSnapshotStatus] = mapped_column(
-        String(32),
-        default=SandboxSnapshotStatus.READY,
-        server_default=SandboxSnapshotStatus.READY.value,
-        index=True,
+    max_age_seconds: int | None = Field(
+        default=None, description="Max age for sandboxes after which they will be deleted."
     )
-    expires_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZ, init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description="Snapshot strategy supported by sandboxes built from this template.",
     )
 
-    filesystem: Mapped[SandboxFilesystem] = relationship(init=False, lazy="selectin")
-    source_sandbox: Mapped[Sandbox | None] = relationship(init=False, lazy="selectin")
-    user: Mapped[User] = relationship(init=False, lazy="selectin")
 
+class DockerSandboxTemplate(SandboxTemplate):
+    """A sandbox template backed by a Docker image.
 
-class SandboxCompute(Base):
-    """Internal compute instance that can be attached to one sandbox."""
-
-    __tablename__ = "sandbox_computes"
-    __table_args__ = {"comment": "Internal replaceable sandbox compute attachments"}  # noqa: RUF012
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    provider_kind: Mapped[SandboxProviderKind] = mapped_column(String(32), index=True)
-    status: Mapped[SandboxComputeStatus] = mapped_column(String(32), index=True)
-    runtime_state: Mapped[SandboxRuntimeState | None] = mapped_column(
-        DiscriminatedUnionJSON(SandboxRuntimeState),
-        default=None,
-        nullable=True,
-    )
-    server_state: Mapped[SandboxServerState | None] = mapped_column(
-        DiscriminatedUnionJSON(SandboxServerState),
-        default=None,
-        nullable=True,
-    )
-    template_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("sandbox_templates.id", ondelete="SET NULL"),
-        default=None,
-        nullable=True,
-        index=True,
-    )
-    sandbox_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("sandboxes.id", ondelete="SET NULL"),
-        default=None,
-        nullable=True,
-        index=True,
-    )
-    mount_lease_id: Mapped[uuid.UUID | None] = mapped_column(default=None, nullable=True)
-    claimed_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    last_health_check_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZ, init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-    terminated_at: Mapped[datetime | None] = mapped_column(_TZ, default=None, nullable=True)
-
-
-class RoleSandboxTemplatePermission(Base):
-    """Per-role grant of access to a :class:`SandboxTemplate`.
-
-    Links a :class:`Role` to a :class:`SandboxTemplate` with independent
-    read/update/delete flags. The ``(role_id, sandbox_template_id)`` pair is
-    unique so a role is granted a template at most once.
+    The ``id`` is the Docker image name (e.g. ``ghcr.io/org/agent-server:latest``).
     """
 
-    __tablename__ = "role_sandbox_template_permissions"
-    __table_args__ = (
-        UniqueConstraint(
-            "role_id",
-            "sandbox_template_id",
-            name="uq_role_sandbox_tpl_perm_role_sandbox_tpl",
+    max_memory: int | None = None
+    exposed_ports: list[ExposedPort] = Field(
+        default_factory=list,
+        description="Named container ports exposed to the host as URLs.",
+    )
+
+
+class Sandbox(DiscriminatedUnionMixin, ABC):
+    """Information about a sandbox."""
+
+    # ``id`` defaults to the empty string for the pre-persistence model built
+    # by ``_sandbox_from_create``; the provider assigns the real id during
+    # ``_create_sandbox`` (e.g. Docker mints a container name).
+    id: str = ""
+    sandbox_template_id: str
+    status: SandboxStatus
+    desired_status: SandboxStatus
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description=(
+            "Snapshot strategy in use for this sandbox. Mirrors the template's "
+            "mode when the sandbox is created; providers that support more than "
+            "one mode report the active one here."
         ),
-        {"comment": "Per-role grants of access to sandbox templates"},
     )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
+    session_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Key to access sandbox, to be added as an `X-Session-API-Key` header "
+            "in each request. In cases where the sandbox status is STARTING or "
+            "PAUSED, or the current user does not have full access, "
+            "the session_api_key will be None."
+        ),
     )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"),
-        index=True,
+    exposed_urls: list[ExposedUrl] | None = Field(
+        default_factory=lambda: [],
+        description=(
+            "URLs exposed by the sandbox (App server, Vscode, etc...). "
+            "Sandboxes which are not in an ACTIVE state may not return urls."
+        ),
     )
-    sandbox_template_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandbox_templates.id", ondelete="CASCADE"),
-        index=True,
-    )
-    read_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    update_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    delete_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
+    created_at: datetime = Field(default_factory=utc_now)
+    status_detail: str | None = Field(
+        default=None,
+        description=(
+            "Last pod/scheduling reason from the runtime (e.g. insufficient kvm, "
+            "ImagePullBackOff), surfaced when a sandbox is stuck or errored."
+        ),
     )
 
 
-class RoleSandboxPermission(Base):
-    """Per-role grant of access to a :class:`Sandbox`.
+class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
+    """A point-in-time snapshot of a sandbox.
 
-    Links a :class:`Role` to a :class:`Sandbox` with independent
-    read/update/delete flags. The ``(role_id, sandbox_id)`` pair is unique.
+    Snapshots are created either from an existing sandbox (``sandbox_id``) or
+    by importing an uploaded snapshot file (``schema_type``). Each snapshot
+    carries an id, the time it was created, and a download URL the caller can
+    use to fetch the snapshot artifact. Provider-specific subclasses (e.g.
+    :class:`DockerSandboxSnapshot`) carry implementation detail such as the
+    backing image id.
     """
 
-    __tablename__ = "role_sandbox_permissions"
-    __table_args__ = (
-        UniqueConstraint(
-            "role_id",
-            "sandbox_id",
-            name="uq_role_sandbox_perm_role_id_sandbox_id",
-        ),
-        {"comment": "Per-role grants of access to sandboxes"},
+    id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    download_url: str | None = Field(
+        default=None,
+        description="URL to download the snapshot artifact, when available.",
     )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"),
-        index=True,
-    )
-    sandbox_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandboxes.id", ondelete="CASCADE"),
-        index=True,
-    )
-    read_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    update_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    delete_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-
-class RoleSandboxSnapshotPermission(Base):
-    """Per-role grant of access to a :class:`SandboxSnapshot`.
-
-    Links a :class:`Role` to a :class:`SandboxSnapshot` with independent
-    read/update/delete flags. The ``(role_id, sandbox_snapshot_id)`` pair is
-    unique.
-    """
-
-    __tablename__ = "role_sandbox_snapshot_permissions"
-    __table_args__ = (
-        UniqueConstraint(
-            "role_id",
-            "sandbox_snapshot_id",
-            name="uq_role_sandbox_snap_perm_role_sandbox_snap",
-        ),
-        {"comment": "Per-role grants of access to sandbox snapshots"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"),
-        index=True,
-    )
-    sandbox_snapshot_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sandbox_snapshots.id", ondelete="CASCADE"),
-        index=True,
-    )
-    read_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    update_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    delete_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default="false",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-
-__all__ = [
-    "DiscriminatedUnionJSON",
-    "DockerSandboxRuntimeState",
-    "DockerSandboxTemplateSpec",
-    "FuseySandboxSnapshotArtifact",
-    "FuseySandboxStorageSpec",
-    "OpenHandsAgentServerSpec",
-    "OpenHandsAgentServerState",
-    "RoleSandboxPermission",
-    "RoleSandboxSnapshotPermission",
-    "RoleSandboxTemplatePermission",
-    "Sandbox",
-    "SandboxCompute",
-    "SandboxComputeStatus",
-    "SandboxFilesystem",
-    "SandboxFilesystemStatus",
-    "SandboxProviderKind",
-    "SandboxResourceLimits",
-    "SandboxRuntimeState",
-    "SandboxServerSpec",
-    "SandboxServerState",
-    "SandboxSnapshot",
-    "SandboxSnapshotArtifact",
-    "SandboxSnapshotStatus",
-    "SandboxStatus",
-    "SandboxStorageKind",
-    "SandboxStorageSpec",
-    "SandboxTemplate",
-    "SandboxTemplateSpec",
-]

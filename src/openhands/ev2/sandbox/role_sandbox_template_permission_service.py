@@ -15,6 +15,9 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (
+    RoleSandboxTemplatePermission,
+)
 from openhands.ev2.sandbox.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchCreate,
     RoleSandboxTemplatePermissionBatchDelete,
@@ -23,7 +26,6 @@ from openhands.ev2.sandbox.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionSearchFilter,
     RoleSandboxTemplatePermissionUpdate,
 )
-from openhands.ev2.sandbox.sandbox_models import RoleSandboxTemplatePermission
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
@@ -242,9 +244,11 @@ def _classify_integrity_error(
 ) -> Exception:
     """Map an IntegrityError to a duplicate vs orphan failure.
 
-    A violation of ``uq_role_sandbox_tpl_perm_role_sandbox_tpl``
-    means the grant already exists; a foreign-key violation means the referenced
-    role or sandbox template is missing.
+    A violation of ``uq_role_sandbox_tpl_perm_role_sandbox_tpl`` means the grant
+    already exists. The only foreign key left on the table is ``role_id`` (the
+    template id is a free UUID with no referential target — sandbox templates
+    are provider-owned, not DB rows), so a foreign-key violation means the
+    referenced role is missing.
     """
     message = str(getattr(exc, "orig", exc)).lower()
     if "uq_role_sandbox_tpl_perm_role_sandbox_tpl" in message or (
@@ -252,24 +256,9 @@ def _classify_integrity_error(
     ):
         return RoleSandboxTemplatePermissionConflictError(f"{role_id}/{sandbox_template_id}")
     if "foreign key" in message or "fk_" in message:
-        if "sandbox_template_id" in message and "role_id" not in message:
-            return RoleSandboxTemplatePermissionOrphanError(
-                f"sandbox template {sandbox_template_id} does not exist"
-            )
         return RoleSandboxTemplatePermissionOrphanError(f"role {role_id} does not exist")
     return RoleSandboxTemplatePermissionConflictError(f"{role_id}/{sandbox_template_id}")
 
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted to the principal."""
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "RoleSandboxTemplatePermission",
-    "RoleSandboxTemplatePermissionConflictError",
-    "RoleSandboxTemplatePermissionNotFoundError",
-    "RoleSandboxTemplatePermissionOrphanError",
-    "RoleSandboxTemplatePermissionScopeError",
-    "RoleSandboxTemplatePermissionService",
-]

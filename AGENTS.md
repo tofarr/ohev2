@@ -36,8 +36,15 @@ locally and ensure they are green *before* opening (or updating) a pull request:
    uv run ruff format --check .
    uv run mypy
    uv run pylint src/openhands/ev2
-   uv run pytest -q
+   make test
    ```
+   `make test` runs the full suite with coverage and the 94% gate (xdist
+   disabled for deterministic coverage attribution). For fast iteration
+   *before* this gate, use `make test-fast ARGS=<path>` (no coverage,
+   testmon-scoped, stops on first failure) or `make test-affected` (only
+   tests touched by the current diff). A bare `uv run pytest` also runs
+   coverage-free and parallelized via xdist, but does not stop early or
+   scope to the diff.
    `pylint` runs the McCabe cyclomatic complexity check (threshold 5);
    it must pass — overly complex functions must be refactored.
 2. **e2e** (mirrors the `e2e` CI job; requires Docker for the service stack):
@@ -128,6 +135,21 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
 
 * Unit tests use fixtures and an **embedded PostgreSQL** server (pytest-postgresql),
   never a shared/long-lived DB. Tests must be hermetic and parallelizable.
+  A single PG process is started per session; one database is created per xdist
+  worker. The schema is built once into the worker DB. Per-test isolation uses
+  **savepoint transactions** (not per-test `CREATE DATABASE`): the `engine`
+  fixture begins an outer transaction on a fresh connection, and all DB access
+  (the `session` fixture, the `app` dependency override, and the module-level
+  `get_session_factory()` used by middleware) goes through the same connection
+  via `join_transaction_mode="create_savepoint"`. `session.commit()` only
+  releases a savepoint — data is visible within the test but rolled back after
+  it. The engine uses `NullPool` so connections are never shared across event
+  loops.
+* `created_at` / `updated_at` columns use `server_default=func.clock_timestamp()`
+  (not `func.now()`). `clock_timestamp()` returns the actual wall-clock time per
+  statement, not the transaction start time, so rows created in the same
+  savepoint transaction get distinct timestamps. This is required for tests that
+  filter or sort by `created_at`.
 * Test public behavior, not implementation details. Avoid mocks where a real
   dependency (DB, httpx transport) can be used in-process.
 * Every public service function needs at least one happy-path and one error-path test.
@@ -141,6 +163,15 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
   trade-offs.
 * Docstrings: one-line summary for trivial functions; summary + args/returns only when
   types don't make it obvious.
+
+### 6.1 No `__all__` exports lists
+
+Do not add `__all__` to modules. The codebase uses no wildcard imports
+(`from x import *`), so an explicit exports list is pure repetition of the
+names already defined at module scope. Keep the public API implicit: every
+non-underscore-prefixed name is importable, and consumers import the names
+they need directly. A `__all__` that merely re-lists the module's public
+symbols adds maintenance burden (easy to drift out of sync) without value.
 
 ## 7. Formal specs (Quint)
 

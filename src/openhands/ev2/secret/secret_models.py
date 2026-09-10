@@ -99,12 +99,12 @@ class Secret(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -137,12 +137,12 @@ class StaticSecretDetail(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -196,12 +196,12 @@ class RoleSecretPermission(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -254,11 +254,11 @@ class UserSecretPermission(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
