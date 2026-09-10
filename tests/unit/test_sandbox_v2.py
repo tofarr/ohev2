@@ -13,6 +13,7 @@ import pytest
 from docker.errors import ImageNotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
+from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox_v2.docker_sandbox_service import (
     DEFAULT_EXPOSED_PORTS,
     DockerSandboxService,
@@ -27,7 +28,6 @@ from openhands.ev2.sandbox_v2.docker_sandbox_service import (
     _wildcard_match,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
-    DockerSandbox,
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,

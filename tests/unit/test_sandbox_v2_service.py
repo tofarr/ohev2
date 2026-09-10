@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
+from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
-    DockerSandbox,
     DockerSandboxTemplate,
     Sandbox,
     SandboxStatus,

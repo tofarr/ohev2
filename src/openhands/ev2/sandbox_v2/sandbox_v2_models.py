@@ -139,18 +139,7 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
     )
 
 
-class DockerSandbox(Sandbox):
-    """A sandbox backed by a Docker container.
-
-    ``volume_mounts`` are the bind mounts attached to the container so callers
-    can locate the host directories backing the container filesystem.
-    """
-
-    volume_mounts: list[VolumeMount] = Field(default_factory=list)
-
-
 __all__ = [
-    "DockerSandbox",
     "DockerSandboxTemplate",
     "ExposedPort",
     "ExposedUrl",

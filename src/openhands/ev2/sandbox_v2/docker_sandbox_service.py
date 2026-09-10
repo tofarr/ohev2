@@ -26,8 +26,8 @@ import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 from docker.errors import ImageNotFound, NotFound  # type: ignore[import-untyped]
 from pydantic import Field
 
+from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
-    DockerSandbox,
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,
