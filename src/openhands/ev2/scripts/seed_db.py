@@ -1,4 +1,4 @@
-"""Seed the database with bootstrap roles and users.
+"""Seed the database with bootstrap roles, users, and a default group.
 
 Seeds two roles:
 
@@ -10,11 +10,14 @@ Seeds two roles:
   entity columns are ``NULL`` (deny). Assigned to the optional seeded regular
   user.
 
+Also seeds a default :class:`Group` and adds every seeded user (the admin and,
+when provided, the regular user) to it.
+
 Idempotent: re-running upserts the users (password, email, enabled) and
 ensures both roles exist with the correct per-entity ``Permission`` columns,
-then ensures each user is a member of its role. Safe to call on a fresh
-database, on one already seeded, or after adding new resource types
-(re-running backfills the missing admin per-entity columns).
+then ensures each user is a member of its role and of the default group. Safe
+to call on a fresh database, on one already seeded, or after adding new
+resource types (re-running backfills the missing admin per-entity columns).
 
 Run via ``uv run python -m openhands.ev2.scripts.seed_db``; credentials default
 from the ``OHE_SEED_ADMIN_*`` / ``OHE_SEED_USER_*`` environment variables, or
@@ -43,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess
 from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
+from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.security.security_models import Permission, Permitted
 from openhands.ev2.user.user_models import User
@@ -54,6 +58,7 @@ from openhands.ev2.util.password import hash_password
 _ADMIN_ENTITY_COLUMNS: tuple[str, ...] = ROLE_ENTITY_COLUMNS
 _ADMIN_ROLE_NAME = "admin"
 _USER_ROLE_NAME = "user"
+_DEFAULT_GROUP_NAME = "default"
 
 # Matches the RFC 5322-ish shape enforced by EmailStr loosely; the canonical
 # validation lives in the pydantic schema, but this script does not route through
@@ -110,28 +115,12 @@ async def seed_db(
     if not admin_password:
         raise ValueError("admin password must be a non-empty string")
 
-    user_creds_provided = any([user_username, user_email, user_password])
-    regular: User | None = None
-    if user_creds_provided:
-        if not (user_username and user_email and user_password):
-            raise ValueError(
-                "regular user credentials must be fully provided "
-                "(username, email, password) or all omitted."
-            )
-        user_username = user_username.strip()
-        if not user_username:
-            raise ValueError("user username must be a non-empty string")
-        if not _is_valid_email(user_email):
-            raise ValueError(f"invalid user email: {user_email!r}")
-        if not user_password:
-            raise ValueError("user password must be a non-empty string")
-        # Narrowed: all three are str here.
-        regular = await _upsert_user(
-            session,
-            username=user_username,
-            email=user_email,
-            password=user_password,
-        )
+    regular = await _maybe_upsert_regular_user(
+        session,
+        user_username=user_username,
+        user_email=user_email,
+        user_password=user_password,
+    )
 
     admin = await _upsert_user(
         session, username=admin_username, email=admin_email, password=admin_password
@@ -141,8 +130,42 @@ async def seed_db(
     if regular is not None:
         await _assign_role(session, regular.id, _USER_ROLE_NAME)
 
+    group = await _ensure_default_group(session, admin.id)
+    for member in (admin, regular):
+        if member is not None:
+            await _ensure_group_member(session, group.id, member.id, admin.id)
+
     await session.commit()
     return admin, regular
+
+
+async def _maybe_upsert_regular_user(
+    session: AsyncSession,
+    *,
+    user_username: str | None,
+    user_email: str | None,
+    user_password: str | None,
+) -> User | None:
+    """Validate and upsert the optional regular user.
+
+    Returns ``None`` when no regular-user credentials are provided. Raises
+    ``ValueError`` on a partial or invalid credential set.
+    """
+    if not any([user_username, user_email, user_password]):
+        return None
+    if not (user_username and user_email and user_password):
+        raise ValueError(
+            "regular user credentials must be fully provided "
+            "(username, email, password) or all omitted."
+        )
+    username = user_username.strip()
+    if not username:
+        raise ValueError("user username must be a non-empty string")
+    if not _is_valid_email(user_email):
+        raise ValueError(f"invalid user email: {user_email!r}")
+    if not user_password:
+        raise ValueError("user password must be a non-empty string")
+    return await _upsert_user(session, username=username, email=user_email, password=user_password)
 
 
 async def seed_admin(
@@ -262,6 +285,44 @@ async def _ensure_membership(
         await session.flush()
 
 
+async def _ensure_default_group(session: AsyncSession, creator_id: uuid.UUID) -> Group:
+    """Upsert the default group, created by *creator_id*.
+
+    Idempotent: re-seeding refreshes the group's creator_id/description if it
+    already exists. The membership rows are ensured separately.
+    """
+    group = await session.scalar(select(Group).where(Group.name == _DEFAULT_GROUP_NAME))
+    if group is None:
+        group = Group(
+            name=_DEFAULT_GROUP_NAME,
+            description="Default group for seeded users.",
+            creator_id=creator_id,
+        )
+        session.add(group)
+        await session.flush()
+        return group
+
+    group.creator_id = creator_id
+    group.description = "Default group for seeded users."
+    await session.flush()
+    return group
+
+
+async def _ensure_group_member(
+    session: AsyncSession,
+    group_id: uuid.UUID,
+    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
+) -> None:
+    """Ensure *user_id* is a member of *group_id*, attributed to *creator_id*."""
+    existing = await session.scalar(
+        select(GroupUser).where(GroupUser.group_id == group_id, GroupUser.user_id == user_id)
+    )
+    if existing is None:
+        session.add(GroupUser(group_id=group_id, user_id=user_id, creator_id=creator_id))
+        await session.flush()
+
+
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Seed the database with admin and regular-user roles/users.",
@@ -337,6 +398,11 @@ async def main(argv: Iterable[str] | None = None) -> int:
                     f"email={regular.email} enabled={regular.enabled}",
                     file=sys.stderr,
                 )
+            print(
+                f"Seeded default group '{_DEFAULT_GROUP_NAME}' with "
+                f"{1 + (regular is not None)} member(s).",
+                file=sys.stderr,
+            )
     finally:
         await engine.dispose()
     return 0
