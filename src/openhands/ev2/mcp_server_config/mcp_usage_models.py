@@ -83,7 +83,7 @@ class McpUsage(Base):
         DateTime(timezone=True),
         primary_key=True,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -145,11 +145,11 @@ class McpAggregatedUsage(Base):
     total_duration_ms: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 

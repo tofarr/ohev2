@@ -131,12 +131,12 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -174,12 +174,12 @@ class RefreshToken(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -211,12 +211,12 @@ class IdpRefreshToken(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -249,12 +249,12 @@ class IdpAccessToken(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -281,12 +281,12 @@ class OAuthClient(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -313,5 +313,5 @@ class OAuthClientRedirectUri(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )

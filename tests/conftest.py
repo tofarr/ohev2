@@ -1,14 +1,21 @@
 """Shared pytest fixtures.
 
 Uses an embedded PostgreSQL server (pytest-postgresql) so unit tests are hermetic
-and parallelizable. A single Postgres process is started per test session; the
-schema is built once into a *template* database, and each test gets a fresh
-database cloned from that template via ``CREATE DATABASE ... TEMPLATE`` (a fast
-file-level copy — no per-test DDL). Sessions roll back after each test.
+and parallelizable. A single Postgres process is started per test session and a
+single database is created per xdist worker (or per session when running without
+xdist). The schema is built once into the worker database. Each test runs inside
+a SAVEPOINT transaction that is rolled back after the test — no per-test
+``CREATE DATABASE``/``DROP DATABASE``.
+
+All DB access in a test (the ``session`` fixture, the ``app`` fixture's
+dependency override, and the module-level ``get_session_factory()`` used by
+middleware) goes through the same per-test connection, so committed savepoint
+data is visible across sessions within a test, yet invisible to other tests.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -24,6 +31,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from openhands.ev2.app import create_app
 from openhands.ev2.auth.auth_models import (  # noqa: F401
@@ -34,7 +42,6 @@ from openhands.ev2.auth.auth_models import (  # noqa: F401
 )
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
-from openhands.ev2.db import reset_engine_factory
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
     FeatureFlagRoleAssignment,
@@ -68,25 +75,18 @@ from openhands.ev2.user.user_models import User  # noqa: F401
 
 # Default test principal — authenticated via a JWE cookie token minted in the
 # client fixture (the same mechanism the login endpoint uses). The user is
-# created in the DB during the engine fixture so authenticate() can resolve it.
+# created in the DB during the app fixture so authenticate() can resolve it.
 _TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
 _TEST_USERNAME = "test-principal"
 
-# Embedded PostgreSQL process, started once per test session by the
-# pytest-postgresql plugin's built-in ``postgresql_proc`` fixture. The plugin's
-# ``_pg_exe`` helper resolves the real ``pg_ctl`` via ``pg_config --bindir``
-# (PG 17 here), so no explicit executable is needed. The schema is built once
-# into the plugin's template database (``<dbname>_tmpl``); every per-test
-# database is then a cheap ``CREATE DATABASE ... TEMPLATE`` clone of it.
 
+def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -> None:
+    """Create the full ORM schema + DEFAULT partitions in a database.
 
-def _build_template_schema(host: str, port: int, user: str, password: str, dbname: str) -> None:
-    """Create the full ORM schema + llm_usage DEFAULT partition in a database.
-
-    Used to populate the session template once; cloned per test thereafter.
+    Runs on a throwaway event loop (``asyncio.run``) so it does not tie
+    connections to any test's event loop. Called once per worker DB at session
+    scope; tests then roll back.
     """
-    import asyncio
-
     # Importing the model modules registers every table on ``Base.metadata``.
     import openhands.ev2.auth.auth_models
     import openhands.ev2.cors.cors_models
@@ -102,13 +102,10 @@ def _build_template_schema(host: str, port: int, user: str, password: str, dbnam
     url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
 
     async def _run() -> None:
-        eng = create_async_engine(url)
+        eng = create_async_engine(url, poolclass=NullPool)
         try:
             async with eng.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-                # llm_usage and mcp_usage are range-partitioned by created_at;
-                # create_all emits only the parents. Add DEFAULT partitions so
-                # test inserts land somewhere before dated partitions exist.
                 await conn.execute(
                     text(
                         "CREATE TABLE IF NOT EXISTS llm_usage_default "
@@ -127,22 +124,7 @@ def _build_template_schema(host: str, port: int, user: str, password: str, dbnam
     asyncio.run(_run())
 
 
-@pytest.fixture(scope="session")
-def pg_server(request: pytest.FixtureRequest) -> PostgreSQLExecutor:
-    """Start the embedded PG once and build the schema template.
-
-    Returns the underlying :class:`PostgreSQLExecutor` so per-test fixtures can
-    read ``host``/``port``/``user``/``password``/``template_dbname``/``dbname``
-    and the server ``version`` (needed by :class:`DatabaseJanitor`).
-    """
-    proc: PostgreSQLExecutor = request.getfixturevalue("postgresql_proc")
-    _build_template_schema(
-        proc.host, proc.port, proc.user, proc.password or "", proc.template_dbname
-    )
-    return proc
-
-
-def _set_test_config(
+def _set_test_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
     host: str | None = None,
@@ -151,18 +133,18 @@ def _set_test_config(
     username: str | None = None,
     password: str | None = None,
 ) -> None:
-    """Point AppConfig at a test database and reset cached engine/factory.
+    """Set test env vars for AppConfig.
 
-    The DB coordinates are optional: callers that have already set them via
-    the ``engine`` fixture (e.g. ``app``) omit them to keep the prior values.
+    DB coordinates are optional: callers that already set them via
+    the ``db_engine`` fixture (e.g. ``app``) omit them to keep prior values.
+    Does NOT call reset_engine_factory — the per-test fixture manages
+    db._engine/_factory directly.
     """
     get_config.cache_clear()
-    reset_engine_factory()
     from openhands.ev2.cors.cors_service import reset_cors_cache
 
     reset_cors_cache()
     monkeypatch.setenv("OHE_ENCRYPTION_KEY_VALUE", "test-secret-at-least-32-bytes-long!!")
-    # Point the structured DbConfig at the embedded test database when given.
     if host is not None:
         monkeypatch.setenv("OHE_DB_CONFIG_HOST", host)
     if port is not None:
@@ -178,32 +160,18 @@ def _set_test_config(
     monkeypatch.setenv("OHE_IDP_URL", "https://idp.example.com")
     monkeypatch.setenv("OHE_IDP_CLIENT_ID", "test-client")
     monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "test-secret")
-    # Public base URL of the service; the callback URL handed to the IdP is
-    # derived from this (config-driven, not request.base_url).
     monkeypatch.setenv("OHE_BASE_URL", "http://test")
-    # Keep the background cleanup loop out of the test process.
     monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
-    # Keep the LLM usage background loops out of the test process.
     monkeypatch.setenv("OHE_LLM_USAGE_PARTITION_INTERVAL", "0")
     monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
-    # Keep the MCP usage background loops out of the test process.
     monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
     monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
-
-
-# Per-entity ``Permission`` columns the seeded test admin role grants
-# unrestricted access to. ``ROLE_ENTITY_COLUMNS`` (imported above) is the
-# canonical list on the model, so the seeded admin role grants access to every
-# resource.
 
 
 async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Assign the test principal an admin role that permits all actions.
 
-    The role's per-entity ``Permission`` columns grant :class:`Permitted`
-    (unrestricted access) for every shipped resource type, providing the
-    baseline access route tests need under the role-based authorization
-    dependency. Idempotent: re-running on an already-seeded role is a no-op.
+    Idempotent: re-running on an already-seeded role is a no-op.
     """
     from sqlalchemy import select
 
@@ -226,65 +194,128 @@ async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> No
         session.add(UserRole(role_id=role.id, user_id=user_id))
 
 
-@pytest_asyncio.fixture
-async def engine(
-    monkeypatch: pytest.MonkeyPatch,
-    pg_server: PostgreSQLExecutor,
-    request: pytest.FixtureRequest,
-) -> AsyncGenerator[AsyncEngine, None]:
-    """A per-test async engine bound to a fresh database cloned from the template.
+def _worker_id(request: pytest.FixtureRequest) -> str:
+    """Return the xdist worker id, or 'main' when xdist is not active."""
+    try:
+        return request.getfixturevalue("worker_id")
+    except Exception:
+        return "main"
 
-    The schema already exists in the cloned database (built once into the
-    session template), so no ``create_all``/``drop_all`` runs per test. Each
-    test gets a uniquely-named database cloned from the template, dropped after
-    the test.
+
+@pytest.fixture(scope="session")
+def pg_server(request: pytest.FixtureRequest) -> tuple[PostgreSQLExecutor, AsyncEngine]:
+    """Start embedded PG, create one DB per worker, build schema, and return
+    ``(proc, engine)``.
+
+    The engine uses ``NullPool`` so connections are never shared across
+    event loops — each ``connect()`` creates a fresh asyncpg connection on
+    the caller's event loop, and ``close()`` returns it to the OS.
     """
-    proc = pg_server
+    proc: PostgreSQLExecutor = request.getfixturevalue("postgresql_proc")
     host = proc.host
     port = proc.port
     user = proc.user
     password = proc.password or ""
-    template_dbname = proc.template_dbname
-    # Unique per-test database name so parallel/sequential tests never collide.
-    test_dbname = (
-        f"test_{request.node.nodeid.replace('/', '_').replace(':', '_')}_{uuid.uuid4().hex[:8]}"
-    )
-    # Clamp to Postgres' 63-byte identifier limit.
-    test_dbname = test_dbname[:63]
-    # Clone the template into the per-test database. The janitor terminates
-    # stray template connections before the CLONE and drops the clone on exit.
+    wid = _worker_id(request)
+    dbname = f"testdb_{wid}"[:63]
+
     janitor = DatabaseJanitor(
         user=user,
         host=host,
         port=port,
-        dbname=test_dbname,
-        template_dbname=template_dbname,
+        dbname=dbname,
+        template_dbname=proc.template_dbname,
         version=proc.version,
         password=password or None,
     )
     janitor.init()
-    _set_test_config(
+    _build_schema(host, port, user, password, dbname)
+
+    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+    eng = create_async_engine(url, poolclass=NullPool)
+
+    request.session.addfinalizer(lambda: janitor.drop())
+
+    # Keep a reference so the engine is not GC'd (and its finalizer doesn't
+    # warn) — the connection pool is empty (NullPool) so no async dispose is
+    # needed.
+    _session_engine_holder.engine = eng  # type: ignore[attr-defined]
+    return proc, eng
+
+
+class _EngineHolder:
+    """Holds a reference to the session-scoped engine to prevent GC."""
+
+    engine: AsyncEngine | None = None
+
+
+_session_engine_holder = _EngineHolder()
+
+
+@pytest_asyncio.fixture
+async def engine(
+    monkeypatch: pytest.MonkeyPatch,
+    pg_server: tuple[PostgreSQLExecutor, AsyncEngine],
+) -> AsyncGenerator[AsyncEngine, None]:
+    """A per-test savepoint transaction wrapper around the shared engine.
+
+    Begins an outer transaction on a fresh connection, yields the engine, then
+    rolls back. Sessions created via the ``session`` fixture (and via
+    ``get_session_factory()`` in production code paths like the CORS
+    middleware) bind to this connection with ``join_transaction_mode=
+    "create_savepoint"``, so ``session.commit()`` only releases a savepoint —
+    data is visible within the test but rolled back after it.
+    """
+    from openhands.ev2 import db as db_module
+
+    _proc, db_engine = pg_server
+    host = db_engine.url.host
+    port = str(db_engine.url.port)
+    user = db_engine.url.username
+    password = db_engine.url.password or ""
+    db_name = db_engine.url.database
+    _set_test_env(
         monkeypatch,
         host=host,
-        port=str(port),
-        db_name=test_dbname,
+        port=port,
+        db_name=db_name,
         username=user,
         password=password,
     )
-    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{test_dbname}"
-    eng = create_async_engine(url)
-    yield eng
-    await eng.dispose()
-    janitor.drop()
-    from openhands.ev2.db import dispose_engine_factory
 
-    await dispose_engine_factory()
+    conn = await db_engine.connect()
+    tx = await conn.begin()
+    # Bind the module-level factory to this connection so ALL DB access
+    # (session fixture, app dependency override, CORS middleware via
+    # get_session_factory()) participates in the savepoint transaction.
+    factory = async_sessionmaker(
+        bind=conn,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    old_engine = db_module._engine
+    old_factory = db_module._factory
+    db_module._engine = db_engine
+    db_module._factory = factory
+
+    yield db_engine
+
+    db_module._factory = old_factory
+    db_module._engine = old_engine
+    await tx.rollback()
+    await conn.close()
 
 
 @pytest_asyncio.fixture
 async def session(engine) -> AsyncGenerator[AsyncSession, None]:
-    """A transactional session that rolls back after each test."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    """A session that participates in the per-test savepoint transaction.
+
+    ``commit()`` releases the savepoint (data visible within the test);
+    the outer transaction is rolled back after the test.
+    """
+    from openhands.ev2.db import get_session_factory
+
+    factory = get_session_factory()
     async with factory() as s:
         yield s
         await s.rollback()
@@ -292,20 +323,17 @@ async def session(engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture
 async def app(engine, monkeypatch: pytest.MonkeyPatch):
-    """A FastAPI app whose DB dependency uses the test engine.
+    """A FastAPI app whose DB dependency uses the per-test savepoint transaction.
 
-    Overrides the `get_session` dependency to yield sessions from the test
-    engine so route tests are hermetic. Also seeds the default test principal
-    user so the auth dependency's DB-backed `authenticate` can resolve tokens
-    minted for it.
+    Seeds the default test principal user so the auth dependency's DB-backed
+    ``authenticate`` can resolve tokens minted for it.
     """
-    _set_test_config(monkeypatch)
+    _set_test_env(monkeypatch)
 
-    from openhands.ev2.db import dispose_engine_factory
     from openhands.ev2.db import get_session as _app_get_session
+    from openhands.ev2.db import get_session_factory
 
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    # Seed the test principal (User.id is init=False, so insert via SQL).
+    factory = get_session_factory()
     async with factory() as s:
         await s.execute(
             text(
@@ -326,21 +354,11 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
     application.dependency_overrides[_app_get_session] = _override_get_session
     yield application
     application.dependency_overrides.clear()
-    # The CORS middleware reads origins via get_session_factory(), which builds
-    # a separate app-scoped engine (not the overridden test dependency). Dispose
-    # it so no asyncpg connections leak across tests.
-    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
 async def client(app, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncClient, None]:
-    """An async HTTP client authenticated as the test principal.
-
-    Mints a JWE cookie token for the seeded test user and sends it via the
-    ``Authorization: Bearer`` header (the cookie/ACCESS_TOKEN JWE path) so
-    permission dependencies see a real principal. The ``X-API-Key`` header is
-    reserved for opaque API keys and is not used by the default test client.
-    """
+    """An async HTTP client authenticated as the test principal."""
     from openhands.ev2.util.auth_token import create_auth_token
 
     get_config.cache_clear()

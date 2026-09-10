@@ -60,11 +60,11 @@ class FeatureFlag(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -112,7 +112,7 @@ class FeatureFlagRoleAssignment(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
 
     feature_flag: Mapped[FeatureFlag] = relationship(init=False, back_populates="role_overrides")
@@ -150,7 +150,7 @@ class FeatureFlagUserAssignment(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
 
     feature_flag: Mapped[FeatureFlag] = relationship(init=False, back_populates="user_overrides")
