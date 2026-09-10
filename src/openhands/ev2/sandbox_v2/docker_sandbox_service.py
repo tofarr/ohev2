@@ -119,31 +119,31 @@ class DockerSandboxService(SandboxService):
         description="Exposed ports declared on every Docker sandbox by default.",
     )
     extra_hosts: dict[str, str] = Field(
-        default_factory=lambda: {'host.docker.internal': 'host-gateway'},
+        default_factory=lambda: {"host.docker.internal": "host-gateway"},
         description=(
-            'Extra hostname mappings to add to agent-server containers. '
-            'This allows containers to resolve hostnames like host.docker.internal '
-            'for LAN deployments and MCP connections. '
+            "Extra hostname mappings to add to agent-server containers. "
+            "This allows containers to resolve hostnames like host.docker.internal "
+            "for LAN deployments and MCP connections. "
             'Format: {"hostname": "ip_or_gateway"}'
         ),
     )
     use_host_network: bool = Field(
         default=False,
         description=(
-            'Whether to use host networking mode for agent-server containers. '
-            'When enabled, containers share the host network namespace, '
-            'making all container ports directly accessible on the host. '
-            'This is useful for reverse proxy setups where dynamic port mapping '
-            'is problematic.'
+            "Whether to use host networking mode for agent-server containers. "
+            "When enabled, containers share the host network namespace, "
+            "making all container ports directly accessible on the host. "
+            "This is useful for reverse proxy setups where dynamic port mapping "
+            "is problematic."
         ),
     )
     kvm_enabled: bool = Field(
         default=False,
         description=(
-            'Whether to pass through /dev/kvm to sandbox containers for hardware '
-            'virtualization support. When enabled, sandboxes can run KVM-accelerated '
-            'virtual machines instead of using slower emulation. Requires the host '
-            'to have KVM available (/dev/kvm must exist and be accessible). '
+            "Whether to pass through /dev/kvm to sandbox containers for hardware "
+            "virtualization support. When enabled, sandboxes can run KVM-accelerated "
+            "virtual machines instead of using slower emulation. Requires the host "
+            "to have KVM available (/dev/kvm must exist and be accessible). "
         ),
     )
     snapshot_mode: SnapshotMode = Field(
@@ -411,11 +411,11 @@ class DockerSandboxService(SandboxService):
                 extra_hosts=self.extra_hosts
                 if self.extra_hosts and not self.use_host_network
                 else None,
-                devices = ['/dev/kvm:/dev/kvm:rwm'] if self.kvm_enabled else None,
+                devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
                 environment={
                     # This is a temporary measure. The agent server does not start with --host 0.0.0.0
                     # by default unless a session api key is set.
-                    'SESSION_API_KEY': 'changeme'
+                    "SESSION_API_KEY": "changeme"
                 },
             )
             return
