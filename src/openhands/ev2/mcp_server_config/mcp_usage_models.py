@@ -13,7 +13,7 @@ way LLM token usage is.
   The wall-clock ``duration_ms`` spent inside the proxied upstream call is the
   primary metric, alongside ``tool_name`` and a success/error flag.
 * :class:`McpAggregatedUsage` — per-minute, per-user rollup of
-  :class:`McpUsage`. One row per ``(user_id, minute)`` that had at least one
+  :class:`McpUsage`. One row per ``(creator_id, minute)`` that had at least one
   invocation; sums ``duration_ms`` and counts invocations. This is the table
   exposed read-only over REST.
 
@@ -85,7 +85,7 @@ class McpUsage(Base):
         init=False,
         server_default=func.clock_timestamp(),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -111,7 +111,7 @@ class McpUsage(Base):
 class McpAggregatedUsage(Base):
     """Per-minute, per-user rollup of :class:`McpUsage` for usage queries.
 
-    One row per ``(user_id, minute)`` that had at least one invocation. Sums
+    One row per ``(creator_id, minute)`` that had at least one invocation. Sums
     ``duration_ms`` and counts invocations; the background aggregator populates
     it one minute at a time, always at least one minute behind real time so a
     finished minute is never partially aggregated. Minutes without usage are
@@ -123,7 +123,7 @@ class McpAggregatedUsage(Base):
 
     __tablename__ = "mcp_aggregated_usage"
     __table_args__ = (
-        UniqueConstraint("user_id", "minute", name="uq_mcp_aggregated_usage_user_id_minute"),
+        UniqueConstraint("creator_id", "minute", name="uq_mcp_aggregated_usage_creator_id_minute"),
         {"comment": "Per-minute, per-user rollup of mcp_usage"},
     )
 
@@ -137,7 +137,7 @@ class McpAggregatedUsage(Base):
         DateTime(timezone=True),
         index=True,
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )

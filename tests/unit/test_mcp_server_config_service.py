@@ -61,7 +61,7 @@ class TestMCPServerConfigService:
                 headers={"X-Token": "header-secret"},
                 auth={"strategy": "bearer", "value": "bearer-secret"},
             ),
-            user_id=user_id,
+            creator_id=user_id,
         )
 
         assert config.env is not None and "env-secret" not in config.env
@@ -89,7 +89,7 @@ class TestMCPServerConfigService:
         service: MCPServerConfigService,
     ) -> None:
         user_id = await _seed_user(service._session)
-        config = await service.create(_stdio_payload(), user_id=user_id)
+        config = await service.create(_stdio_payload(), creator_id=user_id)
 
         updated = await service.update(
             config.id,
@@ -105,14 +105,14 @@ class TestMCPServerConfigService:
         service: MCPServerConfigService,
     ) -> None:
         user_id = await _seed_user(service._session)
-        config = await service.create(_stdio_payload(), user_id=user_id)
+        config = await service.create(_stdio_payload(), creator_id=user_id)
 
         with pytest.raises(MCPServerConfigValidationError):
             await service.update(config.id, MCPServerConfigUpdate(command=None))
 
     async def test_delete(self, service: MCPServerConfigService) -> None:
         user_id = await _seed_user(service._session)
-        config = await service.create(_stdio_payload(), user_id=user_id)
+        config = await service.create(_stdio_payload(), creator_id=user_id)
         await service.delete(config.id)
 
         with pytest.raises(MCPServerConfigNotFoundError):

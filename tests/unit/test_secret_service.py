@@ -69,7 +69,7 @@ class TestCreate:
         user = await _seed_user(session)
         secret = await service.create(
             SecretCreate(code="API_KEY", value=SecretStr("hunter2")),
-            user_id=user.id,
+            creator_id=user.id,
         )
         assert secret.code == "API_KEY"
         assert secret.type == SecretType.STATIC
@@ -78,28 +78,30 @@ class TestCreate:
         assert detail is not None
         assert detail.value != "hunter2"
         assert enc.decrypt_value(detail.value) == "hunter2"
-        assert secret.user_id == user.id
+        assert secret.creator_id == user.id
 
     async def test_create_duplicate_code_conflicts(
         self, service: SecretService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        await service.create(SecretCreate(code="DUP", value=SecretStr("v")), user_id=user.id)
+        await service.create(SecretCreate(code="DUP", value=SecretStr("v")), creator_id=user.id)
         with pytest.raises(SecretCodeConflictError):
-            await service.create(SecretCreate(code="DUP", value=SecretStr("v2")), user_id=user.id)
+            await service.create(
+                SecretCreate(code="DUP", value=SecretStr("v2")), creator_id=user.id
+            )
 
     async def test_create_scope_denied(self, session: AsyncSession, enc: EncryptionService) -> None:
         user = await _seed_user(session)
         svc = SecretService(session, NoneSearchFilter[Secret](), encryption_service=enc)
         with pytest.raises(SecretPermissionScopeError):
-            await svc.create(SecretCreate(code="X", value=SecretStr("v")), user_id=user.id)
+            await svc.create(SecretCreate(code="X", value=SecretStr("v")), creator_id=user.id)
 
 
 class TestRead:
     async def test_get_returns_secret(self, service: SecretService, session: AsyncSession) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="G", value=SecretStr("plain")), user_id=user.id
+            SecretCreate(code="G", value=SecretStr("plain")), creator_id=user.id
         )
         fetched = await service.get(secret.id)
         assert fetched.id == secret.id
@@ -113,7 +115,9 @@ class TestRead:
     ) -> None:
         user = await _seed_user(session)
         admin = SecretService(session, AllSearchFilter[Secret](), encryption_service=enc)
-        secret = await admin.create(SecretCreate(code="OOS", value=SecretStr("v")), user_id=user.id)
+        secret = await admin.create(
+            SecretCreate(code="OOS", value=SecretStr("v")), creator_id=user.id
+        )
         scoped = SecretService(session, NoneSearchFilter[Secret](), encryption_service=enc)
         with pytest.raises(SecretNotFoundError):
             await scoped.get(secret.id)
@@ -121,7 +125,7 @@ class TestRead:
     async def test_to_read_omits_value(self, service: SecretService, session: AsyncSession) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="R", value=SecretStr("reveal-me")), user_id=user.id
+            SecretCreate(code="R", value=SecretStr("reveal-me")), creator_id=user.id
         )
         read = service.to_read(secret)
         assert read.code == "R"
@@ -136,7 +140,7 @@ class TestUpdate:
     ) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="U", value=SecretStr("old")), user_id=user.id
+            SecretCreate(code="U", value=SecretStr("old")), creator_id=user.id
         )
         detail = await _static_detail(session, secret.id)
         assert detail is not None
@@ -151,9 +155,9 @@ class TestUpdate:
         self, service: SecretService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        await service.create(SecretCreate(code="KEEP", value=SecretStr("v")), user_id=user.id)
+        await service.create(SecretCreate(code="KEEP", value=SecretStr("v")), creator_id=user.id)
         other = await service.create(
-            SecretCreate(code="ORIG", value=SecretStr("v")), user_id=user.id
+            SecretCreate(code="ORIG", value=SecretStr("v")), creator_id=user.id
         )
         with pytest.raises(SecretCodeConflictError):
             await service.update(other.id, SecretUpdate(code="KEEP"))
@@ -176,7 +180,7 @@ class TestDelete:
     async def test_delete_removes(self, service: SecretService, session: AsyncSession) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="DEL", value=SecretStr("v")), user_id=user.id
+            SecretCreate(code="DEL", value=SecretStr("v")), creator_id=user.id
         )
         await service.delete(secret.id)
         with pytest.raises(SecretNotFoundError):
@@ -193,7 +197,7 @@ class TestBatch:
     ) -> None:
         user = await _seed_user(session)
         created = await service.create(
-            SecretCreate(code="B1", value=SecretStr("v")), user_id=user.id
+            SecretCreate(code="B1", value=SecretStr("v")), creator_id=user.id
         )
         ops = [
             SecretBatchCreate(data=SecretCreate(code="B2", value=SecretStr("v2"))),
@@ -203,7 +207,7 @@ class TestBatch:
         filters = {
             a: AllSearchFilter[Secret]() for a in (Action.CREATE, Action.UPDATE, Action.DELETE)
         }
-        results = await service.apply_batch(ops, filters, user_id=user.id)
+        results = await service.apply_batch(ops, filters, creator_id=user.id)
         assert results[0] is not None and results[0].code == "B2"
         assert results[1] is not None and results[1].description == "updated"
         assert results[2] is None
@@ -214,14 +218,16 @@ class TestBatch:
         user = await _seed_user(session)
         ops = [SecretBatchCreate(data=SecretCreate(code="BD", value=SecretStr("v")))]
         with pytest.raises(BatchPermissionDeniedError):
-            await service.apply_batch(ops, {Action.CREATE: None}, user_id=user.id)
+            await service.apply_batch(ops, {Action.CREATE: None}, creator_id=user.id)
 
 
 class TestCountAndSearch:
     async def test_count_and_search(self, service: SecretService, session: AsyncSession) -> None:
         user = await _seed_user(session)
         for i in range(3):
-            await service.create(SecretCreate(code=f"C{i}", value=SecretStr("v")), user_id=user.id)
+            await service.create(
+                SecretCreate(code=f"C{i}", value=SecretStr("v")), creator_id=user.id
+            )
         assert await service.count() == 3
         secrets, nxt = await service.search_secrets(limit=2)
         assert len(secrets) == 2
@@ -248,7 +254,7 @@ class TestSecretValueService:
     ) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="RV", value=SecretStr("reveal-me")), user_id=user.id
+            SecretCreate(code="RV", value=SecretStr("reveal-me")), creator_id=user.id
         )
         read = await value_service.get(secret.id)
         assert read.value == "reveal-me"
@@ -260,7 +266,7 @@ class TestSecretValueService:
     ) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="NO_READ", value=SecretStr("v")), user_id=user.id
+            SecretCreate(code="NO_READ", value=SecretStr("v")), creator_id=user.id
         )
         svc = SecretValueService(
             session,
@@ -276,7 +282,7 @@ class TestSecretValueService:
     ) -> None:
         user = await _seed_user(session)
         secret = await service.create(
-            SecretCreate(code="NO_VAL", value=SecretStr("v")), user_id=user.id
+            SecretCreate(code="NO_VAL", value=SecretStr("v")), creator_id=user.id
         )
         svc = SecretValueService(
             session,
@@ -322,8 +328,12 @@ class TestSecretValueService:
         self, value_service: SecretValueService, service: SecretService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        a = await service.create(SecretCreate(code="GM_A", value=SecretStr("a")), user_id=user.id)
-        b = await service.create(SecretCreate(code="GM_B", value=SecretStr("b")), user_id=user.id)
+        a = await service.create(
+            SecretCreate(code="GM_A", value=SecretStr("a")), creator_id=user.id
+        )
+        b = await service.create(
+            SecretCreate(code="GM_B", value=SecretStr("b")), creator_id=user.id
+        )
         results = await value_service.get_many([a.id, b.id, uuid.uuid4()])
         assert results[0] is not None and results[0].value == "a"
         assert results[1] is not None and results[1].value == "b"

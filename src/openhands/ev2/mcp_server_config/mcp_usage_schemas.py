@@ -23,7 +23,7 @@ class McpAggregatedUsageRead(BaseModel):
 
     id: uuid.UUID
     minute: datetime
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     invocations: int
     total_duration_ms: int
     created_at: datetime
@@ -33,7 +33,7 @@ class McpAggregatedUsageRead(BaseModel):
 class McpAggregatedUsageSearchFilter(BaseSearchFilter[McpAggregatedUsage]):
     """Optional filter clauses for `GET /mcp-server-configs/aggregated-usage`."""
 
-    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    creator_id__eq: uuid.UUID | None = Field(default=None, description="Exact creator id match.")
     minute__gte: datetime | None = Field(default=None)
     minute__lt: datetime | None = Field(default=None)
     minute__gt: datetime | None = Field(default=None)

@@ -22,30 +22,32 @@ class TestApiKeyAccessReduction:
         uid = uuid.uuid4()
         filt = ApiKeyAccess().to_search_filter(uid, Action.CREATE)
         assert isinstance(filt, ApiKeyAccessFilter)
-        assert filt.user_id == uid
+        assert filt.creator_id == uid
 
     def test_all_actions_use_same_self_scope(self) -> None:
         uid = uuid.uuid4()
         for action in (Action.READ, Action.SEARCH, Action.UPDATE, Action.DELETE, Action.CREATE):
             filt = ApiKeyAccess().to_search_filter(uid, action)
             assert isinstance(filt, ApiKeyAccessFilter)
-            assert filt.user_id == uid
+            assert filt.creator_id == uid
 
 
 class TestApiKeyAccessFilterMatches:
     def test_matches_own_key(self) -> None:
         uid = uuid.uuid4()
-        filt = ApiKeyAccessFilter[ApiKey](user_id=uid)
-        own = ApiKey(key_hash="x" * 64, prefix="oh_x", user_id=uid, enabled=True, expires_at=None)
+        filt = ApiKeyAccessFilter[ApiKey](creator_id=uid)
+        own = ApiKey(
+            key_hash="x" * 64, prefix="oh_x", creator_id=uid, enabled=True, expires_at=None
+        )
         assert filt.matches(own) is True
 
     def test_rejects_other_user_key(self) -> None:
         uid = uuid.uuid4()
-        filt = ApiKeyAccessFilter[ApiKey](user_id=uid)
+        filt = ApiKeyAccessFilter[ApiKey](creator_id=uid)
         other = ApiKey(
             key_hash="y" * 64,
             prefix="oh_y",
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             enabled=True,
             expires_at=None,
         )
@@ -68,15 +70,15 @@ class TestApiKeyAccessFilterSql:
                 {"id": u, "email": f"{u}@example.com", "username": str(u)},
             )
         own_key = ApiKey(
-            key_hash="a" * 64, prefix="oh_a", user_id=uid, enabled=True, expires_at=None
+            key_hash="a" * 64, prefix="oh_a", creator_id=uid, enabled=True, expires_at=None
         )
         other_key = ApiKey(
-            key_hash="b" * 64, prefix="oh_b", user_id=other, enabled=True, expires_at=None
+            key_hash="b" * 64, prefix="oh_b", creator_id=other, enabled=True, expires_at=None
         )
         session.add_all([own_key, other_key])
         await session.flush()
 
-        filt = ApiKeyAccessFilter[ApiKey](user_id=uid)
+        filt = ApiKeyAccessFilter[ApiKey](creator_id=uid)
         stmt = filt.filter_sql(select(ApiKey).order_by(ApiKey.prefix))
         result = (await session.execute(stmt)).scalars().all()
         ids = {k.id for k in result}

@@ -217,7 +217,7 @@ class TokenService:
         row = ApiKey(
             key_hash=_hash_api_key(raw_key),
             prefix=_api_key_display_prefix(raw_key),
-            user_id=user_id,
+            creator_id=user_id,
             name=name,
             enabled=enabled,
             expires_at=expires_at,
@@ -302,13 +302,13 @@ class TokenService:
         if exp <= now:
             raise InvalidTokenError("api key expired")
 
-        user = await self._load_user(row.user_id)
+        user = await self._load_user(row.creator_id)
         if user is None or not user.enabled:
             raise InvalidTokenError("user not found or disabled")
 
         return AuthToken(
             id=row.id,
-            user_id=row.user_id,
+            user_id=row.creator_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
             enabled=row.enabled and user.enabled,
@@ -447,7 +447,7 @@ class TokenService:
         result = await self._session.execute(
             select(IdpAccessToken)
             .join(IdpRefreshToken, IdpAccessToken.refresh_token_id == IdpRefreshToken.id)
-            .where(IdpRefreshToken.user_id == user_id)
+            .where(IdpRefreshToken.creator_id == user_id)
             .order_by(IdpAccessToken.created_at.desc())
             .limit(1)
         )
@@ -460,7 +460,7 @@ class TokenService:
         """Load the user's current IdP refresh-token row (most recent first)."""
         result = await self._session.execute(
             select(IdpRefreshToken)
-            .where(IdpRefreshToken.user_id == user_id)
+            .where(IdpRefreshToken.creator_id == user_id)
             .order_by(IdpRefreshToken.created_at.desc())
             .limit(1)
         )

@@ -373,7 +373,7 @@ class AuthService:
         access_id = _uuid(payload, _ACCESS_ID_CLAIM)
         scopes = _scopes_from_payload(payload)
         refresh_row, access_row = await self._load_token_rows(row_id, access_id)
-        if refresh_row is None or refresh_row.user_id != user_id:
+        if refresh_row is None or refresh_row.creator_id != user_id:
             raise InvalidGrantError("stale authorization code")
         if access_row is None or access_row.refresh_token_id != refresh_row.id:
             raise InvalidGrantError("stale authorization code")
@@ -415,7 +415,7 @@ class AuthService:
         user_id = _uuid(payload, _SUB_CLAIM)
         scopes = _scopes_from_payload(payload)
         refresh_row, access_row = await self._lock_token_rows(row_id)
-        if refresh_row is None or refresh_row.user_id != user_id:
+        if refresh_row is None or refresh_row.creator_id != user_id:
             raise InvalidGrantError("refresh token not recognized")
         if refresh_row.expires_at <= _now():
             raise InvalidGrantError("refresh token expired")
@@ -1093,7 +1093,7 @@ class AuthService:
             raise IdpError("IdP token response missing access_token")
         drift = self._idp.expire_drift_tolerance
         refresh_row = IdpRefreshToken(
-            user_id=user_id,
+            creator_id=user_id,
             refresh_token=self._enc.encrypt_value(refresh),
             expires_at=_idp_refresh_expiry(idp_tokens, drift, self._idp),
         )

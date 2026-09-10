@@ -23,7 +23,7 @@ class TestCreateApiKeyRoute:
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert body["user_id"] == str(_TEST_USER_ID)
+        assert body["creator_id"] == str(_TEST_USER_ID)
         assert body["name"] == "ci-key"
         assert body["enabled"] is True
         assert body["expires_at"] is None
@@ -62,19 +62,21 @@ class TestCreateApiKeyRoute:
         )
         assert resp.status_code == 422
 
-    async def test_create_api_key_derives_user_id_from_principal(self, client: AsyncClient) -> None:
-        # user_id is never accepted on the payload; it is derived from the
+    async def test_create_api_key_derives_creator_id_from_principal(
+        self, client: AsyncClient
+    ) -> None:
+        # creator_id is never accepted on the payload; it is derived from the
         # authenticated principal (the seeded test user).
         resp = await client.post("/api-keys", json={"name": "no-user"})
         assert resp.status_code == 201, resp.text
-        assert resp.json()["user_id"] == str(_TEST_USER_ID)
+        assert resp.json()["creator_id"] == str(_TEST_USER_ID)
 
-    async def test_create_api_key_ignores_payload_user_id(self, client: AsyncClient) -> None:
-        # A client-supplied user_id must be ignored in favor of the principal.
+    async def test_create_api_key_ignores_payload_creator_id(self, client: AsyncClient) -> None:
+        # A client-supplied creator_id must be ignored in favor of the principal.
         other = uuid.uuid4()
-        resp = await client.post("/api-keys", json={"user_id": str(other), "name": "ignored"})
+        resp = await client.post("/api-keys", json={"creator_id": str(other), "name": "ignored"})
         assert resp.status_code == 201, resp.text
-        assert resp.json()["user_id"] == str(_TEST_USER_ID)
+        assert resp.json()["creator_id"] == str(_TEST_USER_ID)
 
 
 class TestGetApiKeyRoute:
@@ -145,12 +147,12 @@ class TestSearchApiKeysRoute:
         assert "Admin" in names
         assert "viewer" not in names
 
-    async def test_search_user_id_eq_filter(self, client: AsyncClient) -> None:
+    async def test_search_creator_id_eq_filter(self, client: AsyncClient) -> None:
         await client.post("/api-keys", json={"name": "mine"})
-        resp = await client.get(f"/api-keys?user_id__eq={_TEST_USER_ID}")
+        resp = await client.get(f"/api-keys?creator_id__eq={_TEST_USER_ID}")
         assert resp.status_code == 200
         for k in resp.json()["items"]:
-            assert k["user_id"] == str(_TEST_USER_ID)
+            assert k["creator_id"] == str(_TEST_USER_ID)
 
     async def test_search_enabled_eq_filter(self, client: AsyncClient) -> None:
         await client.post(

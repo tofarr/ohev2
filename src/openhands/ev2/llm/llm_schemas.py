@@ -89,7 +89,7 @@ class ProviderConnectionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     display_name: str
     provider: str
     base_url: str | None
@@ -230,7 +230,7 @@ class LLMRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     provider_connection_id: uuid.UUID
     model: str
     display_name: str
@@ -367,7 +367,7 @@ class AggregatedUsageRead(BaseModel):
 
     id: uuid.UUID
     minute: datetime
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     invocations: int
     prompt_tokens: int
     completion_tokens: int
@@ -384,7 +384,7 @@ class AggregatedUsageRead(BaseModel):
 class AggregatedUsageSearchFilter(BaseSearchFilter[LlmAggregatedUsage]):
     """Optional filter clauses for `GET /llm/aggregated-usage`."""
 
-    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    creator_id__eq: uuid.UUID | None = Field(default=None, description="Exact creator id match.")
     minute__gte: datetime | None = Field(default=None)
     minute__lt: datetime | None = Field(default=None)
     minute__gt: datetime | None = Field(default=None)

@@ -116,7 +116,7 @@ class ProviderConnectionService:
         self._enc = encryption_service or get_encryption_service()
 
     async def create(
-        self, payload: ProviderConnectionCreate, *, user_id: uuid.UUID
+        self, payload: ProviderConnectionCreate, *, creator_id: uuid.UUID
     ) -> StoredProviderConnection:
         """Create a provider connection. The api_key is encrypted before persistence.
 
@@ -124,7 +124,7 @@ class ProviderConnectionService:
         not satisfy the principal's ``perm_filter``.
         """
         conn = StoredProviderConnection(
-            user_id=user_id,
+            creator_id=creator_id,
             display_name=payload.display_name,
             provider=payload.provider,
             api_key=self._enc.encrypt_value(payload.api_key) if payload.api_key else None,
@@ -228,7 +228,7 @@ class ProviderConnectionService:
         operations: list[ProviderConnectionBatchOp],
         perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> list[StoredProviderConnection | None]:
         """Apply a mix of create/update/delete operations in one transaction.
 
@@ -242,7 +242,7 @@ class ProviderConnectionService:
         results: list[StoredProviderConnection | None] = []
         for op in operations:
             if isinstance(op, ProviderConnectionBatchCreate):
-                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+                results.append(await self._batch_create(op, perm_filters, creator_id=creator_id))
             elif isinstance(op, ProviderConnectionBatchUpdate):
                 results.append(await self._batch_update(op, perm_filters))
             elif isinstance(op, ProviderConnectionBatchDelete):
@@ -255,14 +255,14 @@ class ProviderConnectionService:
         op: ProviderConnectionBatchCreate,
         perm_filters: dict[Action, SearchFilter[StoredProviderConnection] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> StoredProviderConnection:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
         return await ProviderConnectionService(
             self._session, filt, encryption_service=self._enc
-        ).create(op.data, user_id=user_id)
+        ).create(op.data, creator_id=creator_id)
 
     async def _batch_update(
         self,
@@ -310,7 +310,7 @@ class LLMService:
         self._enc = encryption_service or get_encryption_service()
         self._cfg = config or get_config()
 
-    async def create(self, payload: LLMCreate, *, user_id: uuid.UUID) -> StoredLLM:
+    async def create(self, payload: LLMCreate, *, creator_id: uuid.UUID) -> StoredLLM:
         """Create a stored LLM profile.
 
         Validates the provider connection exists and is in the principal's
@@ -321,14 +321,14 @@ class LLMService:
         # Ensure the referenced provider connection exists and is in scope.
         conn_stmt = select(StoredProviderConnection).where(
             StoredProviderConnection.id == payload.provider_connection_id,
-            StoredProviderConnection.user_id == user_id,
+            StoredProviderConnection.creator_id == creator_id,
         )
         conn = (await self._session.execute(conn_stmt)).scalar_one_or_none()
         if conn is None:
             raise LLMPermissionScopeError(str(payload.provider_connection_id))
 
         llm = StoredLLM(
-            user_id=user_id,
+            creator_id=creator_id,
             provider_connection_id=payload.provider_connection_id,
             model=payload.model,
             display_name=payload.display_name,
@@ -381,7 +381,7 @@ class LLMService:
             # The new connection must exist and belong to the same owner.
             conn_stmt = select(StoredProviderConnection).where(
                 StoredProviderConnection.id == payload.provider_connection_id,
-                StoredProviderConnection.user_id == llm.user_id,
+                StoredProviderConnection.creator_id == llm.creator_id,
             )
             conn = (await self._session.execute(conn_stmt)).scalar_one_or_none()
             if conn is None:
@@ -437,7 +437,7 @@ class LLMService:
         operations: list[LLMBatchOp],
         perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> list[StoredLLM | None]:
         """Apply a mix of create/update/delete operations in one transaction.
 
@@ -451,7 +451,7 @@ class LLMService:
         results: list[StoredLLM | None] = []
         for op in operations:
             if isinstance(op, LLMBatchCreate):
-                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+                results.append(await self._batch_create(op, perm_filters, creator_id=creator_id))
             elif isinstance(op, LLMBatchUpdate):
                 results.append(await self._batch_update(op, perm_filters))
             elif isinstance(op, LLMBatchDelete):
@@ -464,14 +464,14 @@ class LLMService:
         op: LLMBatchCreate,
         perm_filters: dict[Action, SearchFilter[StoredLLM] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> StoredLLM:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
         return await LLMService(
             self._session, filt, encryption_service=self._enc, config=self._cfg
-        ).create(op.data, user_id=user_id)
+        ).create(op.data, creator_id=creator_id)
 
     async def _batch_update(
         self,
@@ -504,7 +504,7 @@ class LLMService:
         is treated as not found (its credential bundle is unavailable).
         """
         conn = await self._session.get(StoredProviderConnection, llm.provider_connection_id)
-        if conn is None or conn.user_id != llm.user_id:
+        if conn is None or conn.creator_id != llm.creator_id:
             raise LLMNotFoundError(str(llm.id))
         return conn
 

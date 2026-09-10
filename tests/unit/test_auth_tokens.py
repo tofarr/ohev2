@@ -59,7 +59,7 @@ async def _seed_idp_rows(
     """Persist an IdP refresh + access row pair (the federated grant backing tokens)."""
     enc = get_encryption_service()
     refresh_row = IdpRefreshToken(
-        user_id=user_id,
+        creator_id=user_id,
         refresh_token=enc.encrypt_value("idp-refresh"),
         expires_at=refresh_expires_at,
     )

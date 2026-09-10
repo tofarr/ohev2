@@ -421,7 +421,7 @@ class TestCallback:
         # Encrypted refresh token persisted.
         row = (
             await service._session.execute(
-                select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+                select(IdpRefreshToken).where(IdpRefreshToken.creator_id == user.id)
             )
         ).scalar_one()
         enc = get_encryption_service()
@@ -578,7 +578,7 @@ class TestCallback:
         assert user.email == "cookie@example.com"
         row = (
             await service._session.execute(
-                select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+                select(IdpRefreshToken).where(IdpRefreshToken.creator_id == user.id)
             )
         ).scalar_one()
         assert get_encryption_service().decrypt_value(row.refresh_token) == "idp-refresh-1"
@@ -803,7 +803,7 @@ class TestTokenExchange:
 
         row = (
             await service._session.execute(
-                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+                select(IdpRefreshToken).where(IdpRefreshToken.creator_id == ctx.user_id)
             )
         ).scalar_one()
         enc = get_encryption_service()
@@ -853,7 +853,7 @@ class TestTokenExchange:
 
         row = (
             await service._session.execute(
-                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+                select(IdpRefreshToken).where(IdpRefreshToken.creator_id == ctx.user_id)
             )
         ).scalar_one()
         row.expires_at = datetime.now(UTC) - timedelta(hours=1)
@@ -1110,7 +1110,7 @@ class TestRevocationIdpForwarding:
         sent = parse_qs(revocation_mock.calls.last.request.content.decode())
         refresh_row = (
             await service._session.execute(
-                select(IdpRefreshToken).where(IdpRefreshToken.user_id == ctx.user_id)
+                select(IdpRefreshToken).where(IdpRefreshToken.creator_id == ctx.user_id)
             )
         ).scalar_one_or_none()
         # The row is now deleted, but the IdP received the original IdP refresh
@@ -1380,12 +1380,12 @@ class TestCleanup:
         service._session.add(user)
         await service._session.flush()
         old = IdpRefreshToken(
-            user_id=user.id,
+            creator_id=user.id,
             refresh_token=enc.encrypt_value("r1"),
             expires_at=datetime.now(UTC) - timedelta(days=2),
         )
         fresh = IdpRefreshToken(
-            user_id=user.id,
+            creator_id=user.id,
             refresh_token=enc.encrypt_value("r2"),
             expires_at=datetime.now(UTC) + timedelta(days=1),
         )
@@ -1399,7 +1399,7 @@ class TestCleanup:
         remaining = (
             (
                 await service._session.execute(
-                    select(IdpRefreshToken).where(IdpRefreshToken.user_id == user.id)
+                    select(IdpRefreshToken).where(IdpRefreshToken.creator_id == user.id)
                 )
             )
             .scalars()
@@ -1415,7 +1415,7 @@ class TestCleanup:
         await service._session.flush()
         # Expired 1 hour ago — within the default 86400s window, so kept.
         recent = IdpRefreshToken(
-            user_id=user.id,
+            creator_id=user.id,
             refresh_token=enc.encrypt_value("r"),
             expires_at=datetime.now(UTC) - timedelta(hours=1),
         )

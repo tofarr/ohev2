@@ -22,7 +22,7 @@ Tables:
 * ``allowed_origins``        — CORS allow-list.
 * ``roles``                  — named role bundling per-entity Permission policies.
 * ``user_roles``             — role-to-user assignments.
-* ``secrets``                — named secrets with encrypted values (optional ``user_id`` owner).
+* ``secrets``                — named secrets with encrypted values (optional ``creator_id`` owner).
 * ``mcp_server_configs``    — stored MCP server configurations.
 * ``mcp_usage``             — raw proxied MCP tool-invocation records (daily-partitioned).
 * ``mcp_aggregated_usage``  — per-minute, per-user rollup of mcp_usage.
@@ -94,7 +94,7 @@ def upgrade() -> None:
         ),
         sa.Column("key_hash", sa.String(length=64), nullable=False),
         sa.Column("prefix", sa.String(length=32), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -111,11 +111,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
         sa.UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
     )
     op.create_index("ix_api_keys_key_hash", "api_keys", ["key_hash"], unique=True)
-    op.create_index("ix_api_keys_user_id", "api_keys", ["user_id"])
+    op.create_index("ix_api_keys_creator_id", "api_keys", ["creator_id"])
 
     # ------------------------------------------------------------------ #
     # refresh_tokens
@@ -129,7 +129,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("jti", sa.Uuid(), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("replaced_by", sa.Uuid(), nullable=True),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
@@ -146,11 +146,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
         sa.UniqueConstraint("jti", name="uq_refresh_tokens_jti"),
     )
     op.create_index("ix_refresh_tokens_jti", "refresh_tokens", ["jti"], unique=True)
-    op.create_index("ix_refresh_tokens_user_id", "refresh_tokens", ["user_id"])
+    op.create_index("ix_refresh_tokens_creator_id", "refresh_tokens", ["creator_id"])
 
     # ------------------------------------------------------------------ #
     # idp_refresh_tokens
@@ -163,7 +163,7 @@ def upgrade() -> None:
             server_default=sa.text("gen_random_uuid()"),
             nullable=False,
         ),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("refresh_token", sa.String(length=8192), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
@@ -179,9 +179,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
     )
-    op.create_index("ix_idp_refresh_tokens_user_id", "idp_refresh_tokens", ["user_id"])
+    op.create_index("ix_idp_refresh_tokens_creator_id", "idp_refresh_tokens", ["creator_id"])
 
     # ------------------------------------------------------------------ #
     # idp_access_tokens
@@ -493,7 +493,7 @@ def upgrade() -> None:
             comment="Secret type discriminator (static | oauth).",
         ),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("user_id", sa.Uuid(), nullable=True),
+        sa.Column("creator_id", sa.Uuid(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -507,16 +507,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"],
+            ["creator_id"],
             ["users.id"],
             ondelete="SET NULL",
-            name="fk_secrets_user_id_users",
+            name="fk_secrets_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("code"),
     )
     op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
-    op.create_index("ix_secrets_user_id", "secrets", ["user_id"])
+    op.create_index("ix_secrets_creator_id", "secrets", ["creator_id"])
 
     # ------------------------------------------------------------------ #
     # static_secret_details
@@ -563,7 +563,7 @@ def upgrade() -> None:
     op.create_table(
         "mcp_server_configs",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=False),
         sa.Column("url", sa.String(length=2048), nullable=True),
         sa.Column("transport", sa.String(length=32), nullable=True),
@@ -607,11 +607,11 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         comment="Stored MCP server configurations",
     )
-    op.create_index("ix_mcp_server_configs_user_id", "mcp_server_configs", ["user_id"])
+    op.create_index("ix_mcp_server_configs_creator_id", "mcp_server_configs", ["creator_id"])
 
     # ------------------------------------------------------------------ #
     # provider_connections
@@ -619,7 +619,7 @@ def upgrade() -> None:
     op.create_table(
         "provider_connections",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=False),
         sa.Column("provider", sa.String(length=128), nullable=False),
         sa.Column(
@@ -643,16 +643,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"],
+            ["creator_id"],
             ["users.id"],
             ondelete="CASCADE",
-            name="fk_provider_connections_user_id_users",
+            name="fk_provider_connections_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
         comment="Shared LLM provider credential bundles (encrypted api_key)",
     )
     op.create_index(
-        "ix_provider_connections_user_id", "provider_connections", ["user_id"], unique=False
+        "ix_provider_connections_creator_id", "provider_connections", ["creator_id"], unique=False
     )
 
     # ------------------------------------------------------------------ #
@@ -661,7 +661,7 @@ def upgrade() -> None:
     op.create_table(
         "llms",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("provider_connection_id", sa.Uuid(), nullable=False),
         sa.Column("model", sa.String(length=255), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=False),
@@ -684,7 +684,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_llms_user_id_users"
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_llms_creator_id_users"
         ),
         sa.ForeignKeyConstraint(
             ["provider_connection_id"],
@@ -695,7 +695,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         comment="Stored LLM profiles referencing a provider connection",
     )
-    op.create_index("ix_llms_user_id", "llms", ["user_id"], unique=False)
+    op.create_index("ix_llms_creator_id", "llms", ["creator_id"], unique=False)
     op.create_index(
         "ix_llms_provider_connection_id", "llms", ["provider_connection_id"], unique=False
     )
@@ -835,7 +835,7 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("provider_connection_id", sa.Uuid(), nullable=False),
         sa.Column("llm_id", sa.Uuid(), nullable=True),
         sa.Column("response_id", sa.String(length=255), nullable=True),
@@ -876,7 +876,7 @@ def upgrade() -> None:
         sa.Column("metrics", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.PrimaryKeyConstraint("id", "created_at"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_llm_usage_user_id_users"
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_llm_usage_creator_id_users"
         ),
         sa.ForeignKeyConstraint(
             ["provider_connection_id"],
@@ -890,7 +890,7 @@ def upgrade() -> None:
         comment="Raw LLM invocation records, daily-partitioned by created_at",
         postgresql_partition_by="RANGE(created_at)",
     )
-    op.create_index("ix_llm_usage_user_id", "llm_usage", ["user_id"], unique=False)
+    op.create_index("ix_llm_usage_creator_id", "llm_usage", ["creator_id"], unique=False)
     op.create_index(
         "ix_llm_usage_provider_connection_id",
         "llm_usage",
@@ -911,7 +911,7 @@ def upgrade() -> None:
         "llm_aggregated_usage",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("minute", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("invocations", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
         sa.Column("prompt_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
         sa.Column(
@@ -959,20 +959,22 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"],
+            ["creator_id"],
             ["users.id"],
             ondelete="CASCADE",
-            name="fk_llm_aggregated_usage_user_id_users",
+            name="fk_llm_aggregated_usage_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("user_id", "minute", name="uq_llm_aggregated_usage_user_id_minute"),
+        sa.UniqueConstraint(
+            "creator_id", "minute", name="uq_llm_aggregated_usage_creator_id_minute"
+        ),
         comment="Per-minute, per-user rollup of llm_usage",
     )
     op.create_index(
         "ix_llm_aggregated_usage_minute", "llm_aggregated_usage", ["minute"], unique=False
     )
     op.create_index(
-        "ix_llm_aggregated_usage_user_id", "llm_aggregated_usage", ["user_id"], unique=False
+        "ix_llm_aggregated_usage_creator_id", "llm_aggregated_usage", ["creator_id"], unique=False
     )
 
     # ------------------------------------------------------------------ #
@@ -996,7 +998,7 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("mcp_server_config_id", sa.Uuid(), nullable=False),
         sa.Column("tool_name", sa.String(length=255), server_default="", nullable=False),
         sa.Column("duration_ms", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
@@ -1005,7 +1007,7 @@ def upgrade() -> None:
         sa.Column("details", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.PrimaryKeyConstraint("id", "created_at"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_mcp_usage_user_id_users"
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_mcp_usage_creator_id_users"
         ),
         sa.ForeignKeyConstraint(
             ["mcp_server_config_id"],
@@ -1016,7 +1018,7 @@ def upgrade() -> None:
         comment="Raw proxied MCP tool-invocation records, daily-partitioned by created_at",
         postgresql_partition_by="RANGE(created_at)",
     )
-    op.create_index("ix_mcp_usage_user_id", "mcp_usage", ["user_id"], unique=False)
+    op.create_index("ix_mcp_usage_creator_id", "mcp_usage", ["creator_id"], unique=False)
     op.create_index(
         "ix_mcp_usage_mcp_server_config_id",
         "mcp_usage",
@@ -1036,7 +1038,7 @@ def upgrade() -> None:
         "mcp_aggregated_usage",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("minute", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("invocations", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
         sa.Column(
             "total_duration_ms",
@@ -1057,38 +1059,40 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"],
+            ["creator_id"],
             ["users.id"],
             ondelete="CASCADE",
-            name="fk_mcp_aggregated_usage_user_id_users",
+            name="fk_mcp_aggregated_usage_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("user_id", "minute", name="uq_mcp_aggregated_usage_user_id_minute"),
+        sa.UniqueConstraint(
+            "creator_id", "minute", name="uq_mcp_aggregated_usage_creator_id_minute"
+        ),
         comment="Per-minute, per-user rollup of mcp_usage",
     )
     op.create_index(
         "ix_mcp_aggregated_usage_minute", "mcp_aggregated_usage", ["minute"], unique=False
     )
     op.create_index(
-        "ix_mcp_aggregated_usage_user_id", "mcp_aggregated_usage", ["user_id"], unique=False
+        "ix_mcp_aggregated_usage_creator_id", "mcp_aggregated_usage", ["creator_id"], unique=False
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_mcp_aggregated_usage_user_id", table_name="mcp_aggregated_usage")
+    op.drop_index("ix_mcp_aggregated_usage_creator_id", table_name="mcp_aggregated_usage")
     op.drop_index("ix_mcp_aggregated_usage_minute", table_name="mcp_aggregated_usage")
     op.drop_table("mcp_aggregated_usage")
     op.drop_index("ix_mcp_usage_created_at", table_name="mcp_usage")
     op.drop_index("ix_mcp_usage_mcp_server_config_id", table_name="mcp_usage")
-    op.drop_index("ix_mcp_usage_user_id", table_name="mcp_usage")
+    op.drop_index("ix_mcp_usage_creator_id", table_name="mcp_usage")
     op.drop_table("mcp_usage")
-    op.drop_index("ix_llm_aggregated_usage_user_id", table_name="llm_aggregated_usage")
+    op.drop_index("ix_llm_aggregated_usage_creator_id", table_name="llm_aggregated_usage")
     op.drop_index("ix_llm_aggregated_usage_minute", table_name="llm_aggregated_usage")
     op.drop_table("llm_aggregated_usage")
     op.drop_index("ix_llm_usage_created_at", table_name="llm_usage")
     op.drop_index("ix_llm_usage_llm_id", table_name="llm_usage")
     op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
-    op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
+    op.drop_index("ix_llm_usage_creator_id", table_name="llm_usage")
     op.drop_table("llm_usage")
 
     op.drop_index(
@@ -1109,16 +1113,16 @@ def downgrade() -> None:
     op.drop_table("feature_flag_role_assignments")
     op.drop_table("feature_flags")
     op.drop_index("ix_llms_provider_connection_id", table_name="llms")
-    op.drop_index("ix_llms_user_id", table_name="llms")
+    op.drop_index("ix_llms_creator_id", table_name="llms")
     op.drop_table("llms")
-    op.drop_index("ix_provider_connections_user_id", table_name="provider_connections")
+    op.drop_index("ix_provider_connections_creator_id", table_name="provider_connections")
     op.drop_table("provider_connections")
-    op.drop_index("ix_mcp_server_configs_user_id", table_name="mcp_server_configs")
+    op.drop_index("ix_mcp_server_configs_creator_id", table_name="mcp_server_configs")
     op.drop_table("mcp_server_configs")
     op.drop_index("ix_static_secret_details_secret_id", table_name="static_secret_details")
     op.drop_table("static_secret_details")
     op.drop_index("ix_secrets_code", table_name="secrets")
-    op.drop_index("ix_secrets_user_id", table_name="secrets")
+    op.drop_index("ix_secrets_creator_id", table_name="secrets")
     op.drop_table("secrets")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")
     op.drop_index("ix_user_roles_role_id", table_name="user_roles")
@@ -1139,12 +1143,12 @@ def downgrade() -> None:
         table_name="idp_access_tokens",
     )
     op.drop_table("idp_access_tokens")
-    op.drop_index("ix_idp_refresh_tokens_user_id", table_name="idp_refresh_tokens")
+    op.drop_index("ix_idp_refresh_tokens_creator_id", table_name="idp_refresh_tokens")
     op.drop_table("idp_refresh_tokens")
-    op.drop_index("ix_refresh_tokens_user_id", table_name="refresh_tokens")
+    op.drop_index("ix_refresh_tokens_creator_id", table_name="refresh_tokens")
     op.drop_index("ix_refresh_tokens_jti", table_name="refresh_tokens")
     op.drop_table("refresh_tokens")
-    op.drop_index("ix_api_keys_user_id", table_name="api_keys")
+    op.drop_index("ix_api_keys_creator_id", table_name="api_keys")
     op.drop_index("ix_api_keys_key_hash", table_name="api_keys")
     op.drop_table("api_keys")
     op.drop_index("ix_users_idp_user_id", table_name="users")

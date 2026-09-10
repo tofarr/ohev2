@@ -36,7 +36,7 @@ class TestSecretModel:
         assert secret.code == "API_KEY"
         assert secret.type == SecretType.STATIC
         assert secret.description is None
-        assert secret.user_id is None
+        assert secret.creator_id is None
         assert secret.created_at is not None
         assert secret.updated_at is not None
 
@@ -55,17 +55,17 @@ class TestSecretModel:
         await session.refresh(secret)
         assert secret.description == "db password"
 
-    async def test_user_id_round_trips(self, session: AsyncSession) -> None:
+    async def test_creator_id_round_trips(self, session: AsyncSession) -> None:
         user = await _seed_user(session)
-        secret = Secret(code="WITH_USER", user_id=user.id)
+        secret = Secret(code="WITH_USER", creator_id=user.id)
         session.add(secret)
         await session.flush()
         await session.refresh(secret)
-        assert secret.user_id == user.id
+        assert secret.creator_id == user.id
 
-    async def test_user_delete_sets_user_id_null(self, session: AsyncSession) -> None:
+    async def test_user_delete_sets_creator_id_null(self, session: AsyncSession) -> None:
         user = await _seed_user(session)
-        secret = Secret(code="CASC_USER", user_id=user.id)
+        secret = Secret(code="CASC_USER", creator_id=user.id)
         session.add(secret)
         await session.flush()
         secret_id = secret.id
@@ -74,7 +74,7 @@ class TestSecretModel:
         # Expunge stale cached objects so the next select hits the DB.
         session.expunge_all()
         found = (await session.execute(select(Secret).where(Secret.id == secret_id))).scalar_one()
-        assert found.user_id is None
+        assert found.creator_id is None
 
 
 class TestStaticSecretDetailModel:

@@ -46,7 +46,7 @@ def test_json_blob_helpers_round_trip(enc: EncryptionService) -> None:
 
 def test_to_mcp_server_decrypts_secret_fields(enc: EncryptionService) -> None:
     config = MCPServerConfig(
-        user_id=uuid.uuid4(),
+        creator_id=uuid.uuid4(),
         display_name="filesystem",
         transport="stdio",
         command="npx",
@@ -79,7 +79,7 @@ def test_mcp_proxy_url_for(app_config: AppConfig) -> None:
 def test_to_mcp_server_uses_proxy_url_when_enabled(enc: EncryptionService) -> None:
     config_id = uuid.uuid4()
     config = MCPServerConfig(
-        user_id=uuid.uuid4(),
+        creator_id=uuid.uuid4(),
         display_name="proxied-server",
         url="https://original.example.com/mcp",
         transport="sse",
@@ -100,7 +100,7 @@ def test_to_mcp_server_uses_proxy_url_when_enabled(enc: EncryptionService) -> No
 
 def test_to_mcp_server_ignores_proxy_when_disabled(enc: EncryptionService) -> None:
     config = MCPServerConfig(
-        user_id=uuid.uuid4(),
+        creator_id=uuid.uuid4(),
         display_name="direct-server",
         url="https://direct.example.com/mcp",
         transport="sse",

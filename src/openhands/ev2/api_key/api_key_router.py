@@ -121,7 +121,7 @@ async def create_api_key(
         )
     service = ApiKeyService(session, perm_filter)
     try:
-        key, api_key = await service.create(payload, user_id=user_id)
+        key, api_key = await service.create(payload, creator_id=user_id)
     except ApiKeyPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -190,7 +190,7 @@ async def write_api_keys_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+        results = await service.apply_batch(payload.operations, perm_filters, creator_id=user_id)
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

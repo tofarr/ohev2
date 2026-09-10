@@ -72,7 +72,7 @@ class StoredProviderConnection(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -177,7 +177,7 @@ class StoredLLM(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -270,7 +270,7 @@ class LlmUsage(Base):
         init=False,
         server_default=func.clock_timestamp(),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -314,7 +314,7 @@ class LlmUsage(Base):
 class LlmAggregatedUsage(Base):
     """Per-minute, per-user rollup of :class:`LlmUsage` for usage queries.
 
-    One row per ``(user_id, minute)`` that had at least one invocation. Sums the
+    One row per ``(creator_id, minute)`` that had at least one invocation. Sums the
     token/metric columns and counts invocations; the background aggregator
     populates it one minute at a time, always at least one minute behind real
     time so a finished minute is never partially aggregated. Minutes without
@@ -325,7 +325,7 @@ class LlmAggregatedUsage(Base):
 
     __tablename__ = "llm_aggregated_usage"
     __table_args__ = (
-        UniqueConstraint("user_id", "minute", name="uq_llm_aggregated_usage_user_id_minute"),
+        UniqueConstraint("creator_id", "minute", name="uq_llm_aggregated_usage_creator_id_minute"),
         {"comment": "Per-minute, per-user rollup of llm_usage"},
     )
 
@@ -339,7 +339,7 @@ class LlmAggregatedUsage(Base):
         DateTime(timezone=True),
         index=True,
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )

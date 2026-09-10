@@ -37,7 +37,7 @@ async def _seed_mcp_config(
     await session.execute(
         text(
             "INSERT INTO mcp_server_configs "
-            "(id, user_id, display_name, url, transport, enabled, enable_proxy) "
+            "(id, creator_id, display_name, url, transport, enabled, enable_proxy) "
             "VALUES (:id, :uid, :name, 'http://up.example/mcp', 'http', true, false)"
         ),
         {"id": config_id, "uid": user_id, "name": name},
@@ -57,7 +57,7 @@ class TestRecordUsage:
         config_id = await _seed_mcp_config(session, user_id=_USER_ID)
         service = McpUsageService(session)
         row = await service.record_usage(
-            user_id=_USER_ID,
+            creator_id=_USER_ID,
             mcp_server_config_id=config_id,
             tool_name="search",
             duration_ms=123,
@@ -66,7 +66,7 @@ class TestRecordUsage:
         )
         await session.commit()
         assert row is not None
-        assert row.user_id == _USER_ID
+        assert row.creator_id == _USER_ID
         assert row.mcp_server_config_id == config_id
         assert row.tool_name == "search"
         assert row.duration_ms == 123
@@ -80,7 +80,7 @@ class TestRecordUsage:
         config_id = await _seed_mcp_config(session, user_id=_USER_ID)
         service = McpUsageService(session)
         row = await service.record_usage(
-            user_id=_USER_ID,
+            creator_id=_USER_ID,
             mcp_server_config_id=config_id,
             tool_name="",
             duration_ms=0,
@@ -97,7 +97,7 @@ class TestRecordUsage:
         config_id = await _seed_mcp_config(session, user_id=_USER_ID)
         service = McpUsageService(session)
         row = await service.record_usage(
-            user_id=_USER_ID,
+            creator_id=_USER_ID,
             mcp_server_config_id=config_id,
             tool_name="bad",
             duration_ms=5,
@@ -115,7 +115,7 @@ class TestRecordUsage:
         # A non-existent user_id trips the FK; record_usage swallows and returns None.
         service = McpUsageService(session)
         row = await service.record_usage(
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             mcp_server_config_id=uuid.uuid4(),
             tool_name="x",
             duration_ms=1,
@@ -183,7 +183,7 @@ class TestEnsurePartitions:
         await session.execute(
             text(
                 "INSERT INTO mcp_usage "
-                "(user_id, mcp_server_config_id, created_at, tool_name, duration_ms, details) "
+                "(creator_id, mcp_server_config_id, created_at, tool_name, duration_ms, details) "
                 "VALUES (:uid, :cid, '1999-01-01', '', 0, '{}'::jsonb)"
             ),
             {"uid": _USER_ID, "cid": config_id},
@@ -211,7 +211,7 @@ class TestAggregateMinute:
             await session.execute(
                 text(
                     "INSERT INTO mcp_usage "
-                    "(user_id, mcp_server_config_id, created_at, tool_name, duration_ms, details) "
+                    "(creator_id, mcp_server_config_id, created_at, tool_name, duration_ms, details) "
                     "VALUES (:uid, :cid, :ts, 't', :dur, '{}'::jsonb)"
                 ),
                 {
@@ -237,7 +237,7 @@ class TestAggregateMinute:
         rows = (
             await session.execute(
                 text(
-                    "SELECT user_id, invocations, total_duration_ms "
+                    "SELECT creator_id, invocations, total_duration_ms "
                     "FROM mcp_aggregated_usage WHERE minute = :m"
                 ),
                 {"m": minute},
@@ -245,7 +245,7 @@ class TestAggregateMinute:
         ).all()
         assert len(rows) == 1
         row = rows[0]
-        assert row.user_id == _USER_ID
+        assert row.creator_id == _USER_ID
         assert row.invocations == 3
         # 10 + 11 + 12 = 33
         assert row.total_duration_ms == 33
@@ -352,7 +352,7 @@ async def _seed_aggregated_row(
         await s.execute(
             _text(
                 "INSERT INTO mcp_aggregated_usage "
-                "(id, minute, user_id, invocations, total_duration_ms) "
+                "(id, minute, creator_id, invocations, total_duration_ms) "
                 "VALUES (:id, :m, :uid, :inv, :dur)"
             ),
             {
@@ -375,7 +375,7 @@ class TestAggregatedUsageRoutes:
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         assert len(items) == 1
-        assert items[0]["user_id"] == str(user_id)
+        assert items[0]["creator_id"] == str(user_id)
         assert items[0]["invocations"] == 1
         assert items[0]["total_duration_ms"] == 100
 
@@ -415,13 +415,13 @@ class TestAggregatedUsageRoutes:
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
-    async def test_filter_by_user_id(self, client: AsyncClient, user_id: uuid.UUID) -> None:
+    async def test_filter_by_creator_id(self, client: AsyncClient, user_id: uuid.UUID) -> None:
         minute = datetime(2026, 6, 5, 9, 4, 0, tzinfo=UTC)
         await _seed_aggregated_row(client, user_id=user_id, minute=minute, total_duration_ms=42)
-        resp = await client.get(f"/mcp-server-configs/aggregated-usage?user_id__eq={user_id}")
+        resp = await client.get(f"/mcp-server-configs/aggregated-usage?creator_id__eq={user_id}")
         assert resp.status_code == 200
         items = resp.json()["items"]
-        assert all(i["user_id"] == str(user_id) for i in items)
+        assert all(i["creator_id"] == str(user_id) for i in items)
         assert any(i["total_duration_ms"] == 42 for i in items)
 
     async def test_filter_by_minute_range(self, client: AsyncClient, user_id: uuid.UUID) -> None:

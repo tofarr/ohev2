@@ -68,7 +68,7 @@ async def _make_conn(
             base_url=base_url,
             enable_proxy=enable_proxy,
         ),
-        user_id=user_id,
+        creator_id=user_id,
     )
 
 
@@ -134,7 +134,7 @@ class TestLLMService:
                 display_name="m",
                 config={"num_retries": 2},
             ),
-            user_id=uid,
+            creator_id=uid,
         )
         assert llm.model == "gpt-4o"
         fetched = await llm_service.get(llm.id)
@@ -152,7 +152,7 @@ class TestLLMService:
                     model="gpt-4o",
                     display_name="m",
                 ),
-                user_id=uid,
+                creator_id=uid,
             )
 
     async def test_create_invalid_config(
@@ -171,7 +171,7 @@ class TestLLMService:
                     # num_retries is `ge=0` -> -1 is invalid for the SDK LLM.
                     config={"num_retries": -1},
                 ),
-                user_id=uid,
+                creator_id=uid,
             )
 
     async def test_update(self, conn_service, llm_service) -> None:
@@ -179,7 +179,7 @@ class TestLLMService:
         conn = await _make_conn(conn_service, uid)
         llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
-            user_id=uid,
+            creator_id=uid,
         )
         updated = await llm_service.update(
             llm.id, LLMUpdate(display_name="renamed", config={"temperature": 0.1})
@@ -192,7 +192,7 @@ class TestLLMService:
         conn = await _make_conn(conn_service, uid)
         llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
-            user_id=uid,
+            creator_id=uid,
         )
         await llm_service.delete(llm.id)
         with pytest.raises(LLMNotFoundError):
@@ -207,7 +207,7 @@ class TestLLMService:
         conn = await _make_conn(conn_service, uid, enable_proxy=True)
         llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
-            user_id=uid,
+            creator_id=uid,
         )
         sdk_llm = await llm_service.materialize_llm(llm)
         assert sdk_llm.model == "gpt-4o"
@@ -226,7 +226,7 @@ class TestLLMService:
         conn = await _make_conn(conn_service, uid)
         llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
-            user_id=uid,
+            creator_id=uid,
         )
         resolved = await llm_service.connection_for_llm(llm)
         assert resolved.id == conn.id
@@ -240,7 +240,7 @@ class TestLLMService:
         conn = await _make_conn(conn_service, uid)
         llm = await llm_service.create(
             LLMCreate(provider_connection_id=conn.id, model="gpt-4o", display_name="m"),
-            user_id=uid,
+            creator_id=uid,
         )
         # Re-point the LLM at a connection owned by a different user: the
         # connection exists but its owner no longer matches the LLM's owner.
