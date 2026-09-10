@@ -89,8 +89,8 @@ class SandboxTemplate(DiscriminatedUnionMixin, ABC):
 
     ``snapshot_mode`` declares the snapshot strategy a sandbox built from this
     template supports; when a provider supports multiple modes the one in use
-    is recorded on the template (the sandbox spec) so callers can discover it
-    without a separate probe.
+    is recorded on the template so callers can discover it without a separate
+    probe.
     """
 
     id: str
@@ -132,8 +132,11 @@ class DockerSandboxTemplate(SandboxTemplate):
 class Sandbox(DiscriminatedUnionMixin, ABC):
     """Information about a sandbox."""
 
-    id: str
-    sandbox_spec_id: str
+    # ``id`` defaults to the empty string for the pre-persistence model built
+    # by ``_sandbox_from_create``; the provider assigns the real id during
+    # ``_create_sandbox`` (e.g. Docker mints a container name).
+    id: str = ""
+    sandbox_template_id: str
     status: SandboxStatus
     desired_status: SandboxStatus
     snapshot_mode: SnapshotMode = Field(

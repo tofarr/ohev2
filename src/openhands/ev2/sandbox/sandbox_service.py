@@ -281,10 +281,16 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         *,
         perm_filter: SearchFilter[Sandbox] = ALL,
     ) -> Sandbox:
-        """Create a sandbox. Raises on out-of-scope payload or duplicate id."""
+        """Create a sandbox. Raises on out-of-scope payload or provider conflict.
+
+        The sandbox ``id`` is assigned by the provider during creation; the
+        pre-persistence model built by ``_sandbox_from_create`` is checked
+        against ``perm_filter`` (the principal's create scope) before the
+        backing compute is started.
+        """
         sandbox = self._sandbox_from_create(payload)
         if not perm_filter.matches(sandbox):
-            raise SandboxPermissionScopeError(payload.id)
+            raise SandboxPermissionScopeError(payload.sandbox_template_id)
         return await self._create_sandbox(sandbox)
 
     async def update_sandbox(
@@ -525,11 +531,15 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
 
     @abstractmethod
     def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
-        """Build a provider sandbox model from a create payload (no persistence)."""
+        """Build a provider sandbox model from a create payload (no persistence).
+
+        The returned sandbox has no ``id`` yet (it defaults to ``""``); the
+        provider assigns the id during ``_create_sandbox``.
+        """
 
     @abstractmethod
     async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
-        """Persist a freshly-built sandbox and start its backing compute."""
+        """Persist a freshly-built sandbox, assign its id, and start backing compute."""
 
     @abstractmethod
     async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
