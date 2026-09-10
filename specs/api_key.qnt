@@ -4,7 +4,7 @@
 // REST collection must uphold:
 //
 //   - api key ids are unique
-//   - every api key has an owner (user_id)
+//   - every api key has an owner (creator_id)
 //   - the prefix (first 8 chars of the key) is stored for identification
 //   - the key hash is stored, never the raw key
 //   - api keys can be enabled/disabled (revocation)
@@ -20,7 +20,7 @@
 module api_key {
   type ApiKey = {
     id: str,
-    userId: str,  // owner
+    creatorId: str,  // owner
     name: str,
     prefix: str,  // first 8 chars of the raw key, for identification
     keyHash: str, // bcrypt hash of the raw key
@@ -41,7 +41,7 @@ module api_key {
 
   // Every api key has a non-empty owner.
   def hasOwner(k: ApiKey): bool =
-    k.userId != ""
+    k.creatorId != ""
 
   // Every api key has a non-empty name.
   def hasName(k: ApiKey): bool =
@@ -93,8 +93,8 @@ module api_key {
   }
 
   // Delete all api keys owned by a user (cascade delete).
-  action removeByUser(userId: str): bool = all {
-    apiKeys' = apiKeys.filter(k => k.userId != userId),
+  action removeByUser(creatorId: str): bool = all {
+    apiKeys' = apiKeys.filter(k => k.creatorId != creatorId),
     true
   }
 
@@ -139,36 +139,36 @@ module api_key {
   // ------------------------------------------------------------------ #
 
   run createApiKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(all {
-        assert(apiKeys.exists(k => k.id == "k1" and k.userId == "u1")),
+        assert(apiKeys.exists(k => k.id == "k1" and k.creatorId == "u1")),
         apiKeys' = apiKeys,
       })
   }
 
   run cannotReuseId = {
-    init.then(create({ id: "k1", userId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k1", userId: "u2", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k1", creatorId: "u2", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithoutOwner = {
-    init.then(create({ id: "k1", userId: "", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithoutName = {
-    init.then(create({ id: "k1", userId: "u1", name: "", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithPlaintextKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "oh_abc123456789", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "oh_abc123456789", enabled: true, createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run canDisableApiKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(all {
         assert(apiKeys.exists(k => k.id == "k1" and not(k.enabled))),
@@ -177,7 +177,7 @@ module api_key {
   }
 
   run canReenableApiKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(setEnabled("k1", true, 2))
       .then(all {
@@ -187,7 +187,7 @@ module api_key {
   }
 
   run authenticateSucceeds = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k1", "oh_abc123456789"))
       .then(all {
         apiKeys' = apiKeys,
@@ -195,26 +195,26 @@ module api_key {
   }
 
   run authenticateFailsForDisabledKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(authenticate("k1", "oh_abc123456789"))
       .fail()
   }
 
   run authenticateFailsForEmptyKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k1", ""))
       .fail()
   }
 
   run authenticateFailsForNonexistentKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k2", "oh_abc123456789"))
       .fail()
   }
 
   run canDeleteApiKey = {
-    init.then(create({ id: "k1", userId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(remove("k1"))
       .then(all {
         assert(not(apiKeys.exists(k => k.id == "k1"))),
@@ -224,20 +224,20 @@ module api_key {
   }
 
   run cascadeDeleteByUser = {
-    init.then(create({ id: "k1", userId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k2", userId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k3", userId: "u2", name: "key3", prefix: "oh_ghi56", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k3", creatorId: "u2", name: "key3", prefix: "oh_ghi56", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(removeByUser("u1"))
       .then(all {
-        assert(not(apiKeys.exists(k => k.userId == "u1"))),
-        assert(apiKeys.exists(k => k.userId == "u2")),
+        assert(not(apiKeys.exists(k => k.creatorId == "u1"))),
+        assert(apiKeys.exists(k => k.creatorId == "u2")),
         assert(apiKeys.size() == 1),
         apiKeys' = apiKeys,
       })
   }
 
   run canUpdateName = {
-    init.then(create({ id: "k1", userId: "u1", name: "old-name", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "old-name", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(updateName("k1", "new-name", 1))
       .then(all {
         assert(apiKeys.exists(k => k.id == "k1" and k.name == "new-name")),
@@ -246,10 +246,10 @@ module api_key {
   }
 
   run sameUserMultipleKeys = {
-    init.then(create({ id: "k1", userId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k2", userId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
       .then(all {
-        assert(apiKeys.filter(k => k.userId == "u1").size() == 2),
+        assert(apiKeys.filter(k => k.creatorId == "u1").size() == 2),
         apiKeys' = apiKeys,
       })
   }

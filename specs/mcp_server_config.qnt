@@ -11,7 +11,7 @@
 module mcp_server_config {
   type MCPServerConfig = {
     id: str,
-    userId: str,
+    creatorId: str,
     displayName: str,
     transport: str,
     url: str,
@@ -122,7 +122,7 @@ module mcp_server_config {
     grants.forall(g => configs.exists(c => c.id == g.mcpServerConfigId))
 
   pure def sampleConfig(id: str): MCPServerConfig =
-    { id: id, userId: "u1", displayName: "filesystem", transport: "stdio",
+    { id: id, creatorId: "u1", displayName: "filesystem", transport: "stdio",
       url: "", command: "npx", hasEnv: true, envEncrypted: true,
       hasHeaders: true, headersEncrypted: true, hasAuth: true,
       authEncrypted: true, enabled: true, enableProxy: false,
@@ -138,7 +138,7 @@ module mcp_server_config {
   }
 
   run cannotCreatePlaintextSecretConfig = {
-    init.then(createConfig({ id: "m1", userId: "u1", displayName: "bad",
+    init.then(createConfig({ id: "m1", creatorId: "u1", displayName: "bad",
       transport: "stdio", url: "", command: "npx", hasEnv: true,
       envEncrypted: false, hasHeaders: false, headersEncrypted: false,
       hasAuth: false, authEncrypted: false, enabled: true, enableProxy: false,

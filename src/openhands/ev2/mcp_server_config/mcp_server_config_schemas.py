@@ -141,7 +141,7 @@ class MCPServerConfigRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     display_name: str
     url: str | None = None
     transport: MCPTransport | None = None
@@ -167,7 +167,7 @@ class MCPServerConfigSearchFilter(BaseSearchFilter[MCPServerConfig]):
 
     display_name__contains: str | None = Field(default=None)
     transport__eq: MCPTransport | None = Field(default=None)
-    user_id__eq: uuid.UUID | None = Field(default=None)
+    creator_id__eq: uuid.UUID | None = Field(default=None)
     enabled__eq: bool | None = Field(default=None)
     enable_proxy__eq: bool | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)

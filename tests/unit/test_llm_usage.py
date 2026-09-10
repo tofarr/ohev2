@@ -78,14 +78,14 @@ class TestRecordUsage:
         # provider_connections/llms FKs need real rows; insert minimal stubs.
         await session.execute(
             text(
-                "INSERT INTO provider_connections (id, user_id, display_name, provider) "
+                "INSERT INTO provider_connections (id, creator_id, display_name, provider) "
                 "VALUES (:id, :uid, 'c', 'custom')"
             ),
             {"id": conn_id, "uid": _USER_ID},
         )
         await session.execute(
             text(
-                "INSERT INTO llms (id, user_id, provider_connection_id, model, display_name, config) "
+                "INSERT INTO llms (id, creator_id, provider_connection_id, model, display_name, config) "
                 "VALUES (:id, :uid, :cid, 'm', 'l', '{}'::jsonb)"
             ),
             {"id": llm_id, "uid": _USER_ID, "cid": conn_id},
@@ -94,7 +94,7 @@ class TestRecordUsage:
 
         service = LlmUsageService(session)
         row = await service.record_usage(
-            user_id=_USER_ID,
+            creator_id=_USER_ID,
             provider_connection_id=conn_id,
             llm_id=llm_id,
             response_id="resp-9",
@@ -103,7 +103,7 @@ class TestRecordUsage:
         )
         await session.commit()
         assert row is not None
-        assert row.user_id == _USER_ID
+        assert row.creator_id == _USER_ID
         assert row.prompt_tokens == 10
         assert row.completion_tokens == 20
         assert row.cache_read_tokens == 1
@@ -122,7 +122,7 @@ class TestRecordUsage:
         conn_id = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO provider_connections (id, user_id, display_name, provider) "
+                "INSERT INTO provider_connections (id, creator_id, display_name, provider) "
                 "VALUES (:id, :uid, 'c', 'custom')"
             ),
             {"id": conn_id, "uid": _USER_ID},
@@ -130,7 +130,7 @@ class TestRecordUsage:
         await session.flush()
         service = LlmUsageService(session)
         row = await service.record_usage(
-            user_id=_USER_ID,
+            creator_id=_USER_ID,
             provider_connection_id=conn_id,
             llm_id=None,
             response_id=None,
@@ -148,7 +148,7 @@ class TestRecordUsage:
         # A non-existent user_id trips the FK; record_usage swallows and returns None.
         service = LlmUsageService(session)
         row = await service.record_usage(
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             provider_connection_id=uuid.uuid4(),
             llm_id=None,
             response_id=None,
@@ -218,7 +218,7 @@ class TestEnsurePartitions:
         conn_id = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO provider_connections (id, user_id, display_name, provider) "
+                "INSERT INTO provider_connections (id, creator_id, display_name, provider) "
                 "VALUES (:id, :uid, 'c', 'custom')"
             ),
             {"id": conn_id, "uid": _USER_ID},
@@ -227,7 +227,7 @@ class TestEnsurePartitions:
         await session.execute(
             text(
                 "INSERT INTO llm_usage "
-                "(user_id, provider_connection_id, created_at, model, metrics) "
+                "(creator_id, provider_connection_id, created_at, model, metrics) "
                 "VALUES (:uid, :cid, '1999-01-01', '', '{}'::jsonb)"
             ),
             {"uid": _USER_ID, "cid": conn_id},
@@ -245,7 +245,7 @@ class TestAggregateMinute:
         conn_id = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO provider_connections (id, user_id, display_name, provider) "
+                "INSERT INTO provider_connections (id, creator_id, display_name, provider) "
                 "VALUES (:id, :uid, 'c', 'custom')"
             ),
             {"id": conn_id, "uid": user_id},
@@ -267,7 +267,7 @@ class TestAggregateMinute:
             await session.execute(
                 text(
                     "INSERT INTO llm_usage "
-                    "(user_id, provider_connection_id, created_at, model, metrics, "
+                    "(creator_id, provider_connection_id, created_at, model, metrics, "
                     "prompt_tokens, completion_tokens, accumulated_cost) "
                     "VALUES (:uid, :cid, :ts, '', '{}'::jsonb, :pt, :ct, :cost)"
                 ),
@@ -297,7 +297,7 @@ class TestAggregateMinute:
         rows = (
             await session.execute(
                 text(
-                    "SELECT user_id, invocations, prompt_tokens, completion_tokens, accumulated_cost "
+                    "SELECT creator_id, invocations, prompt_tokens, completion_tokens, accumulated_cost "
                     "FROM llm_aggregated_usage WHERE minute = :m"
                 ),
                 {"m": minute},
@@ -305,7 +305,7 @@ class TestAggregateMinute:
         ).all()
         assert len(rows) == 1
         row = rows[0]
-        assert row.user_id == _USER_ID
+        assert row.creator_id == _USER_ID
         assert row.invocations == 3
         # 5+6+7 = 18
         assert row.prompt_tokens == 18
@@ -415,7 +415,7 @@ async def _seed_aggregated_row(
         await s.execute(
             _text(
                 "INSERT INTO llm_aggregated_usage "
-                "(id, minute, user_id, invocations, prompt_tokens, completion_tokens) "
+                "(id, minute, creator_id, invocations, prompt_tokens, completion_tokens) "
                 "VALUES (:id, :m, :uid, :inv, :pt, 0)"
             ),
             {
@@ -438,7 +438,7 @@ class TestAggregatedUsageRoutes:
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         assert len(items) == 1
-        assert items[0]["user_id"] == str(user_id)
+        assert items[0]["creator_id"] == str(user_id)
         assert items[0]["invocations"] == 1
         assert items[0]["prompt_tokens"] == 100
 
@@ -478,13 +478,13 @@ class TestAggregatedUsageRoutes:
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
-    async def test_filter_by_user_id(self, client: AsyncClient, user_id: uuid.UUID) -> None:
+    async def test_filter_by_creator_id(self, client: AsyncClient, user_id: uuid.UUID) -> None:
         minute = datetime(2026, 6, 5, 9, 4, 0, tzinfo=UTC)
         await _seed_aggregated_row(client, user_id=user_id, minute=minute, prompt_tokens=42)
-        resp = await client.get(f"/llm/aggregated-usage?user_id__eq={user_id}")
+        resp = await client.get(f"/llm/aggregated-usage?creator_id__eq={user_id}")
         assert resp.status_code == 200
         items = resp.json()["items"]
-        assert all(i["user_id"] == str(user_id) for i in items)
+        assert all(i["creator_id"] == str(user_id) for i in items)
         assert any(i["prompt_tokens"] == 42 for i in items)
 
     async def test_filter_by_minute_range(self, client: AsyncClient, user_id: uuid.UUID) -> None:

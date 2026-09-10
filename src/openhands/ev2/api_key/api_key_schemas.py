@@ -22,7 +22,7 @@ from openhands.ev2.util.search_filter import BaseSearchFilter
 class ApiKeyCreate(BaseModel):
     """Payload to create an API key.
 
-    ``user_id`` is not accepted on the payload: the subject of the minted key
+    ``creator_id`` is not accepted on the payload: the subject of the minted key
     is always the current principal, derived from the authenticated request
     (AGENTS.md §9). ``expires_at`` is optional; ``None`` means the key never
     expires on its own.
@@ -51,7 +51,7 @@ class ApiKeyCreate(BaseModel):
 class ApiKeyUpdate(BaseModel):
     """Payload to partially update an API key. All fields optional.
 
-    ``prefix`` and ``user_id`` are immutable: the key's identity and subject
+    ``prefix`` and ``creator_id`` are immutable: the key's identity and subject
     cannot change after minting.
     """
 
@@ -87,7 +87,7 @@ class ApiKeyRead(BaseModel):
 
     id: uuid.UUID
     prefix: str
-    user_id: uuid.UUID
+    creator_id: uuid.UUID
     name: str | None
     enabled: bool
     expires_at: datetime | None
@@ -119,7 +119,7 @@ class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
     prefix__contains: str | None = Field(
         default=None, description="Case-insensitive prefix substring (e.g. 'oh_abcd')."
     )
-    user_id__eq: uuid.UUID | None = Field(default=None, description="Exact user id match.")
+    creator_id__eq: uuid.UUID | None = Field(default=None, description="Exact creator id match.")
     enabled__eq: bool | None = Field(default=None, description="Exact enabled match.")
     expires_at__gte: datetime | None = Field(
         default=None, description="ISO 8601; keys expiring at or after."

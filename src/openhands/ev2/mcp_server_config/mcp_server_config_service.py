@@ -92,7 +92,7 @@ class MCPServerConfigService:
         )
         return MCPServerConfigRead(
             id=config.id,
-            user_id=config.user_id,
+            creator_id=config.creator_id,
             display_name=config.display_name,
             url=server_data.get("url"),
             transport=server_data.get("transport"),
@@ -142,12 +142,12 @@ class MCPServerConfigService:
         self,
         payload: MCPServerConfigCreate,
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> MCPServerConfig:
         """Create an MCP server configuration, encrypting secret-bearing fields."""
         data = self._normalized_mcp_data(mcp_payload_to_plain_dict(payload))
         config = MCPServerConfig(
-            user_id=user_id,
+            creator_id=creator_id,
             display_name=payload.display_name,
             enable_proxy=payload.enable_proxy,
             **self._stored_kwargs(data),
@@ -238,13 +238,13 @@ class MCPServerConfigService:
         operations: list[MCPServerConfigBatchOp],
         perm_filters: dict[Action, SearchFilter[MCPServerConfig] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> list[MCPServerConfig | None]:
         """Apply create/update/delete operations in one caller-owned transaction."""
         results: list[MCPServerConfig | None] = []
         for op in operations:
             if isinstance(op, MCPServerConfigBatchCreate):
-                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+                results.append(await self._batch_create(op, perm_filters, creator_id=creator_id))
             elif isinstance(op, MCPServerConfigBatchUpdate):
                 results.append(await self._batch_update(op, perm_filters))
             elif isinstance(op, MCPServerConfigBatchDelete):
@@ -257,7 +257,7 @@ class MCPServerConfigService:
         op: MCPServerConfigBatchCreate,
         perm_filters: dict[Action, SearchFilter[MCPServerConfig] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> MCPServerConfig:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
@@ -267,7 +267,7 @@ class MCPServerConfigService:
             filt,
             encryption_service=self._enc,
             config=self._cfg,
-        ).create(op.data, user_id=user_id)
+        ).create(op.data, creator_id=creator_id)
 
     async def _batch_update(
         self,

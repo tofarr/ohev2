@@ -1,6 +1,6 @@
 // Secret specification: secrets are permissioned resources with optional ownership.
 //
-// A Secret carries an optional user_id owner (the creating principal). Access
+// A Secret carries an optional creator_id owner (the creating principal). Access
 // is governed by the generic ACLPermission policy stored in the role's
 // secret_permission JSONB column — the per-secret link tables have been removed.
 //

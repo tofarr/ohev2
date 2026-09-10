@@ -114,7 +114,7 @@ class SecretRead(BaseModel):
     code: str
     type: SecretType
     description: str | None
-    user_id: uuid.UUID | None
+    creator_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 

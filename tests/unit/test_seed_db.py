@@ -230,7 +230,7 @@ class TestSeedDbRegularUser:
         uid = uuid.uuid4()
         filt = policy.to_search_filter(uid, Action.READ)
         assert isinstance(filt, ApiKeyAccessFilter)
-        assert filt.user_id == uid
+        assert filt.creator_id == uid
         # Anonymous is denied (NoneSearchFilter, not None).
         assert policy.to_search_filter(None, Action.CREATE) is not None
 

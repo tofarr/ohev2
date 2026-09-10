@@ -31,7 +31,7 @@ def enc() -> EncryptionService:
 
 def _conn(**overrides) -> StoredProviderConnection:
     defaults: dict = {
-        "user_id": uuid.uuid4(),
+        "creator_id": uuid.uuid4(),
         "display_name": "my-conn",
         "provider": "custom",
         "api_key": None,
@@ -102,7 +102,7 @@ class TestStoredLLMToSDK:
     def test_model_sourced_from_row(self, enc: EncryptionService) -> None:
         sdk_conn = self._sdk_conn(enc)
         llm = StoredLLM(
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             provider_connection_id=uuid.uuid4(),
             model="gpt-4o",
             display_name="m",
@@ -115,7 +115,7 @@ class TestStoredLLMToSDK:
         sdk_conn = self._sdk_conn(enc)
         # config blob carries stale values that must be overridden by the connection.
         llm = StoredLLM(
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             provider_connection_id=uuid.uuid4(),
             model="gpt-4o",
             display_name="m",
@@ -128,7 +128,7 @@ class TestStoredLLMToSDK:
     def test_config_fields_applied(self, enc: EncryptionService) -> None:
         sdk_conn = self._sdk_conn(enc)
         llm = StoredLLM(
-            user_id=uuid.uuid4(),
+            creator_id=uuid.uuid4(),
             provider_connection_id=uuid.uuid4(),
             model="gpt-4o",
             display_name="m",

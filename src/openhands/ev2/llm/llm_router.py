@@ -157,7 +157,7 @@ async def create_provider_connection(
         )
     service = ProviderConnectionService(session, perm_filter)
     try:
-        conn = await service.create(payload, user_id=user_id)
+        conn = await service.create(payload, creator_id=user_id)
     except ProviderConnectionPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -229,7 +229,7 @@ async def write_provider_connections_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+        results = await service.apply_batch(payload.operations, perm_filters, creator_id=user_id)
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -381,7 +381,7 @@ async def create_llm(
         )
     service = LLMService(session, perm_filter)
     try:
-        llm = await service.create(payload, user_id=user_id)
+        llm = await service.create(payload, creator_id=user_id)
     except LLMPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -457,7 +457,7 @@ async def write_llms_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+        results = await service.apply_batch(payload.operations, perm_filters, creator_id=user_id)
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -726,7 +726,7 @@ async def _resolve_forwarder_llm(
 
 async def _forwarder_stream(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     conn: StoredProviderConnection,
     llm: StoredLLM,
     request: Request,
@@ -756,7 +756,7 @@ async def _forwarder_stream(
         )
     return StreamingResponse(
         _proxy_stream_response(
-            session, user_id, conn.id, llm.id, client, upstream, llm.model, llm.config
+            session, creator_id, conn.id, llm.id, client, upstream, llm.model, llm.config
         ),
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type", "text/event-stream"),
@@ -765,7 +765,7 @@ async def _forwarder_stream(
 
 async def _forwarder_json(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     conn: StoredProviderConnection,
     llm: StoredLLM,
     request: Request,
@@ -782,7 +782,7 @@ async def _forwarder_json(
         )
     if 200 <= upstream.status_code < 300:
         await _record_openai_usage(
-            session, user_id, conn.id, llm.id, llm.model, llm.config, upstream
+            session, creator_id, conn.id, llm.id, llm.model, llm.config, upstream
         )
     return Response(
         content=upstream.content,
@@ -843,7 +843,7 @@ def _body_requests_stream(body: bytes) -> bool:
 
 async def _proxy_stream_response(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     client: httpx.AsyncClient,
@@ -862,7 +862,7 @@ async def _proxy_stream_response(
         if usage_payload is not None:
             await _record_usage_from_openai_payload(
                 session,
-                user_id,
+                creator_id,
                 provider_connection_id,
                 llm_id,
                 fallback_model,
@@ -900,7 +900,7 @@ def _parse_stream_usage(
 
 async def _record_openai_usage(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     fallback_model: str,
@@ -914,7 +914,7 @@ async def _record_openai_usage(
     if isinstance(payload, dict):
         await _record_usage_from_openai_payload(
             session,
-            user_id,
+            creator_id,
             provider_connection_id,
             llm_id,
             fallback_model,
@@ -950,7 +950,7 @@ def _openai_payload_cost(
 
 async def _record_usage_from_openai_payload(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     fallback_model: str,
@@ -988,7 +988,7 @@ async def _record_usage_from_openai_payload(
     from openhands.ev2.llm.llm_usage_service import LlmUsageService
 
     row = await LlmUsageService(session).record_usage(
-        user_id=user_id,
+        creator_id=creator_id,
         provider_connection_id=provider_connection_id,
         llm_id=llm_id,
         response_id=payload.get("id") if isinstance(payload.get("id"), str) else None,
@@ -1001,7 +1001,7 @@ async def _record_usage_from_openai_payload(
 
 async def _stream_completion(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     sdk_llm: Any,
@@ -1023,7 +1023,7 @@ async def _stream_completion(
                 on_token=_on_token,
                 **params,
             )
-            await _record_usage(session, user_id, provider_connection_id, llm_id, response)
+            await _record_usage(session, creator_id, provider_connection_id, llm_id, response)
             await queue.put(b"data: [DONE]\n\n")
         except Exception as exc:
             error = json.dumps({"detail": f"LLM completion failed: {exc}"})
@@ -1058,7 +1058,7 @@ def _completion_chunk_to_sse(chunk: Any) -> bytes:
 
 async def _record_usage(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     provider_connection_id: uuid.UUID,
     llm_id: uuid.UUID,
     response: Any,
@@ -1076,7 +1076,7 @@ async def _record_usage(
     try:
         service = LlmUsageService(session)
         await service.record_usage(
-            user_id=user_id,
+            creator_id=creator_id,
             provider_connection_id=provider_connection_id,
             llm_id=llm_id,
             response_id=getattr(response, "id", None),

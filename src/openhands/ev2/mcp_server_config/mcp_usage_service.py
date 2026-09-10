@@ -68,7 +68,7 @@ class McpUsageService:
     async def record_usage(
         self,
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
         mcp_server_config_id: uuid.UUID,
         tool_name: str,
         duration_ms: int,
@@ -84,7 +84,7 @@ class McpUsageService:
         here surface to the user; the proxied response has already succeeded.
         """
         row = McpUsage(
-            user_id=user_id,
+            creator_id=creator_id,
             mcp_server_config_id=mcp_server_config_id,
             tool_name=tool_name,
             duration_ms=duration_ms,
@@ -211,23 +211,23 @@ class McpUsageService:
             f"COALESCE(SUM(u.{raw}), 0) AS {agg}" for raw, agg in _AGGREGATED_METRIC_COLUMNS
         )
         agg_cols = ", ".join(agg for _raw, agg in _AGGREGATED_METRIC_COLUMNS)
-        # ON CONFLICT (user_id, minute): refresh the row from a fresh full-minute
+        # ON CONFLICT (creator_id, minute): refresh the row from a fresh full-minute
         # aggregate so a re-run after late raw rows is idempotent and correct.
         await self._session.execute(
             text(
                 f"""
                 INSERT INTO mcp_aggregated_usage (
-                    id, minute, user_id, {_AGGREGATED_COUNT_COLUMN},
+                    id, minute, creator_id, {_AGGREGATED_COUNT_COLUMN},
                     {agg_cols}
                 )
                 SELECT
-                    gen_random_uuid(), :start, u.user_id,
+                    gen_random_uuid(), :start, u.creator_id,
                     COUNT(*) AS {_AGGREGATED_COUNT_COLUMN},
                     {metric_sums}
                 FROM mcp_usage u
                 WHERE u.created_at >= :start AND u.created_at < :end
-                GROUP BY u.user_id
-                ON CONFLICT (user_id, minute) DO UPDATE SET
+                GROUP BY u.creator_id
+                ON CONFLICT (creator_id, minute) DO UPDATE SET
                     {_AGGREGATED_COUNT_COLUMN} = EXCLUDED.{_AGGREGATED_COUNT_COLUMN},
                     {", ".join(f"{agg} = EXCLUDED.{agg}" for _raw, agg in _AGGREGATED_METRIC_COLUMNS)},
                     updated_at = now()

@@ -102,7 +102,7 @@ class LlmUsageService:
     async def record_usage(
         self,
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
         provider_connection_id: uuid.UUID,
         llm_id: uuid.UUID | None,
         response_id: str | None,
@@ -132,7 +132,7 @@ class LlmUsageService:
             else {}
         )
         row = LlmUsage(
-            user_id=user_id,
+            creator_id=creator_id,
             provider_connection_id=provider_connection_id,
             llm_id=llm_id,
             response_id=response_id,
@@ -255,25 +255,25 @@ class LlmUsageService:
         start = minute.replace(second=0, microsecond=0)
         end = start + timedelta(minutes=1)
         cols = ", ".join(f"COALESCE(SUM(u.{c}), 0) AS {c}" for c in _AGGREGATED_METRIC_COLUMNS)
-        # ON CONFLICT (user_id, minute): refresh the row from a fresh full-minute
+        # ON CONFLICT (creator_id, minute): refresh the row from a fresh full-minute
         # aggregate so a re-run after late raw rows is idempotent and correct.
         await self._session.execute(
             text(
                 f"""
                 INSERT INTO llm_aggregated_usage (
-                    id, minute, user_id, invocations,
+                    id, minute, creator_id, invocations,
                     prompt_tokens, completion_tokens, cache_read_tokens,
                     cache_write_tokens, reasoning_tokens, context_window,
                     per_turn_token, accumulated_cost
                 )
                 SELECT
-                    gen_random_uuid(), :start, u.user_id, COUNT(*) AS invocations,
+                    gen_random_uuid(), :start, u.creator_id, COUNT(*) AS invocations,
                     {cols},
                     COALESCE(SUM(u.{_COST_COLUMN}), 0) AS {_COST_COLUMN}
                 FROM llm_usage u
                 WHERE u.created_at >= :start AND u.created_at < :end
-                GROUP BY u.user_id
-                ON CONFLICT (user_id, minute) DO UPDATE SET
+                GROUP BY u.creator_id
+                ON CONFLICT (creator_id, minute) DO UPDATE SET
                     invocations = EXCLUDED.invocations,
                     prompt_tokens = EXCLUDED.prompt_tokens,
                     completion_tokens = EXCLUDED.completion_tokens,

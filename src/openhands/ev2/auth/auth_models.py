@@ -116,7 +116,7 @@ class ApiKey(Base):
     # Non-secret leading prefix of the raw key (e.g. ``oh_abcd1234``) for display
     # in listings so a user can tell keys apart without the secret.
     prefix: Mapped[str] = mapped_column(String(32))
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -158,7 +158,7 @@ class RefreshToken(Base):
         server_default=func.gen_random_uuid(),
     )
     jti: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )
@@ -201,7 +201,7 @@ class IdpRefreshToken(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
     )

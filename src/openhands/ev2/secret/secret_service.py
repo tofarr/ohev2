@@ -8,7 +8,7 @@ Two services live here:
   search/get/update/delete SQL to secrets the principal may act on. The
   ``value`` is encrypted at rest via the encryption service (AGENTS.md §9) and
   stored in a type-specific detail row (``static_secret_details``); it is never
-  returned by this service — :meth:`to_read` omits the value. The ``user_id``
+  returned by this service — :meth:`to_read` omits the value. The ``creator_id``
   of the creating principal is recorded on the secret row.
 
 * :class:`SecretValueService` — the read-only reveal projection behind
@@ -107,23 +107,23 @@ class SecretService:
             code=secret.code,
             type=secret.type,
             description=secret.description,
-            user_id=secret.user_id,
+            creator_id=secret.creator_id,
             created_at=secret.created_at,
             updated_at=secret.updated_at,
         )
 
-    async def create(self, payload: SecretCreate, *, user_id: uuid.UUID) -> Secret:
+    async def create(self, payload: SecretCreate, *, creator_id: uuid.UUID) -> Secret:
         """Create a secret. Raises :class:`SecretCodeConflictError` on a duplicate code.
 
         For ``type='static'`` the value is encrypted at rest and stored in a
-        :class:`StaticSecretDetail` row. The ``user_id`` of the creating
+        :class:`StaticSecretDetail` row. The ``creator_id`` of the creating
         principal is recorded on the secret for ownership-based access control.
         """
         secret = Secret(
             code=payload.code,
             type=payload.type,
             description=payload.description,
-            user_id=user_id,
+            creator_id=creator_id,
         )
         if not self._perm_filter.matches(secret):
             raise SecretPermissionScopeError(str(payload.code))
@@ -246,7 +246,7 @@ class SecretService:
         operations: list[SecretBatchOp],
         perm_filters: dict[Action, SearchFilter[Secret] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> list[Secret | None]:
         """Apply a mix of create/update/delete operations in one transaction.
 
@@ -260,7 +260,7 @@ class SecretService:
         results: list[Secret | None] = []
         for op in operations:
             if isinstance(op, SecretBatchCreate):
-                results.append(await self._batch_create(op, perm_filters, user_id=user_id))
+                results.append(await self._batch_create(op, perm_filters, creator_id=creator_id))
             elif isinstance(op, SecretBatchUpdate):
                 results.append(await self._batch_update(op, perm_filters))
             elif isinstance(op, SecretBatchDelete):
@@ -273,13 +273,13 @@ class SecretService:
         op: SecretBatchCreate,
         perm_filters: dict[Action, SearchFilter[Secret] | None],
         *,
-        user_id: uuid.UUID,
+        creator_id: uuid.UUID,
     ) -> Secret:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
         return await SecretService(self._session, filt, encryption_service=self._enc).create(
-            op.data, user_id=user_id
+            op.data, creator_id=creator_id
         )
 
     async def _batch_update(

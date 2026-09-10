@@ -7,7 +7,7 @@ Tables:
   the sensitive payload lives in a type-specific detail table. ``code`` is
   unique and matches ``[A-Za-z0-9_]+`` (validated in the schema), so a secret
   can be referenced by a stable human-readable key as well as by id. The
-  optional ``user_id`` records the creating user for ownership-based access
+  optional ``creator_id`` records the creating user for ownership-based access
   control.
 * :class:`StaticSecretDetail` — the encrypted plaintext for a ``type='static'``
   secret (1:1 with :class:`Secret`). Future ``oauth_*`` detail tables will hold
@@ -84,7 +84,7 @@ class Secret(Base):
         default=None,
         nullable=True,
     )
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
+    creator_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
         default=None,

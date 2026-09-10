@@ -116,7 +116,7 @@ async def create_secret(
         )
     service = SecretService(session, perm_filter)
     try:
-        secret = await service.create(payload, user_id=user_id)
+        secret = await service.create(payload, creator_id=user_id)
     except SecretPermissionScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -185,7 +185,7 @@ async def write_secrets_batch(
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters, user_id=user_id)
+        results = await service.apply_batch(payload.operations, perm_filters, creator_id=user_id)
     except BatchPermissionDeniedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

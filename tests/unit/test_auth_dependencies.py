@@ -99,7 +99,7 @@ async def _seed_idp_rows(session, user_id: uuid.UUID) -> None:
 
     enc = get_encryption_service()
     refresh_row = IdpRefreshToken(
-        user_id=user_id,
+        creator_id=user_id,
         refresh_token=enc.encrypt_value("idp-refresh"),
         expires_at=datetime.now(UTC) + timedelta(days=30),
     )

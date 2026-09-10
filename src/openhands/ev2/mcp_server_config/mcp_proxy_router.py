@@ -261,7 +261,7 @@ async def _sse_proxy(
     client: httpx.AsyncClient,
     upstream: httpx.Response,
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     config_id: uuid.UUID,
 ) -> AsyncIterator[bytes]:
     """Stream the upstream SSE response and best-effort record tool-call usage."""
@@ -285,7 +285,7 @@ async def _sse_proxy(
         if tool_name is not None:
             duration_ms = int((time.monotonic() - started) * 1000)
             row = await McpUsageService(session).record_usage(
-                user_id=user_id,
+                creator_id=creator_id,
                 mcp_server_config_id=config_id,
                 tool_name=tool_name,
                 duration_ms=duration_ms,
@@ -342,7 +342,7 @@ def _extract_toolcall(payload: Any) -> tuple[str, str] | None:
 
 async def _maybe_record_jsonrpc_usage(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    creator_id: uuid.UUID,
     config_id: uuid.UUID,
     request_body: bytes,
     response_body: bytes,
@@ -356,7 +356,7 @@ async def _maybe_record_jsonrpc_usage(
     success = _jsonrpc_response_success(_safe_json(response_body))
     duration_ms = int((time.monotonic() - started) * 1000)
     row = await McpUsageService(session).record_usage(
-        user_id=user_id,
+        creator_id=creator_id,
         mcp_server_config_id=config_id,
         tool_name=tool_name,
         duration_ms=duration_ms,
