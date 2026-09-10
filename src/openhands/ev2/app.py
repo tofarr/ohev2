@@ -272,7 +272,11 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     },
     {"name": "auth-dev", "description": "Built-in dev identity provider (non-production only)."},
     {"name": "users", "description": "User accounts and profiles."},
-    {"name": "roles", "description": "Roles and role-to-user assignments."},
+    {"name": "roles", "description": "Roles and their permission configuration."},
+    {
+        "name": "user-roles",
+        "description": "Role-to-user assignments (link table governed by its own permission).",
+    },
     {"name": "api-keys", "description": "API keys for programmatic access."},
     {"name": "cors-origins", "description": "CORS allow-list origins."},
     {"name": "secrets", "description": "Secrets and role/user secret-access grants."},
