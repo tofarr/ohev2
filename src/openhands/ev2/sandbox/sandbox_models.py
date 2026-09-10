@@ -17,6 +17,7 @@ re-exports it so existing callers keep working while it is retired.
 from __future__ import annotations
 
 import enum
+import uuid
 from abc import ABC
 from datetime import datetime
 
@@ -96,6 +97,10 @@ class SandboxTemplate(DiscriminatedUnionMixin, ABC):
     id: str
     command: list[str] | None = None
     created_at: datetime = Field(default_factory=utc_now)
+    user_id: uuid.UUID | None = Field(
+        default=None,
+        description="The user who created this sandbox template; null when unknown.",
+    )
     initial_env: dict[str, str] = Field(
         default_factory=dict, description="Initial Environment Variables"
     )
@@ -164,6 +169,10 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
         ),
     )
     created_at: datetime = Field(default_factory=utc_now)
+    user_id: uuid.UUID | None = Field(
+        default=None,
+        description="The user who created this sandbox; null when unknown.",
+    )
     status_detail: str | None = Field(
         default=None,
         description=(
@@ -186,6 +195,10 @@ class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
 
     id: str
     created_at: datetime = Field(default_factory=utc_now)
+    user_id: uuid.UUID | None = Field(
+        default=None,
+        description="The user who created this snapshot; null when unknown.",
+    )
     download_url: str | None = Field(
         default=None,
         description="URL to download the snapshot artifact, when available.",

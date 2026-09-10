@@ -15,6 +15,7 @@ pause/resume.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -71,6 +72,7 @@ class SandboxTemplateRead(BaseModel):
     exposed_ports: list[ExposedPort]
     snapshot_mode: SnapshotMode
     created_at: datetime
+    user_id: uuid.UUID | None
 
 
 class SandboxTemplateSearchFilter(BaseSearchFilter[SandboxTemplate]):
@@ -179,6 +181,7 @@ class SandboxRead(BaseModel):
     created_at: datetime
     status_detail: str | None
     volume_mounts: list[VolumeMount]
+    user_id: uuid.UUID | None
 
 
 class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
@@ -293,6 +296,7 @@ class SandboxSnapshotRead(BaseModel):
     download_url: str | None
     image_id: str | None = None
     sandbox_id: str | None = None
+    user_id: uuid.UUID | None = None
 
 
 class SandboxSnapshotSearchFilter(BaseSearchFilter[SandboxSnapshot]):

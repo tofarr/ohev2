@@ -12,9 +12,6 @@ Resources:
   ``secret_value_permission`` column; a secret is revealed only when the
   principal has both read access to the secret and the value-reveal permission
   (defense in depth, AGENTS.md §12).
-* ``/role-secret-permissions`` and ``/user-secret-permissions`` — full CRUD
-  (the links are mutable: PATCH toggles read/update/delete flags) plus batch
-  read/write.
 """
 
 from __future__ import annotations
@@ -117,6 +114,7 @@ class SecretRead(BaseModel):
     code: str
     type: SecretType
     description: str | None
+    user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 

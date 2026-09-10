@@ -573,17 +573,11 @@ from openhands.ev2.mcp_server_config import (  # noqa: E402,F401
 from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: E402
     MCPServerConfig as _MCPServerConfig,
 )
-from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: E402
-    RoleMCPServerConfigPermission as _RoleMCPServerConfigPermission,
-)
 from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: E402
     McpAggregatedUsage as _McpAggregatedUsage,
 )
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
-from openhands.ev2.sandbox.role_sandbox_template_permission_models import (  # noqa: E402
-    RoleSandboxTemplatePermission as _RoleSandboxTemplatePermission,
-)
 from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
     Sandbox as _SandboxSandbox,
 )
@@ -594,10 +588,7 @@ from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
     SandboxTemplate as _SandboxTemplate,
 )
 from openhands.ev2.secret import (  # noqa: E402,F401
-    secret_security as _secret_security,  # registers SecretAccess in the Permission union
-)
-from openhands.ev2.secret.secret_models import (  # noqa: E402
-    RoleSecretPermission as _RoleSecretPermission,
+    secret_security as _secret_security,  # registers SecretValueAccess in the Permission union
 )
 from openhands.ev2.secret.secret_models import Secret as _Secret  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
@@ -609,9 +600,7 @@ register_resource_policy(_ApiKey, "api_key_permission")
 register_resource_policy(_OAuthClient, "oauth_client_permission")
 register_resource_policy(_AllowedOrigin, "cors_origin_permission")
 register_resource_policy(_Secret, "secret_permission")
-register_resource_policy(_RoleSecretPermission, "secret_grant_permission")
 register_resource_policy(_MCPServerConfig, "mcp_server_config_permission")
-register_resource_policy(_RoleMCPServerConfigPermission, "mcp_server_config_grant_permission")
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
 register_resource_policy(_LlmAggregatedUsage, "llm_aggregated_usage_permission")
@@ -630,7 +619,6 @@ register_resource_policy(_SandboxSandbox, "sandbox_permission")
 # are the successor surface for the same logical resource, and the per-resource
 # grant table already keys on the snapshot id string.
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
-register_resource_policy(_RoleSandboxTemplatePermission, "sandbox_template_grant_permission")
 
 
 def depends_permissions(

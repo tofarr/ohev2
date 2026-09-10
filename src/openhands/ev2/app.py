@@ -40,25 +40,13 @@ from openhands.ev2.mcp_server_config.mcp_proxy_router import (
 from openhands.ev2.mcp_server_config.mcp_server_config_router import (
     router as mcp_server_config_router,
 )
-from openhands.ev2.mcp_server_config.role_mcp_server_config_permission_router import (
-    router as role_mcp_server_config_permission_router,
-)
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
-from openhands.ev2.sandbox.role_sandbox_template_permission_router import (
-    router as sandbox_role_sandbox_template_permission_router,
-)
 from openhands.ev2.sandbox.sandbox_router import router as sandbox_sandbox_router
 from openhands.ev2.sandbox.sandbox_snapshot_router import router as sandbox_snapshot_router
 from openhands.ev2.sandbox.sandbox_template_router import router as sandbox_template_router
-from openhands.ev2.secret.role_secret_permission_router import (
-    router as role_secret_permission_router,
-)
 from openhands.ev2.secret.secret_router import router as secret_router
 from openhands.ev2.secret.secret_value_router import router as secret_value_router
-from openhands.ev2.secret.user_secret_permission_router import (
-    router as user_secret_permission_router,
-)
 from openhands.ev2.user.user_router import router as user_router
 
 # Sentinel IdP URL that selects the built-in dev identity provider
@@ -326,17 +314,13 @@ def create_app() -> FastAPI:
     app.include_router(llm_router)
     app.include_router(mcp_server_config_router)
     app.include_router(mcp_proxy_router)
-    app.include_router(role_mcp_server_config_permission_router)
     app.include_router(role_router)
     app.include_router(user_role_router)
     app.include_router(secret_router)
     app.include_router(secret_value_router)
-    app.include_router(role_secret_permission_router)
-    app.include_router(user_secret_permission_router)
     app.include_router(sandbox_template_router)
     app.include_router(sandbox_sandbox_router)
     app.include_router(sandbox_snapshot_router)
-    app.include_router(sandbox_role_sandbox_template_permission_router)
     app.include_router(user_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app
