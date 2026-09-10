@@ -1,4 +1,4 @@
-"""Service layer for the sandbox_v2 feature.
+"""Service layer for the sandbox feature.
 
 The sandbox control plane is supplied by a pluggable :class:`SandboxService`
 implementation selected at startup via the ``sandbox_service_class`` config
@@ -24,8 +24,8 @@ from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxSnapshot, SandboxTemplate
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_models import Sandbox, SandboxSnapshot, SandboxTemplate
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchCreate,
     SandboxBatchDelete,
     SandboxBatchOp,

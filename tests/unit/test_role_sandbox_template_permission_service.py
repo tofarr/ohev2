@@ -1,12 +1,10 @@
-"""Unit tests for the ``sandbox_v2`` role-sandbox-template-permission service.
+"""Unit tests for the ``sandbox`` role-sandbox-template-permission service.
 
-The ``sandbox_v2.role_sandbox_template_permission_service`` module is the
-sandbox_v2 successor of ``sandbox.role_sandbox_template_permission_service``;
-it backs the same ``role_sandbox_template_permissions`` link table but is
-wired to the sandbox_v2 schemas. These tests mirror the exhaustive template
-service coverage in ``test_role_sandbox_permission_service.py`` against the
-new module so the import graph (and therefore the coverage) is exercised
-through the sandbox_v2 package.
+The ``sandbox.role_sandbox_template_permission_service`` module backs the
+``role_sandbox_template_permissions`` link table and is wired to the sandbox
+schemas. These tests mirror the exhaustive template service coverage in
+``test_role_sandbox_permission_service.py`` against the module so the import
+graph (and therefore the coverage) is exercised through the sandbox package.
 """
 
 from __future__ import annotations
@@ -18,14 +16,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchCreate,
     RoleSandboxTemplatePermissionBatchDelete,
     RoleSandboxTemplatePermissionBatchUpdate,
     RoleSandboxTemplatePermissionSearchFilter,
     RoleSandboxTemplatePermissionUpdate,
 )
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_service import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_service import (
     BatchPermissionDeniedError,
     RoleSandboxTemplatePermissionConflictError,
     RoleSandboxTemplatePermissionNotFoundError,
@@ -40,7 +38,7 @@ from openhands.ev2.util.search_filter import ALL, NONE
 # --------------------------------------------------------------------------- #
 # Seed helpers.
 #
-# sandbox_v2 templates are provider-owned (e.g. Docker images), not rows in a
+# sandbox templates are provider-owned (e.g. Docker images), not rows in a
 # ``sandbox_templates`` table, so the grant table's ``sandbox_template_id`` is
 # a free UUID with no foreign key. Tests therefore mint a random template id
 # rather than seeding an ORM template row.

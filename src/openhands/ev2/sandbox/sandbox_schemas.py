@@ -1,4 +1,4 @@
-"""Pydantic schemas for the sandbox_v2 feature.
+"""Pydantic schemas for the sandbox feature.
 
 The request/response surface is intentionally a faithful superset of the
 existing sandbox-template schemas, adapted to the new template shape (an ``id``
@@ -20,8 +20,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
-from openhands.ev2.sandbox_v2.sandbox_v2_models import (
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.sandbox_models import (
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,
@@ -76,7 +76,7 @@ class SandboxTemplateRead(BaseModel):
 
 
 class SandboxTemplateSearchFilter(BaseSearchFilter[SandboxTemplate]):
-    """Optional filters for ``GET /sandbox_v2/sandbox-templates``."""
+    """Optional filters for ``GET /sandbox/sandbox-templates``."""
 
     id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
     id__eq: str | None = Field(default=None, description="Exact id match.")
@@ -122,7 +122,7 @@ SandboxTemplateBatchOp = Annotated[
 
 
 class SandboxTemplateBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandbox_v2/sandbox-templates/batch``."""
+    """Request body for ``POST /sandbox/sandbox-templates/batch``."""
 
     operations: list[SandboxTemplateBatchOp] = Field(
         min_length=1,
@@ -182,7 +182,7 @@ class SandboxRead(BaseModel):
 
 
 class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
-    """Optional filters for ``GET /sandbox_v2/sandboxes``."""
+    """Optional filters for ``GET /sandbox/sandboxes``."""
 
     id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
     id__eq: str | None = Field(default=None, description="Exact id match.")
@@ -227,7 +227,7 @@ SandboxBatchOp = Annotated[
 
 
 class SandboxBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandbox_v2/sandboxes/batch``."""
+    """Request body for ``POST /sandbox/sandboxes/batch``."""
 
     operations: list[SandboxBatchOp] = Field(
         min_length=1,
@@ -294,7 +294,7 @@ class SandboxSnapshotRead(BaseModel):
 
 
 class SandboxSnapshotSearchFilter(BaseSearchFilter[SandboxSnapshot]):
-    """Optional filters for ``GET /sandbox_v2/sandbox-snapshots``."""
+    """Optional filters for ``GET /sandbox/sandbox-snapshots``."""
 
     id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
     id__eq: str | None = Field(default=None, description="Exact id match.")
@@ -330,7 +330,7 @@ SandboxSnapshotBatchOp = Annotated[
 
 
 class SandboxSnapshotBatchWriteRequest(BaseModel):
-    """Request body for ``POST /sandbox_v2/sandbox-snapshots/batch``.
+    """Request body for ``POST /sandbox/sandbox-snapshots/batch``.
 
     Snapshots are created through the multipart create endpoint (a file may be
     involved), so the batch write supports delete operations only.

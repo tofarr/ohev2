@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxSnapshot, VolumeMount
+from openhands.ev2.sandbox.sandbox_models import Sandbox, SandboxSnapshot, VolumeMount
 
 
 class DockerSandbox(Sandbox):

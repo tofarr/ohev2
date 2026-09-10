@@ -1,7 +1,7 @@
-"""HTTP routes for the sandbox_v2 feature.
+"""HTTP routes for the sandbox feature.
 
-Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox_v2/``: the
-collection is ``/sandbox_v2/sandbox-templates`` with cursor pagination; create
+Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox/``: the
+collection is ``/sandbox/sandbox-templates`` with cursor pagination; create
 is ``POST``, retrieve is ``GET``, remove is ``DELETE``, plus batch read/write
 and count. Templates are functionally immutable (no ``PATCH``): the batch
 write accepts create and delete operations only.
@@ -18,15 +18,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
-from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxTemplate
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxTemplateBatchWriteRequest,
     SandboxTemplateCreate,
     SandboxTemplateRead,
     SandboxTemplateSearchFilter,
     SandboxTemplateSearchResult,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
     SandboxService,
     SandboxTemplateConflictError,
@@ -37,7 +37,7 @@ from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/sandbox_v2/sandbox-templates", tags=["sandbox-v2-templates"])
+router = APIRouter(prefix="/sandbox/sandbox-templates", tags=["sandbox-templates"])
 
 
 async def get_sandbox_service(request: Request) -> SandboxService:

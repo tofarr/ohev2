@@ -1,9 +1,9 @@
-"""Route tests for the sandbox_v2 role-sandbox-template-permission grant feature.
+"""Route tests for the sandbox role-sandbox-template-permission grant feature.
 
 The default ``client`` fixture is the seeded admin principal whose role
 carries ``Permitted()`` on every entity column, including
 ``sandbox_template_grant_permission``, so it has full CRUD on the grant
-table. sandbox_v2 templates are provider-owned (not DB rows), so the
+table. sandbox templates are provider-owned (not DB rows), so the
 ``sandbox_template_id`` column is a free UUID with no foreign key — tests
 mint random ids directly rather than seeding a template row.
 """
@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
 
-_GRANT_PATH = "/sandbox_v2/role-sandbox-template-permissions"
+_GRANT_PATH = "/sandbox/role-sandbox-template-permissions"
 
 
 async def _seed_role(session: AsyncSession, *, n: int = 0) -> Role:

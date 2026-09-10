@@ -1,9 +1,9 @@
-"""Pydantic models for the sandbox_v2 feature.
+"""Pydantic models for the sandbox feature.
 
 The public shape of a sandbox template (and, now, a sandbox) lives here
 rather than in the ORM models: template/sandbox state is owned by the
 configured ``SandboxService`` implementation (see
-:mod:`openhands.ev2.sandbox_v2.sandbox_v2_service`), not by a database
+:mod:`openhands.ev2.sandbox.sandbox_service`), not by a database
 table. ``SandboxTemplate`` and ``Sandbox`` are therefore plain
 ``DiscriminatedUnionMixin`` Pydantic models whose concrete subclasses
 (:class:`DockerSandboxTemplate`, :class:`DockerSandbox`) contribute

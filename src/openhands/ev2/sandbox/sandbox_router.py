@@ -1,7 +1,7 @@
-"""HTTP routes for the sandbox_v2 sandbox resource.
+"""HTTP routes for the sandbox sandbox resource.
 
-Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox_v2/``: the
-collection is ``/sandbox_v2/sandboxes`` with cursor pagination; create is
+Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox/``: the
+collection is ``/sandbox/sandboxes`` with cursor pagination; create is
 ``POST``, retrieve is ``GET``, remove is ``DELETE``, plus batch read/write and
 count. The only mutable field is ``desired_status`` (``PATCH /{id}``), which
 drives pause/resume.
@@ -19,9 +19,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
-from openhands.ev2.sandbox_v2.sandbox_template_router import get_sandbox_service
-from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_models import Sandbox
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchWriteRequest,
     SandboxCreate,
     SandboxRead,
@@ -29,17 +28,18 @@ from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
     SandboxSearchResult,
     SandboxUpdate,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
     SandboxConflictError,
     SandboxNotFoundError,
     SandboxPermissionScopeError,
 )
+from openhands.ev2.sandbox.sandbox_template_router import get_sandbox_service
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/sandbox_v2/sandboxes", tags=["sandbox-v2-sandboxes"])
+router = APIRouter(prefix="/sandbox/sandboxes", tags=["sandbox-sandboxes"])
 
 
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (

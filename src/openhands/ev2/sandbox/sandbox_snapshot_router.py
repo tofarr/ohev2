@@ -1,7 +1,7 @@
-"""HTTP routes for the sandbox_v2 snapshot resource.
+"""HTTP routes for the sandbox snapshot resource.
 
-Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox_v2/``: the
-collection is ``/sandbox_v2/sandbox-snapshots`` with cursor pagination; create
+Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox/``: the
+collection is ``/sandbox/sandbox-snapshots`` with cursor pagination; create
 is ``POST`` (multipart form — a snapshot may be imported from an uploaded
 file), retrieve is ``GET``, remove is ``DELETE``, plus batch read/write and
 count. Snapshots are create/read/delete only (no update).
@@ -36,16 +36,15 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
-from openhands.ev2.sandbox_v2.sandbox_template_router import get_sandbox_service
-from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxSnapshot
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_models import Sandbox, SandboxSnapshot
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxSnapshotBatchWriteRequest,
     SandboxSnapshotCreate,
     SandboxSnapshotRead,
     SandboxSnapshotSearchFilter,
     SandboxSnapshotSearchResult,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
     SandboxNotFoundError,
     SandboxSnapshotConflictError,
@@ -53,11 +52,12 @@ from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     SandboxSnapshotPermissionScopeError,
     SandboxSnapshotUnsupportedError,
 )
+from openhands.ev2.sandbox.sandbox_template_router import get_sandbox_service
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
 
-router = APIRouter(prefix="/sandbox_v2/sandbox-snapshots", tags=["sandbox-v2-snapshots"])
+router = APIRouter(prefix="/sandbox/sandbox-snapshots", tags=["sandbox-snapshots"])
 
 
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
@@ -148,7 +148,7 @@ async def create_sandbox_snapshot(
         )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
-    download_url = f"/sandbox_v2/sandbox-snapshots/{snapshot.id}/download"
+    download_url = f"/sandbox/sandbox-snapshots/{snapshot.id}/download"
     return SandboxSnapshotRead.model_validate(
         snapshot.model_copy(update={"download_url": download_url})
     )
@@ -209,7 +209,7 @@ async def get_sandbox_snapshot(
         snapshot = await service.get_snapshot(snapshot_id, perm_filter=perm_filter)
     except SandboxSnapshotNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
-    download_url = f"/sandbox_v2/sandbox-snapshots/{snapshot.id}/download"
+    download_url = f"/sandbox/sandbox-snapshots/{snapshot.id}/download"
     return SandboxSnapshotRead.model_validate(
         snapshot.model_copy(update={"download_url": download_url})
     )

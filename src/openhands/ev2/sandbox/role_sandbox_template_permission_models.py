@@ -2,10 +2,10 @@
 
 The ``role_sandbox_template_permissions`` table links a :class:`Role` to a
 sandbox template id with independent read/update/delete flags. It is the
-governed link table for the sandbox_v2 template-grant feature
+governed link table for the sandbox template-grant feature
 (``sandbox_template_grant_permission`` on :class:`Role` — AGENTS.md §11.1).
 
-sandbox_v2 templates are provider-owned (e.g. Docker images), not rows in a
+sandbox templates are provider-owned (e.g. Docker images), not rows in a
 ``sandbox_templates`` table, so ``sandbox_template_id`` is a free UUID with
 no foreign key: the grant records an opaque template id string-as-uuid. The
 unique ``(role_id, sandbox_template_id)`` pair still holds so a role is

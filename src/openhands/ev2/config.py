@@ -12,7 +12,7 @@ from typing import Any, Literal, Self, cast
 from openhands.agent_server.env_parser import from_env
 from pydantic import BaseModel, Field, SecretStr, field_serializer, model_validator
 
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     resolve_sandbox_service_class,
 )
@@ -336,7 +336,7 @@ class AppConfig(BaseModel):
     # app lifespan). Later implementations (K8s, E2B, ...) register their own
     # FQCN here; the default selects the Docker-backed implementation.
     sandbox_service_class: str = Field(
-        default="openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService",
+        default="openhands.ev2.sandbox.docker_sandbox_service.DockerSandboxService",
         description=(
             "Fully qualified class name of the SandboxService implementation "
             "instantiated at server startup."

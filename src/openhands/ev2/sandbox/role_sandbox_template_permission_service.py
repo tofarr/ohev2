@@ -15,10 +15,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_models import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (
     RoleSandboxTemplatePermission,
 )
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchCreate,
     RoleSandboxTemplatePermissionBatchDelete,
     RoleSandboxTemplatePermissionBatchOp,
@@ -246,7 +246,7 @@ def _classify_integrity_error(
 
     A violation of ``uq_role_sandbox_tpl_perm_role_sandbox_tpl`` means the grant
     already exists. The only foreign key left on the table is ``role_id`` (the
-    template id is a free UUID with no referential target — sandbox_v2 templates
+    template id is a free UUID with no referential target — sandbox templates
     are provider-owned, not DB rows), so a foreign-key violation means the
     referenced role is missing.
     """
