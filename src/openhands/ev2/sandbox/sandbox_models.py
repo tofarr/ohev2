@@ -164,6 +164,15 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
         ),
     )
     created_at: datetime = Field(default_factory=utc_now)
+    last_accessed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Last time the sandbox was determined to be active, derived from "
+            "the agent server's reported idle time (now - idle_time). Null when "
+            "the provider could not determine it (e.g. the sandbox is not "
+            "running or the agent server did not respond)."
+        ),
+    )
     status_detail: str | None = Field(
         default=None,
         description=(
