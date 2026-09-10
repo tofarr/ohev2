@@ -1,30 +1,31 @@
-"""Start a local development sandbox backed by a Docker container.
+"""Start a local development sandbox via the sandbox REST API.
 
 This is a convenience orchestrator for local development only. It drives the
 public sandbox REST API — authenticating through the built-in dev identity
-provider — to register and activate a sandbox, then launches the real Docker
-container that backs it. It is not part of the request path and intentionally
-not async.
+provider — to register a sandbox template, create a sandbox from it, and set the
+sandbox ``desired_status`` to ``active``. The configured sandbox service (the
+Docker-backed implementation by default) does the real work: it pulls the
+template image and runs/pauses the backing container server-side, so this script
+does not touch Docker directly. It is not part of the request path and is
+intentionally not async.
 
 Flow:
 
-1. ensure the Docker daemon is reachable and the target image is present;
-2. wait for the app to be healthy at ``--base-url``;
-3. log in via ``POST /auth/dev/login`` and capture the session cookie;
-4. create a Docker sandbox template, create a sandbox from it, and activate it
-   via ``POST /sandbox-templates`` → ``POST /sandboxes`` →
-   ``POST /sandboxes/{id}/activate``;
-5. run the backing container from the template image, publishing
-   ``--host-port`` to the server's internal port.
+1. wait for the app to be healthy at ``--base-url``;
+2. log in via ``POST /auth/dev/login`` and capture the session cookie;
+3. ensure a sandbox template exists (reuse it if present, otherwise create it)
+   via ``GET/POST /sandbox/sandbox-templates``;
+4. create a sandbox from the template via ``POST /sandbox/sandboxes``;
+5. activate the sandbox via ``PATCH /sandbox/sandboxes/{id}`` with
+   ``{"desired_status": "active"}``.
 
-Defaults mirror the seeded admin credentials and the
-``docker-compose.yml`` dev setup, so a fresh checkout works out of the box:
+Defaults mirror the seeded admin credentials and the ``docker-compose.yml`` dev
+setup, so a fresh checkout works out of the box:
 
 * app base URL: ``http://localhost:8000``
 * admin credentials: ``admin`` / ``changeme`` (as produced by
   :mod:`openhands.ev2.scripts.seed_db`)
-* template image: ``ghcr.io/openhands/agent-server:latest``
-* backing container name: ``ohe-sandbox``
+* template image (the template id): ``ghcr.io/openhands/agent-server:latest``
 
 Run via ``uv run python -m openhands.ev2.scripts.start_local_dev_sandbox``.
 Pass ``--help`` for options.
@@ -34,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 import time
 from collections.abc import Iterable
@@ -47,24 +47,23 @@ DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "changeme"
 DEFAULT_COOKIE_NAME = "ohesession"
 DEFAULT_IMAGE = "ghcr.io/openhands/agent-server:latest"
-DEFAULT_TEMPLATE_NAME = "dev-template"
-DEFAULT_SANDBOX_NAME = "dev-sandbox"
-DEFAULT_CONTAINER_NAME = "ohe-sandbox"
-DEFAULT_HOST_PORT = 18000
-DEFAULT_INTERNAL_PORT = 18000
-DEFAULT_HEALTH_PATH = "/health"
 
 # The app may still be booting (uvicorn --reload, migrations, etc.); poll its
 # health endpoint until it reports ready.
 _HEALTH_POLL_INTERVAL_SECONDS = 1
 _HEALTH_POLL_TIMEOUT_SECONDS = 60
 
+# Template create pulls the image server-side, which can take a while on a cold
+# cache; keep the HTTP client timeout generous.
+_REQUEST_TIMEOUT_SECONDS = 300.0
+
 
 def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Start a local dev sandbox: drive the sandbox REST API to register "
-            "and activate a sandbox, then run the backing Docker container."
+            "Start a local dev sandbox via the sandbox REST API: ensure a "
+            "template, create a sandbox, and activate it (the Docker-backed "
+            "sandbox service runs the container server-side)."
         ),
     )
     parser.add_argument(
@@ -90,62 +89,40 @@ def _parse_args(argv: Iterable[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--image",
         default=os.environ.get("OHE_SANDBOX_IMAGE", DEFAULT_IMAGE),
-        help="Docker image backing the sandbox (default: env OHE_SANDBOX_IMAGE or "
+        help="Sandbox template id / Docker image (default: env OHE_SANDBOX_IMAGE or "
         "'ghcr.io/openhands/agent-server:latest').",
     )
     parser.add_argument(
-        "--template-name",
-        default=DEFAULT_TEMPLATE_NAME,
-        help="Name for the created sandbox template (default: 'dev-template').",
-    )
-    parser.add_argument(
-        "--name",
-        default=DEFAULT_SANDBOX_NAME,
-        help="Name for the created sandbox (default: 'dev-sandbox').",
-    )
-    parser.add_argument(
-        "--container-name",
-        default=DEFAULT_CONTAINER_NAME,
-        help="Name of the backing Docker container to remove/recreate (default: 'ohe-sandbox').",
-    )
-    parser.add_argument(
-        "--host-port",
+        "--idle-pause-seconds",
         type=int,
-        default=DEFAULT_HOST_PORT,
-        help="Host port to publish to the server's internal port (default: 18000).",
+        default=None,
+        help="Idle time before a sandbox is automatically paused (default: unset).",
     )
     parser.add_argument(
-        "--internal-port",
+        "--paused-delete-seconds",
         type=int,
-        default=DEFAULT_INTERNAL_PORT,
-        help="Internal port the sandbox server listens on (default: 18000).",
+        default=None,
+        help="Idle time before a paused sandbox is automatically deleted (default: unset).",
     )
     parser.add_argument(
-        "--health-path",
-        default=DEFAULT_HEALTH_PATH,
-        help="Health path advertised on the sandbox server (default: '/health').",
+        "--max-age-seconds",
+        type=int,
+        default=None,
+        help="Maximum sandbox age before deletion (default: unset).",
     )
     parser.add_argument(
-        "--no-pull",
-        action="store_true",
-        help="Skip `docker pull` of the backing image (assume it is already present).",
+        "--max-memory",
+        type=int,
+        default=None,
+        help="Maximum memory (bytes) for the sandbox container (default: unset).",
     )
     parser.add_argument(
-        "--keep-if-exists",
-        action="store_true",
-        help="Do not remove an existing backing container; abort instead.",
+        "--snapshot-mode",
+        choices=["unsupported", "manual", "automatic"],
+        default=None,
+        help="Snapshot strategy advertised by the template (default: provider's choice).",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
-
-
-def _run(
-    cmd: list[str],
-    *,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    """Run a command, streaming output to the inherited stdout/stderr."""
-    print(f"$ {' '.join(cmd)}", file=sys.stderr)
-    return subprocess.run(cmd, check=check, text=True)
 
 
 def _json(response: httpx.Response) -> dict[str, Any]:
@@ -164,68 +141,6 @@ def _extract_cookie(set_cookie: str, name: str) -> str | None:
         if part.startswith(prefix):
             return part[len(prefix) :]
     return None
-
-
-def _docker_ready() -> bool:
-    result = subprocess.run(
-        ["docker", "info"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
-
-
-def _ensure_docker() -> None:
-    if _docker_ready():
-        return
-    raise RuntimeError(
-        "Docker daemon is not reachable. Start it (e.g. `sudo dockerd` or Docker "
-        "Desktop) before running this script."
-    )
-
-
-def _container_exists(name: str) -> bool:
-    result = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    return result.stdout.strip() == name
-
-
-def _remove_container(name: str) -> None:
-    print(f"Removing existing container {name!r}...", file=sys.stderr)
-    _run(["docker", "rm", "-f", name])
-
-
-def _pull(image: str) -> None:
-    print(f"Pulling image {image!r}...", file=sys.stderr)
-    _run(["docker", "pull", image])
-
-
-def _run_container(*, name: str, image: str, host_port: int, internal_port: int) -> str:
-    print(f"Starting backing container {name!r} from {image!r}...", file=sys.stderr)
-    _run(
-        [
-            "docker",
-            "run",
-            "--name",
-            name,
-            "-p",
-            f"{host_port}:{internal_port}",
-            "-d",
-            image,
-        ]
-    )
-    result = subprocess.run(
-        ["docker", "ps", "--filter", f"name=^{name}$", "--format", "{{.ID}}"],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    return result.stdout.strip()
 
 
 def _wait_for_app(base_url: str) -> None:
@@ -269,33 +184,14 @@ def _login(
     return f"{cookie_name}={value}"
 
 
-def _template_payload(
-    *,
-    name: str,
-    image: str,
-    internal_port: int,
-    health_path: str,
-) -> dict[str, Any]:
+def _template_payload(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "name": name,
-        "provider_kind": "docker",
-        "template_spec": {
-            "kind": "DockerSandboxTemplateSpec",
-            "provider_kind": "docker",
-            "image": image,
-            "ports": [{"name": "agent", "port": internal_port, "protocol": "http"}],
-        },
-        "server_spec": {
-            "kind": "OpenHandsAgentServerSpec",
-            "server_kind": "openhands_agent_server",
-            "internal_port": internal_port,
-            "health_path": health_path,
-        },
-        "storage_spec": {
-            "kind": "FuseySandboxStorageSpec",
-            "storage_kind": "fusey",
-            "mount_path": "/workspace",
-        },
+        "id": args.image,
+        "idle_pause_seconds": args.idle_pause_seconds,
+        "paused_delete_seconds": args.paused_delete_seconds,
+        "max_age_seconds": args.max_age_seconds,
+        "max_memory": args.max_memory,
+        "snapshot_mode": args.snapshot_mode,
     }
 
 
@@ -303,35 +199,50 @@ def _create_template(
     client: httpx.Client,
     *,
     cookie: str,
-    name: str,
-    image: str,
-    internal_port: int,
-    health_path: str,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
     response = client.post(
-        "/sandbox-templates",
-        json=_template_payload(
-            name=name,
-            image=image,
-            internal_port=internal_port,
-            health_path=health_path,
-        ),
+        "/sandbox/sandbox-templates",
+        json=payload,
         headers=_auth_headers(cookie),
     )
     response.raise_for_status()
     return _json(response)
 
 
+def _ensure_template(
+    client: httpx.Client,
+    *,
+    cookie: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the existing template or create it when missing.
+
+    A template id is the Docker image name; the service pulls it on create, so
+    reusing an already-present template avoids a redundant pull/conflict.
+    """
+    template_id = str(payload["id"])
+    response = client.get(
+        f"/sandbox/sandbox-templates/{template_id}",
+        headers=_auth_headers(cookie),
+    )
+    if response.status_code == 200:
+        print(f"Reusing existing sandbox template {template_id!r}.", file=sys.stderr)
+        return _json(response)
+    if response.status_code != 404:
+        response.raise_for_status()
+    return _create_template(client, cookie=cookie, payload=payload)
+
+
 def _create_sandbox(
     client: httpx.Client,
     *,
     cookie: str,
-    name: str,
     template_id: str,
 ) -> dict[str, Any]:
     response = client.post(
-        "/sandboxes",
-        json={"name": name, "template_id": template_id},
+        "/sandbox/sandboxes",
+        json={"sandbox_template_id": template_id},
         headers=_auth_headers(cookie),
     )
     response.raise_for_status()
@@ -344,110 +255,57 @@ def _activate_sandbox(
     cookie: str,
     sandbox_id: str,
 ) -> dict[str, Any]:
-    response = client.post(
-        f"/sandboxes/{sandbox_id}/activate",
+    response = client.patch(
+        f"/sandbox/sandboxes/{sandbox_id}",
+        json={"desired_status": "active"},
         headers=_auth_headers(cookie),
     )
     response.raise_for_status()
     return _json(response)
 
 
-def _register_sandbox(
-    client: httpx.Client,
-    *,
-    cookie: str,
-    template_name: str,
-    sandbox_name: str,
-    image: str,
-    internal_port: int,
-    health_path: str,
-) -> dict[str, Any]:
-    """Create a template + sandbox and activate it, returning the activated sandbox."""
-    template = _create_template(
-        client,
-        cookie=cookie,
-        name=template_name,
-        image=image,
-        internal_port=internal_port,
-        health_path=health_path,
+def _print_result(sandbox: dict[str, Any]) -> None:
+    urls = ", ".join(u["url"] for u in sandbox.get("exposed_urls") or []) or "(none)"
+    print(
+        f"Sandbox started: id={sandbox.get('id')} status={sandbox.get('status')} "
+        f"desired_status={sandbox.get('desired_status')} exposed_urls={urls}",
+        file=sys.stderr,
     )
-    sandbox = _create_sandbox(
-        client,
-        cookie=cookie,
-        name=sandbox_name,
-        template_id=str(template["id"]),
-    )
-    return _activate_sandbox(
-        client,
-        cookie=cookie,
-        sandbox_id=str(sandbox["id"]),
-    )
-
-
-def _prepare_backing_container(args: argparse.Namespace) -> int | None:
-    """Pull the image and clear an existing backing container, if any.
-
-    Returns an exit code when the run should abort, or ``None`` to continue.
-    """
-    if not args.no_pull:
-        _pull(args.image)
-    if not _container_exists(args.container_name):
-        return None
-    if args.keep_if_exists:
-        print(
-            f"Container {args.container_name!r} already exists and "
-            "--keep-if-exists was set; aborting to avoid clobbering it.",
-            file=sys.stderr,
-        )
-        return 1
-    _remove_container(args.container_name)
-    return None
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
-
-    _ensure_docker()
     _wait_for_app(args.base_url)
-
-    abort_code = _prepare_backing_container(args)
-    if abort_code is not None:
-        return abort_code
 
     base_url = args.base_url.rstrip("/")
     try:
-        with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        with httpx.Client(base_url=base_url, timeout=_REQUEST_TIMEOUT_SECONDS) as client:
             cookie = _login(
                 client,
                 username=args.username,
                 password=args.password,
                 cookie_name=args.cookie_name,
             )
-            activated = _register_sandbox(
+            _ensure_template(
                 client,
                 cookie=cookie,
-                template_name=args.template_name,
-                sandbox_name=args.name,
-                image=args.image,
-                internal_port=args.internal_port,
-                health_path=args.health_path,
+                payload=_template_payload(args),
+            )
+            sandbox = _create_sandbox(
+                client,
+                cookie=cookie,
+                template_id=args.image,
+            )
+            activated = _activate_sandbox(
+                client,
+                cookie=cookie,
+                sandbox_id=str(sandbox["id"]),
             )
     except httpx.HTTPError as exc:
         print(f"REST request failed: {exc}", file=sys.stderr)
         return 1
 
-    container_id = _run_container(
-        name=args.container_name,
-        image=args.image,
-        host_port=args.host_port,
-        internal_port=args.internal_port,
-    )
-
-    print(
-        f"Sandbox started: id={activated['id']} status={activated['status']} "
-        f"container={container_id} url=http://localhost:{args.host_port}",
-        file=sys.stderr,
-    )
+    _print_result(activated)
     return 0
 
 
