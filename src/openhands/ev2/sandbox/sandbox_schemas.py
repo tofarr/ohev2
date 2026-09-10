@@ -44,7 +44,7 @@ class SandboxTemplateCreate(BaseModel):
     initial_env: dict[str, str] = Field(
         default_factory=dict, description="Initial Environment Variables"
     )
-    working_dir: str = "/home/openhands/workspace"
+    working_dir: str = "/home/openhands"
     idle_pause_seconds: int | None = Field(default=None, gt=0)
     paused_delete_seconds: int | None = Field(default=None, gt=0)
     max_age_seconds: int | None = Field(default=None, gt=0)
@@ -145,12 +145,26 @@ class SandboxCreate(BaseModel):
     e.g. Docker mints a humorous container name), never supplied by the
     caller. Only ``desired_status`` is mutable after creation (via
     :class:`SandboxUpdate`).
+
+    When ``snapshot_id`` is supplied, the provider restores the named
+    snapshot's workspace contents into the new sandbox before starting it
+    (analogous to creating a Kubernetes PVC from a VolumeSnapshot). The
+    snapshot must exist and be in a ready state.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     sandbox_template_id: str = Field(
         min_length=1, max_length=1024, description="Template id to instantiate."
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Optional snapshot id whose workspace contents are restored into "
+            "the new sandbox before it starts."
+        ),
     )
 
 
@@ -292,15 +306,23 @@ class SandboxSnapshotCreate(BaseModel):
 
 
 class SandboxSnapshotRead(BaseModel):
-    """Sandbox snapshot representation returned by the public API."""
+    """Sandbox snapshot representation returned by the public API.
+
+    A snapshot is a gzip-compressed tarball of the sandbox workspace directory
+    at capture time (analogous to a Kubernetes VolumeSnapshot). The artifact
+    is stored in the provider's snapshot directory and streamed via the
+    ``download_url``. ``sandbox_id`` is the source sandbox when the snapshot
+    was created from one; it is ``None`` for snapshots imported from an
+    uploaded tarball.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     created_at: datetime
     download_url: str | None
-    image_id: str | None = None
     sandbox_id: str | None = None
+    size_bytes: int | None = None
     user_id: uuid.UUID | None = None
 
 

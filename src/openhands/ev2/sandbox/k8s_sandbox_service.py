@@ -13,14 +13,19 @@ sandbox CRUD with *Deployments* (one pod, one container) plus a *PVC* and a
   namespace;
 * a sandbox's ``id`` is the Deployment name. ``desired_status`` maps to
   ``active`` (scale replicas to 1) and ``inactive`` (scale replicas to 0,
-  effectively pausing the pod).
+  effectively stopping the pod while the PVC persists).
+
+Each sandbox is backed by a PVC mounted at the template's ``working_dir``
+(default ``/home/openhands``). Snapshots are gzip tarballs of the PVC workspace,
+stored in ``snapshot_dir`` on the control-plane host. Capture runs a one-shot
+pod that tars the workspace to the shared snapshot store; restore runs a
+one-shot pod that extracts the tarball into a fresh PVC before the sandbox
+Deployment is created — mirroring the Kubernetes VolumeSnapshot model and
+letting snapshots round-trip between the Docker and K8s providers.
 
 The Kubernetes client is synchronous (urllib3-based), so every call is
 offloaded to a thread via :func:`asyncio.to_thread`, exactly as the Docker
 service offloads the Docker SDK calls.
-
-Snapshots are not supported by this provider (the base class hooks raise
-:class:`SandboxSnapshotUnsupportedError` by default).
 """
 
 from __future__ import annotations
@@ -31,7 +36,9 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -39,11 +46,16 @@ from kubernetes import client as k8s_client  # type: ignore[import-untyped]
 from kubernetes.client import exceptions as k8s_exc  # type: ignore[import-untyped]
 from pydantic import Field
 
-from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandbox, K8sSandboxTemplate
+from openhands.ev2.sandbox.k8s_sandbox_models import (
+    K8sSandbox,
+    K8sSandboxSnapshot,
+    K8sSandboxTemplate,
+)
 from openhands.ev2.sandbox.sandbox_models import (
     ExposedPort,
     ExposedUrl,
     Sandbox,
+    SandboxSnapshot,
     SandboxStatus,
     SandboxTemplate,
     SnapshotMode,
@@ -51,6 +63,7 @@ from openhands.ev2.sandbox.sandbox_models import (
 )
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
+    SandboxSnapshotCreate,
     SandboxTemplateCreate,
     SandboxUpdate,
 )
@@ -58,9 +71,13 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxConflictError,
     SandboxNotFoundError,
     SandboxService,
+    SandboxSnapshotConflictError,
+    SandboxSnapshotNotFoundError,
+    SandboxSnapshotUnsupportedError,
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
 )
+from openhands.ev2.util import snapshot_store
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +137,15 @@ class K8sSandboxService(SandboxService):
     carries the image reference (template ``id``) and lifespan metadata as
     data/annotations. Sandbox state is the Deployment inventory: a Deployment
     whose labels mark it as a sandbox is a valid sandbox. ``desired_status``
-    maps to ``active`` (scale to 1 replica) and ``inactive`` (scale to 0).
+    maps to ``active`` (scale to 1 replica) and ``inactive`` (scale to 0,
+    effectively stopping the pod while the PVC persists).
+
+    Each sandbox is backed by a PVC mounted at the template's ``working_dir``
+    (default ``/home/openhands``), giving the sandbox a persistent workspace.
+    Snapshots are gzip tarballs of that workspace, stored in ``snapshot_dir``
+    on the control plane host and restored into a new PVC via an init container
+    before the sandbox starts — mirroring the Kubernetes VolumeSnapshot model
+    and letting snapshots round-trip between the Docker and K8s providers.
 
     The Kubernetes client is created lazily so the server can boot without a
     reachable cluster; the first sandbox operation surfaces any connection
@@ -155,11 +180,20 @@ class K8sSandboxService(SandboxService):
             "in-cluster only; NodePort/LoadBalancer expose ports externally."
         ),
     )
+    snapshot_dir: str = Field(
+        default_factory=lambda: str(Path.home() / ".openhands" / "enterprise" / "snapshots"),
+        description=(
+            "Host directory storing snapshot tarballs "
+            "(``<snapshot_dir>/<snapshot_id>.tar.gz``), shared with the Docker "
+            "provider so snapshots round-trip between providers."
+        ),
+    )
     snapshot_mode: SnapshotMode = Field(
-        default=SnapshotMode.UNSUPPORTED,
+        default=SnapshotMode.MANUAL,
         description=(
             "Snapshot strategy advertised by every K8s sandbox/template. "
-            "Kubernetes sandboxes do not support snapshots by default."
+            "Kubernetes supports manual workspace snapshots (gzip tarball of the "
+            "PVC workspace) by default; set to ``unsupported`` to disable."
         ),
     )
     sandbox_lifecycle_interval: float = Field(
@@ -304,9 +338,11 @@ class K8sSandboxService(SandboxService):
             volume_mounts=[],
         )
 
-    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+    async def _create_sandbox(self, sandbox: Sandbox, *, snapshot_id: str | None = None) -> Sandbox:
         k8s_sandbox = cast(K8sSandbox, sandbox)
-        sandbox_id = await asyncio.to_thread(self._sync_create_sandbox, k8s_sandbox)
+        if snapshot_id is not None and self.snapshot_mode is SnapshotMode.UNSUPPORTED:
+            raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+        sandbox_id = await asyncio.to_thread(self._sync_create_sandbox, k8s_sandbox, snapshot_id)
         return await self._get_sandbox(sandbox_id)
 
     async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
@@ -315,6 +351,61 @@ class K8sSandboxService(SandboxService):
 
     async def _delete_sandbox(self, sandbox_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_sandbox, sandbox_id)
+
+    # ------------------------------------------------------------------ #
+    # Provider hooks — snapshots.
+    # A K8s snapshot is a gzip tarball of the sandbox PVC workspace, stored
+    # in ``snapshot_dir`` (shared with the Docker provider). Capture runs a
+    # one-shot pod that tars the workspace into the store; import writes raw
+    # bytes; download streams the tarball; restore (at create time) runs a
+    # one-shot pod that extracts into a fresh PVC.
+    # ------------------------------------------------------------------ #
+    async def _list_snapshots(self) -> list[SandboxSnapshot]:
+        return cast("list[SandboxSnapshot]", await asyncio.to_thread(self._sync_list_snapshots))
+
+    async def _get_snapshot(self, snapshot_id: str) -> SandboxSnapshot:
+        return await asyncio.to_thread(self._sync_get_snapshot, snapshot_id)
+
+    async def _snapshot_from_sandbox(
+        self,
+        payload: SandboxSnapshotCreate,
+        sandbox: Sandbox,
+    ) -> SandboxSnapshot:
+        return K8sSandboxSnapshot(
+            id=payload.id,
+            sandbox_id=sandbox.id,
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
+        )
+
+    async def _snapshot_from_file(
+        self,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        return K8sSandboxSnapshot(
+            id=payload.id,
+            sandbox_id=None,
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
+        )
+
+    async def _create_snapshot(
+        self,
+        snapshot: SandboxSnapshot,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        k8s_snapshot = cast(K8sSandboxSnapshot, snapshot)
+        if payload.sandbox_id is not None:
+            await asyncio.to_thread(self._sync_capture_snapshot, k8s_snapshot, payload.sandbox_id)
+        else:
+            assert payload.file_data is not None
+            await asyncio.to_thread(self._sync_import_snapshot, k8s_snapshot, payload.file_data)
+        return await self._get_snapshot(k8s_snapshot.id)
+
+    async def _delete_snapshot(self, snapshot_id: str) -> None:
+        await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
+
+    async def stream_snapshot(self, snapshot_id: str) -> Any:
+        """Stream the snapshot tarball (gzip) for download."""
+        return snapshot_store.stream_snapshot(self.snapshot_dir, snapshot_id)
 
     # ------------------------------------------------------------------ #
     # last_accessed_at derivation + lifecycle sweep.
@@ -554,12 +645,14 @@ class K8sSandboxService(SandboxService):
             raise SandboxNotFoundError(sandbox_id)
         return sandbox
 
-    def _sync_create_sandbox(self, sandbox: K8sSandbox) -> str:
+    def _sync_create_sandbox(self, sandbox: K8sSandbox, snapshot_id: str | None = None) -> str:
         template = self._sync_get_template(sandbox.sandbox_template_id)
         sandbox_id = _generate_sandbox_name()
         pvc_name = f"{sandbox_id}-data"
 
         self._create_pvc(pvc_name, self.namespace)
+        if snapshot_id is not None:
+            self._restore_snapshot_into_pvc(sandbox_id, pvc_name, snapshot_id, template.working_dir)
         self._create_service(sandbox_id, self.namespace, self.exposed_ports, self.service_type)
         self._create_deployment(
             sandbox_id=sandbox_id,
@@ -571,6 +664,81 @@ class K8sSandboxService(SandboxService):
             replicas=1,
         )
         return sandbox_id
+
+    def _restore_snapshot_into_pvc(
+        self, sandbox_id: str, pvc_name: str, snapshot_id: str, working_dir: str
+    ) -> None:
+        """Restore a snapshot tarball into a freshly created PVC.
+
+        Runs a one-shot pod that mounts the PVC and a hostPath of the snapshot
+        store, extracts the tarball into the working directory, then exits. The
+        pod is removed after completion. This is the Kubernetes analog of
+        creating a PVC from a VolumeSnapshot.
+        """
+        archive = snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
+        if not Path(archive).is_file():
+            raise SandboxSnapshotNotFoundError(snapshot_id)
+        pod_name = f"{sandbox_id}-restore"
+        pod = k8s_client.V1Pod(
+            metadata=k8s_client.V1ObjectMeta(
+                name=pod_name,
+                namespace=self.namespace,
+                labels={_LABEL_SANDBOX_ID: sandbox_id},
+            ),
+            spec=k8s_client.V1PodSpec(
+                restart_policy="Never",
+                volumes=[
+                    k8s_client.V1Volume(
+                        name="workspace",
+                        persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=pvc_name
+                        ),
+                    ),
+                    k8s_client.V1Volume(
+                        name="snapshots",
+                        host_path=k8s_client.V1HostPathVolumeSource(
+                            path=str(Path(self.snapshot_dir).resolve()),
+                            type="Directory",
+                        ),
+                    ),
+                ],
+                containers=[
+                    k8s_client.V1Container(
+                        name="restore",
+                        image="busybox:latest",
+                        command=["sh", "-c"],
+                        args=[
+                            f"mkdir -p {working_dir} && "
+                            f"tar -xzf /snapshots/{archive.name} -C {working_dir}"
+                        ],
+                        volume_mounts=[
+                            k8s_client.V1VolumeMount(name="workspace", mount_path=working_dir),
+                            k8s_client.V1VolumeMount(name="snapshots", mount_path="/snapshots"),
+                        ],
+                    )
+                ],
+            ),
+        )
+        self._core_api.create_namespaced_pod(namespace=self.namespace, body=pod)
+        # Wait for the restore pod to finish (best-effort, bounded).
+        self._wait_for_pod_completion(pod_name)
+        with contextlib.suppress(k8s_exc.ApiException):
+            self._core_api.delete_namespaced_pod(name=pod_name, namespace=self.namespace)
+
+    def _wait_for_pod_completion(self, pod_name: str, timeout: float = 120.0) -> None:
+        """Poll a pod until it reaches a terminal phase or *timeout* elapses."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                pod = self._core_api.read_namespaced_pod(name=pod_name, namespace=self.namespace)
+            except k8s_exc.ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            phase = getattr(pod.status, "phase", "") if pod.status else ""
+            if phase in ("Succeeded", "Failed"):
+                return
+            time.sleep(1)
 
     def _create_pvc(self, pvc_name: str, namespace: str) -> None:
         spec: dict[str, Any] = {
@@ -795,6 +963,101 @@ class K8sSandboxService(SandboxService):
                 name=pvc_name, namespace=self.namespace
             )
 
+    # ------------------------------------------------------------------ #
+    # Synchronous snapshot store calls (offloaded from the event loop).
+    # ------------------------------------------------------------------ #
+    def _sync_list_snapshots(self) -> list[K8sSandboxSnapshot]:
+        snapshots: list[K8sSandboxSnapshot] = []
+        for snap_id in snapshot_store.list_snapshot_ids(self.snapshot_dir):
+            snapshot = self._snapshot_from_store(snap_id)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return snapshots
+
+    def _sync_get_snapshot(self, snapshot_id: str) -> K8sSandboxSnapshot:
+        snapshot = self._snapshot_from_store(snapshot_id)
+        if snapshot is None:
+            raise SandboxSnapshotNotFoundError(snapshot_id) from None
+        return snapshot
+
+    def _snapshot_from_store(self, snapshot_id: str) -> K8sSandboxSnapshot | None:
+        """Build a snapshot model from a stored tarball, or ``None`` if absent."""
+        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
+            return None
+        created = snapshot_store.snapshot_created_at(self.snapshot_dir, snapshot_id)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return K8sSandboxSnapshot(
+            id=snapshot_id,
+            created_at=created or datetime.now(UTC),
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)),
+            size_bytes=size,
+            sandbox_id=None,  # source-sandbox is not recoverable from the tarball alone
+        )
+
+    def _sync_capture_snapshot(self, snapshot: K8sSandboxSnapshot, sandbox_id: str) -> None:
+        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot.id):
+            raise SandboxSnapshotConflictError(snapshot.id)
+        sandbox = self._sync_get_sandbox(sandbox_id)
+        template = self._sync_get_template(sandbox.sandbox_template_id)
+        working_dir = template.working_dir or "/home/openhands"
+        pvc_name = f"{sandbox_id}-data"
+        pod_name = f"{sandbox_id}-snapshot"
+        archive_name = snapshot_store.snapshot_path(self.snapshot_dir, snapshot.id).name
+        pod = k8s_client.V1Pod(
+            metadata=k8s_client.V1ObjectMeta(
+                name=pod_name,
+                namespace=self.namespace,
+                labels={_LABEL_SANDBOX_ID: sandbox_id},
+            ),
+            spec=k8s_client.V1PodSpec(
+                restart_policy="Never",
+                volumes=[
+                    k8s_client.V1Volume(
+                        name="workspace",
+                        persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=pvc_name
+                        ),
+                    ),
+                    k8s_client.V1Volume(
+                        name="snapshots",
+                        host_path=k8s_client.V1HostPathVolumeSource(
+                            path=str(Path(self.snapshot_dir).resolve()),
+                            type="DirectoryOrCreate",
+                        ),
+                    ),
+                ],
+                containers=[
+                    k8s_client.V1Container(
+                        name="snapshot",
+                        image="busybox:latest",
+                        command=["sh", "-c"],
+                        args=[f"tar -czf /snapshots/{archive_name} -C {working_dir} ."],
+                        volume_mounts=[
+                            k8s_client.V1VolumeMount(
+                                name="workspace", mount_path=working_dir, read_only=True
+                            ),
+                            k8s_client.V1VolumeMount(name="snapshots", mount_path="/snapshots"),
+                        ],
+                    )
+                ],
+            ),
+        )
+        self._core_api.create_namespaced_pod(namespace=self.namespace, body=pod)
+        self._wait_for_pod_completion(pod_name)
+        with contextlib.suppress(k8s_exc.ApiException):
+            self._core_api.delete_namespaced_pod(name=pod_name, namespace=self.namespace)
+
+    def _sync_import_snapshot(self, snapshot: K8sSandboxSnapshot, file_data: bytes) -> None:
+        try:
+            snapshot_store.import_snapshot(self.snapshot_dir, snapshot.id, file_data)
+        except FileExistsError as exc:
+            raise SandboxSnapshotConflictError(snapshot.id) from exc
+
+    def _sync_delete_snapshot(self, snapshot_id: str) -> None:
+        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
+            raise SandboxSnapshotNotFoundError(snapshot_id) from None
+        snapshot_store.delete_snapshot(self.snapshot_dir, snapshot_id)
+
 
 def _sanitize_name(template_id: str) -> str:
     """Convert a template id (image ref) into a valid Kubernetes object name.
@@ -844,7 +1107,7 @@ def _template_from_config_map(
         id=template_id,
         command=_parse_json_list(data.get(_CM_KEY_COMMAND)),
         initial_env=_parse_json_dict(data.get(_CM_KEY_INITIAL_ENV)),
-        working_dir=data.get(_CM_KEY_WORKING_DIR) or "/home/openhands/workspace",
+        working_dir=data.get(_CM_KEY_WORKING_DIR) or "/home/openhands",
         idle_pause_seconds=_parse_int(data.get(_CM_KEY_IDLE_PAUSE_SECONDS)),
         paused_delete_seconds=_parse_int(data.get(_CM_KEY_PAUSED_DELETE_SECONDS)),
         max_age_seconds=_parse_int(data.get(_CM_KEY_MAX_AGE_SECONDS)),

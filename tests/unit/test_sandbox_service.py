@@ -110,7 +110,7 @@ class _MemorySandboxService(SandboxService):
             desired_status=SandboxStatus.INACTIVE,
         )
 
-    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+    async def _create_sandbox(self, sandbox: Sandbox, *, snapshot_id: str | None = None) -> Sandbox:
         # Assign a generated id (mimics the provider generating one).
         generated_id = f"sb-{uuid.uuid4().hex[:8]}"
         created = sandbox.model_copy(update={"id": generated_id})
@@ -149,7 +149,7 @@ class _MemorySandboxService(SandboxService):
     ) -> SandboxSnapshot:
         return DockerSandboxSnapshot(
             id=payload.id,
-            image_id=f"img-{payload.id}",
+            archive_path=f"/snapshots/{payload.id}.tar.gz",
             sandbox_id=sandbox.id,
             download_url=f"/sandbox/sandbox-snapshots/{payload.id}/download",
         )
@@ -160,7 +160,7 @@ class _MemorySandboxService(SandboxService):
     ) -> SandboxSnapshot:
         return DockerSandboxSnapshot(
             id=payload.id,
-            image_id=f"img-{payload.id}",
+            archive_path=f"/snapshots/{payload.id}.tar.gz",
             sandbox_id=None,
             download_url=f"/sandbox/sandbox-snapshots/{payload.id}/download",
         )
@@ -959,7 +959,9 @@ async def test_unsupported_snapshot_service_raises_unsupported() -> None:
         def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
             raise NotImplementedError
 
-        async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+        async def _create_sandbox(
+            self, sandbox: Sandbox, *, snapshot_id: str | None = None
+        ) -> Sandbox:
             raise NotImplementedError
 
         async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:

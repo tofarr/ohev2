@@ -64,7 +64,7 @@ class _FakeSnapshotService(SandboxService):
             snapshot_mode=SnapshotMode.MANUAL,
         )
 
-    async def _create_sandbox(self, sandbox: Any) -> Any:
+    async def _create_sandbox(self, sandbox: Any, *, snapshot_id: str | None = None) -> Any:
         sandbox_id = self._next_sandbox_id()
         sandbox.id = sandbox_id
         self._sandboxes[sandbox_id] = sandbox
@@ -89,14 +89,14 @@ class _FakeSnapshotService(SandboxService):
     async def _snapshot_from_sandbox(self, payload: SandboxSnapshotCreate, sandbox: Any) -> Any:
         return DockerSandboxSnapshot(
             id=payload.id,
-            image_id=f"image-{payload.id}",
+            archive_path=f"/snapshots/{payload.id}.tar.gz",
             sandbox_id=sandbox.id,
         )
 
     async def _snapshot_from_file(self, payload: SandboxSnapshotCreate) -> Any:
         return DockerSandboxSnapshot(
             id=payload.id,
-            image_id=f"image-{payload.id}",
+            archive_path=f"/snapshots/{payload.id}.tar.gz",
             sandbox_id=None,
         )
 
@@ -281,7 +281,7 @@ class TestCrud:
         )
         resp = await client.get("/sandbox/sandbox-snapshots/snap-a/download")
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "application/x-tar"
+        assert resp.headers["content-type"] == "application/gzip"
         assert "attachment" in resp.headers["content-disposition"]
 
     async def test_download_missing_returns_404(self, client: AsyncClient) -> None:

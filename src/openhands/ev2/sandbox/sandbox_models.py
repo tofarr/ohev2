@@ -34,6 +34,11 @@ class SandboxStatus(enum.StrEnum):
     ACTIVE = "active"
     DEACTIVATING = "deactivating"
     DELETING = "deleting"
+    # A snapshot of the sandbox workspace is being captured. While in this
+    # state the sandbox may not be started/activated — the workspace must be
+    # quiescent for a consistent tarball. Providers transition inactive ->
+    # snapshotting -> inactive around the capture.
+    SNAPSHOTTING = "snapshotting"
     ERROR = "error"
 
 
@@ -104,7 +109,7 @@ class SandboxTemplate(DiscriminatedUnionMixin, ABC):
     initial_env: dict[str, str] = Field(
         default_factory=dict, description="Initial Environment Variables"
     )
-    working_dir: str = "/home/openhands/workspace"
+    working_dir: str = "/home/openhands"
     idle_pause_seconds: int | None = Field(
         default=None, description="Idle time before a sandbox should be automatically paused."
     )
@@ -192,14 +197,15 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
 
 
 class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
-    """A point-in-time snapshot of a sandbox.
+    """A point-in-time snapshot of a sandbox workspace.
 
-    Snapshots are created either from an existing sandbox (``sandbox_id``) or
-    by importing an uploaded snapshot file (``schema_type``). Each snapshot
-    carries an id, the time it was created, and a download URL the caller can
-    use to fetch the snapshot artifact. Provider-specific subclasses (e.g.
-    :class:`DockerSandboxSnapshot`) carry implementation detail such as the
-    backing image id.
+    A snapshot is a gzip-compressed tarball of the sandbox workspace directory
+    captured while the sandbox is paused (``SNAPSHOTTING`` status), analogous
+    to a Kubernetes VolumeSnapshot of a PVC. Snapshots are created either from
+    an existing sandbox (``sandbox_id``) or by importing an uploaded tarball.
+    Each snapshot carries an id, the time it was created, the size of the
+    stored tarball, and a download URL the caller can use to fetch the
+    artifact. Provider-specific subclasses may carry implementation detail.
     """
 
     id: str
@@ -211,4 +217,15 @@ class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
     download_url: str | None = Field(
         default=None,
         description="URL to download the snapshot artifact, when available.",
+    )
+    sandbox_id: str | None = Field(
+        default=None,
+        description=(
+            "Source sandbox the snapshot was created from; null for snapshots "
+            "imported from an uploaded tarball."
+        ),
+    )
+    size_bytes: int | None = Field(
+        default=None,
+        description="Size of the stored tarball artifact in bytes, when known.",
     )

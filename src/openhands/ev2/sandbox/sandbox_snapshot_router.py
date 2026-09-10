@@ -13,8 +13,8 @@ accepts a multipart form with an optional ``file``: when ``sandbox_id`` is
 present the service snapshots an existing sandbox; when ``file`` is present
 together with ``schema_type`` the service imports the uploaded artifact.
 
-The download endpoint streams the snapshot artifact (``docker save`` for the
-Docker implementation) and is the URL surfaced as ``download_url`` on the
+The download endpoint streams the snapshot artifact (a gzip-compressed tarball
+of the sandbox workspace) and is the URL surfaced as ``download_url`` on the
 snapshot read model.
 """
 
@@ -232,8 +232,8 @@ async def download_sandbox_snapshot(
     stream = await service.stream_snapshot(snapshot_id)
     return StreamingResponse(
         stream,
-        media_type="application/x-tar",
-        headers={"Content-Disposition": f'attachment; filename="{snapshot_id}.tar"'},
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{snapshot_id}.tar.gz"'},
     )
 
 

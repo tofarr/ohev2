@@ -286,12 +286,14 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         The sandbox ``id`` is assigned by the provider during creation; the
         pre-persistence model built by ``_sandbox_from_create`` is checked
         against ``perm_filter`` (the principal's create scope) before the
-        backing compute is started.
+        backing compute is started. When ``payload.snapshot_id`` is set the
+        provider restores that snapshot's workspace into the new sandbox
+        before starting it.
         """
         sandbox = self._sandbox_from_create(payload)
         if not perm_filter.matches(sandbox):
             raise SandboxPermissionScopeError(payload.sandbox_template_id)
-        return await self._create_sandbox(sandbox)
+        return await self._create_sandbox(sandbox, snapshot_id=payload.snapshot_id)
 
     async def update_sandbox(
         self,
@@ -538,8 +540,14 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         """
 
     @abstractmethod
-    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
-        """Persist a freshly-built sandbox, assign its id, and start backing compute."""
+    async def _create_sandbox(self, sandbox: Sandbox, *, snapshot_id: str | None = None) -> Sandbox:
+        """Persist a freshly-built sandbox, assign its id, and start backing compute.
+
+        When *snapshot_id* is set, restore that snapshot's workspace contents
+        into the new sandbox before starting it (analogous to creating a PVC
+        from a VolumeSnapshot). Providers that do not support snapshots raise
+        :class:`SandboxSnapshotUnsupportedError` when a snapshot id is given.
+        """
 
     @abstractmethod
     async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:

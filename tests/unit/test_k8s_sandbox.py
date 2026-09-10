@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -77,7 +78,7 @@ def test_k8s_template_defaults() -> None:
     template = K8sSandboxTemplate(id="ghcr.io/org/agent-server:latest")
     assert template.command is None
     assert template.initial_env == {}
-    assert template.working_dir == "/home/openhands/workspace"
+    assert template.working_dir == "/home/openhands"
     assert template.idle_pause_seconds is None
     assert template.paused_delete_seconds is None
     assert template.max_age_seconds is None
@@ -154,7 +155,7 @@ def _config_map(
         data=data
         or {
             "image": image,
-            _CM_KEY_WORKING_DIR: "/home/openhands/workspace",
+            _CM_KEY_WORKING_DIR: "/home/openhands",
             _CM_KEY_IDLE_PAUSE_SECONDS: "300",
             _CM_KEY_PAUSED_DELETE_SECONDS: "600",
             _CM_KEY_MAX_AGE_SECONDS: "3600",
@@ -178,7 +179,7 @@ def test_template_from_config_map_returns_template() -> None:
     assert template.max_age_seconds == 3600
     assert template.max_memory == 536870912
     assert template.initial_env == {"FOO": "bar"}
-    assert template.working_dir == "/home/openhands/workspace"
+    assert template.working_dir == "/home/openhands"
     assert len(template.exposed_ports) == 1
     assert template.exposed_ports[0].name == "agent_server"
     assert template.snapshot_mode is SnapshotMode.UNSUPPORTED
@@ -320,7 +321,7 @@ def _deployment(
                             image=image,
                             volume_mounts=[
                                 k8s_client.V1VolumeMount(
-                                    name="workspace", mount_path="/home/openhands/workspace"
+                                    name="workspace", mount_path="/home/openhands"
                                 )
                             ],
                         )
@@ -351,7 +352,7 @@ def test_sandbox_from_deployment_running() -> None:
     assert sandbox.desired_status is SandboxStatus.ACTIVE
     assert sandbox.pvc_name == "sb-1-data"
     assert [u.name for u in (sandbox.exposed_urls or [])] == ["agent_server", "vscode"]
-    assert sandbox.volume_mounts[0].container_path == "/home/openhands/workspace"
+    assert sandbox.volume_mounts[0].container_path == "/home/openhands"
 
 
 def test_sandbox_from_deployment_zero_replicas_is_inactive() -> None:
@@ -482,6 +483,7 @@ class _FakeCoreV1Api:
         self.config_maps: dict[str, k8s_client.V1ConfigMap] = {}
         self.pvcs: dict[str, k8s_client.V1PersistentVolumeClaim] = {}
         self.services: dict[str, k8s_client.V1Service] = {}
+        self.pods: dict[str, k8s_client.V1Pod] = {}
 
     def list_namespaced_config_map(
         self, namespace: str, label_selector: str | None = None, **_: Any
@@ -540,6 +542,40 @@ class _FakeCoreV1Api:
         if name not in self.services:
             raise _api_exception(404)
         del self.services[name]
+
+    def create_namespaced_pod(self, namespace: str, body: k8s_client.V1Pod) -> k8s_client.V1Pod:
+        name = body.metadata.name
+        if name in self.pods:
+            raise _api_exception(409)
+        # Mark pod as immediately Succeeded for snapshot/restore one-shot pods.
+        body.status = k8s_client.V1PodStatus(phase="Succeeded")
+        self.pods[name] = body
+        # Simulate snapshot pods that write a tarball to the snapshots volume.
+        spec = getattr(body, "spec", None)
+        if spec and spec.containers:
+            args = getattr(spec.containers[0], "args", None) or []
+            if args and any("tar -czf /snapshots/" in str(a) for a in args):
+                for vol in getattr(spec, "volumes", None) or []:
+                    if vol.name == "snapshots" and vol.host_path:
+                        snap_dir = Path(vol.host_path.path)
+                        snap_dir.mkdir(parents=True, exist_ok=True)
+                        for a in args:
+                            s = str(a)
+                            if "tar -czf /snapshots/" in s:
+                                fname = s.split("/snapshots/")[1].split()[0]
+                                (snap_dir / fname).write_bytes(b"fake-tarball")
+        return body
+
+    def read_namespaced_pod(self, name: str, namespace: str) -> k8s_client.V1Pod:
+        try:
+            return self.pods[name]
+        except KeyError:
+            raise _api_exception(404) from None
+
+    def delete_namespaced_pod(self, name: str, namespace: str) -> None:
+        if name not in self.pods:
+            raise _api_exception(404)
+        del self.pods[name]
 
 
 class _FakeAppsV1Api:
@@ -1077,7 +1113,7 @@ def test_service_defaults() -> None:
     assert service.image_pull_policy == "IfNotPresent"
     assert service.pvc_size == "10Gi"
     assert service.service_type == "ClusterIP"
-    assert service.snapshot_mode is SnapshotMode.UNSUPPORTED
+    assert service.snapshot_mode is SnapshotMode.MANUAL
     assert service.sandbox_lifecycle_interval == 60.0
     assert service.agent_server_probe_timeout == 2.0
 
@@ -1100,14 +1136,189 @@ def test_service_config_override() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_snapshots_unsupported_by_default() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotUnsupportedError
+async def test_snapshots_supported_by_default(tmp_path: Path) -> None:
+    """K8s snapshots use the tarball store and should not raise unsupported."""
+    from openhands.ev2.util import snapshot_store
 
     service = _make_service()
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._list_snapshots()
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._get_snapshot("x")
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
+    snapshots = await service._list_snapshots()
+    assert {s.id for s in snapshots} == {"snap-1"}
+    snapshot = await service._get_snapshot("snap-1")
+    assert snapshot.id == "snap-1"
+
+
+def test_k8s_sync_get_snapshot_not_found_raises(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
+
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    with pytest.raises(SandboxSnapshotNotFoundError):
+        service._sync_get_snapshot("nope")
+
+
+def test_k8s_sync_list_snapshots_empty(tmp_path: Path) -> None:
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    assert service._sync_list_snapshots() == []
+
+
+def test_k8s_sync_import_and_delete_snapshot(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandboxSnapshot
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.util import snapshot_store
+
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snap = K8sSandboxSnapshot(
+        id="snap-import",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-import")),
+    )
+    service._sync_import_snapshot(snap, b"dummy-data")
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, "snap-import")
+    service._sync_delete_snapshot("snap-import")
+    assert not snapshot_store.snapshot_exists(service.snapshot_dir, "snap-import")
+    with pytest.raises(SandboxSnapshotNotFoundError):
+        service._sync_delete_snapshot("snap-import")
+
+
+def test_k8s_sync_capture_snapshot_conflict_raises(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandboxSnapshot
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
+    from openhands.ev2.util import snapshot_store
+
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snapshot_store.import_snapshot(service.snapshot_dir, "snap-dup", b"dummy")
+    snap = K8sSandboxSnapshot(
+        id="snap-dup",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-dup")),
+    )
+    with pytest.raises(SandboxSnapshotConflictError):
+        service._sync_capture_snapshot(snap, "sb-1")
+
+
+def test_k8s_sync_capture_snapshot_creates_pod(tmp_path: Path) -> None:
+    """Snapshot capture creates a one-shot pod and cleans it up."""
+    from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandboxSnapshot
+    from openhands.ev2.util import snapshot_store
+
+    fake = _FakeKube()
+    _add_template(fake, "img:1", working_dir="/work")
+    # Create a sandbox deployment so _sync_get_sandbox can find it.
+    fake.apps.deployments["sb-1"] = _deployment("sb-1", image="img:1")
+    service = _make_service(fake)
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snap = K8sSandboxSnapshot(
+        id="snap-cap",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-cap")),
+    )
+    service._sync_capture_snapshot(snap, "sb-1")
+    # The snapshot pod was created and then cleaned up.
+    assert "sb-1-snapshot" not in fake.core.pods
+
+
+def test_k8s_sync_import_snapshot_conflict_raises(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandboxSnapshot
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
+    from openhands.ev2.util import snapshot_store
+
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snapshot_store.import_snapshot(service.snapshot_dir, "snap-exist", b"dummy")
+    snap = K8sSandboxSnapshot(
+        id="snap-exist",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-exist")),
+    )
+    with pytest.raises(SandboxSnapshotConflictError):
+        service._sync_import_snapshot(snap, b"more-data")
+
+
+def test_k8s_sync_create_sandbox_with_snapshot_restores_pvc(tmp_path: Path) -> None:
+    """Creating a sandbox from a snapshot runs a restore pod before the deployment."""
+    from openhands.ev2.util import snapshot_store
+
+    fake = _FakeKube()
+    _add_template(fake, "img:1", working_dir="/work")
+    service = _make_service(fake)
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    snapshot_store.import_snapshot(service.snapshot_dir, "snap-restore", b"dummy")
+    sandbox = K8sSandbox(
+        sandbox_template_id="img:1",
+        status=SandboxStatus.INACTIVE,
+        desired_status=SandboxStatus.INACTIVE,
+    )
+    sandbox_id = service._sync_create_sandbox(sandbox, snapshot_id="snap-restore")
+    # Restore pod was created and cleaned up.
+    assert f"{sandbox_id}-restore" not in fake.core.pods
+    # PVC and deployment were created.
+    assert f"{sandbox_id}-data" in fake.core.pvcs
+    assert sandbox_id in fake.apps.deployments
+
+
+def test_k8s_sync_create_sandbox_with_missing_snapshot_raises(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
+
+    fake = _FakeKube()
+    _add_template(fake, "img:1")
+    service = _make_service(fake)
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    sandbox = K8sSandbox(
+        sandbox_template_id="img:1",
+        status=SandboxStatus.INACTIVE,
+        desired_status=SandboxStatus.INACTIVE,
+    )
+    with pytest.raises(SandboxSnapshotNotFoundError):
+        service._sync_create_sandbox(sandbox, snapshot_id="nope")
+
+
+@pytest.mark.asyncio
+async def test_k8s_snapshot_from_sandbox_and_file(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotCreate
+
+    service = _make_service()
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    payload_sb = SandboxSnapshotCreate(id="snap-new", sandbox_id="sb-1")
+    sandbox = K8sSandbox(
+        id="sb-1",
+        sandbox_template_id="img:1",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+    )
+    result = await service._snapshot_from_sandbox(payload_sb, sandbox)
+    assert result.id == "snap-new"
+    assert result.archive_path.endswith("snap-new.tar.gz")
+    payload_file = SandboxSnapshotCreate.model_construct(id="snap-file")
+    result2 = await service._snapshot_from_file(payload_file)
+    assert result2.id == "snap-file"
+    assert result2.sandbox_id is None
+
+
+@pytest.mark.asyncio
+async def test_k8s_create_and_delete_snapshot_through_service(tmp_path: Path) -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandboxSnapshot
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotCreate
+    from openhands.ev2.util import snapshot_store
+
+    fake = _FakeKube()
+    _add_template(fake, "img:1", working_dir="/work")
+    fake.apps.deployments["sb-1"] = _deployment("sb-1", image="img:1")
+    service = _make_service(fake)
+    service.snapshot_dir = str(tmp_path / "snapshots")
+    payload = SandboxSnapshotCreate(id="snap-svc", sandbox_id="sb-1")
+    snap = K8sSandboxSnapshot(
+        id="snap-svc",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-svc")),
+    )
+    await service._create_snapshot(snap, payload)
+    # The snapshot pod ran and was cleaned up.
+    assert "sb-1-snapshot" not in fake.core.pods
+    await service.delete_snapshot("snap-svc")
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
+
+    with pytest.raises(SandboxSnapshotNotFoundError):
+        await service.get_snapshot("snap-svc")
 
 
 # --------------------------------------------------------------------------- #
