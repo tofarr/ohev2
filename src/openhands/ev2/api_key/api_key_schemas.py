@@ -36,6 +36,14 @@ class ApiKeyCreate(BaseModel):
         default=None,
         description="ISO 8601; null means the key never expires on its own.",
     )
+    role_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Optional role restricting this key's effective permissions. When set, "
+            "the role's per-entity policies are ANDed (intersected) with the "
+            "principal's user-role policies, so the key can only narrow access."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -62,6 +70,13 @@ class ApiKeyUpdate(BaseModel):
     expires_at: datetime | None = Field(
         default=None,
         description="ISO 8601; null means the key never expires on its own.",
+    )
+    role_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Optional role restricting this key's effective permissions. Pass null "
+            "to clear the restriction (revert to the principal's baseline roles)."
+        ),
     )
 
     @field_validator("name")
@@ -91,6 +106,7 @@ class ApiKeyRead(BaseModel):
     name: str | None
     enabled: bool
     expires_at: datetime | None
+    role_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -120,6 +136,10 @@ class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
         default=None, description="Case-insensitive prefix substring (e.g. 'oh_abcd')."
     )
     creator_id__eq: uuid.UUID | None = Field(default=None, description="Exact creator id match.")
+    role_id__eq: uuid.UUID | None = Field(
+        default=None,
+        description="Exact role_id match; pass a UUID to find keys restricted to that role.",
+    )
     enabled__eq: bool | None = Field(default=None, description="Exact enabled match.")
     expires_at__gte: datetime | None = Field(
         default=None, description="ISO 8601; keys expiring at or after."

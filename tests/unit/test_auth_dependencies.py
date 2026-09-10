@@ -130,6 +130,19 @@ async def _assign_role(
     return role
 
 
+async def _create_role(
+    session,
+    *,
+    name: str,
+    **permissions: Any,
+) -> Role:
+    """Create a standalone Role not assigned to any user (a key-restricting role)."""
+    role = Role(name=name, **permissions)
+    session.add(role)
+    await session.flush()
+    return role
+
+
 # ---------------------------------------------------------------------- #
 # depends_access_token / depends_user_id.
 # ---------------------------------------------------------------------- #
@@ -499,6 +512,125 @@ async def test_depends_permissions_entity_column_for_arbitrary_resource(session,
     filt = await guard(request, session, token)
 
     assert isinstance(filt, AllSearchFilter)
+
+
+# ---------------------------------------------------------------------- #
+# API key role restriction (AND semantics).
+# ---------------------------------------------------------------------- #
+
+
+def _api_key_token(user_id: uuid.UUID, role_id: uuid.UUID | None) -> AuthToken:
+    """An AuthToken for an API_KEY credential, optionally carrying a role_id."""
+    return AuthToken(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        enabled=True,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        token_type=TokenType.API_KEY,
+        role_id=role_id,
+    )
+
+
+async def test_api_key_no_role_id_keeps_user_filter(session, user_id):
+    """An API key without role_id uses the user's roles unchanged (no AND)."""
+    await _seed_user(session, user_id, "apikey-norole-user")
+    await _assign_role(session, user_id=user_id, name="admin-norole", user_permission=Permitted())
+
+    request = _make_request()
+    token = _api_key_token(user_id, role_id=None)
+
+    guard = depends_permissions(User, Action.SEARCH)
+    filt = await guard(request, session, token)
+
+    assert isinstance(filt, AllSearchFilter)
+
+
+async def test_api_key_readonly_role_narrows_permitted_user(session, user_id):
+    """A ReadOnly restricting role ANDs with a Permitted user role.
+
+    The user's Permitted grants All; the key's ReadOnly grants All for SEARCH
+    but the AND is still All. For UPDATE, the key's ReadOnly denies, so the
+    AND yields None (403).
+    """
+    await _seed_user(session, user_id, "apikey-ro-user")
+    await _assign_role(session, user_id=user_id, name="user-admin", user_permission=Permitted())
+    restricting = await _create_role(session, name="key-readonly", user_permission=ReadOnly())
+
+    request = _make_request()
+    token = _api_key_token(user_id, role_id=restricting.id)
+
+    guard_read = depends_permissions(User, Action.SEARCH)
+    filt_read = await guard_read(request, session, token)
+    assert isinstance(filt_read, AllSearchFilter)
+
+    # Fresh request so the restricting-role cache does not carry over.
+    request2 = _make_request()
+    token2 = _api_key_token(user_id, role_id=restricting.id)
+    guard_update = depends_permissions(User, Action.UPDATE)
+    with pytest.raises(HTTPException) as exc:
+        await guard_update(request2, session, token2)
+    assert exc.value.status_code == 403
+
+
+async def test_api_key_denied_role_overrides_permitted_user(session, user_id):
+    """A Denied restricting role ANDs to None even when the user is Permitted."""
+    await _seed_user(session, user_id, "apikey-denied-user")
+    await _assign_role(session, user_id=user_id, name="user-admin-d", user_permission=Permitted())
+    restricting = await _create_role(session, name="key-denied", user_permission=Denied())
+
+    request = _make_request()
+    token = _api_key_token(user_id, role_id=restricting.id)
+
+    guard = depends_permissions(User, Action.SEARCH)
+    with pytest.raises(HTTPException) as exc:
+        await guard(request, session, token)
+    assert exc.value.status_code == 403
+
+
+async def test_api_key_permitted_role_cannot_widen_readonly_user(session, user_id):
+    """A Permitted restricting role cannot widen a ReadOnly user.
+
+    The user's ReadOnly grants All for SEARCH but None for UPDATE; the key's
+    Permitted is ANDed, so UPDATE stays None (All AND None = None).
+    """
+    await _seed_user(session, user_id, "apikey-widen-user")
+    await _assign_role(session, user_id=user_id, name="user-readonly", user_permission=ReadOnly())
+    restricting = await _create_role(session, name="key-permitted", user_permission=Permitted())
+
+    request = _make_request()
+    token = _api_key_token(user_id, role_id=restricting.id)
+
+    guard_search = depends_permissions(User, Action.SEARCH)
+    filt = await guard_search(request, session, token)
+    assert isinstance(filt, AllSearchFilter)
+
+    request2 = _make_request()
+    token2 = _api_key_token(user_id, role_id=restricting.id)
+    guard_create = depends_permissions(User, Action.CREATE)
+    with pytest.raises(HTTPException) as exc:
+        await guard_create(request2, session, token2)
+    assert exc.value.status_code == 403
+
+
+async def test_api_key_role_restriction_caches_role_per_request(session, user_id):
+    """The restricting role is loaded once and cached on request.state."""
+    from openhands.ev2.auth.auth_dependencies import _RESTRICTING_ROLE_KEY
+
+    await _seed_user(session, user_id, "apikey-cache-user")
+    await _assign_role(session, user_id=user_id, name="user-admin-c", user_permission=Permitted())
+    restricting = await _create_role(session, name="key-readonly-c", user_permission=ReadOnly())
+
+    request = _make_request()
+    token = _api_key_token(user_id, role_id=restricting.id)
+
+    guard = depends_permissions(User, Action.SEARCH)
+    await guard(request, session, token)
+
+    cached = getattr(request.state, _RESTRICTING_ROLE_KEY)
+    assert cached is not None
+    assert cached.id == restricting.id
 
 
 # ---------------------------------------------------------------------- #

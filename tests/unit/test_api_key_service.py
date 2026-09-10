@@ -25,6 +25,7 @@ from openhands.ev2.api_key.api_key_service import (
 )
 from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import (
     AllSearchFilter,
@@ -123,6 +124,28 @@ class TestCreateApiKey:
         scoped = ApiKeyService(session, _UserScopedFilter(creator_id=uid))
         _key, row = await scoped.create(ApiKeyCreate(name="own"), creator_id=uid)
         assert row.creator_id == uid
+
+    async def test_create_with_role_id(self, service: ApiKeyService, session: AsyncSession) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        role = Role(name=f"restrict-{uid.hex[:8]}")
+        session.add(role)
+        await session.flush()
+        raw_key, row = await service.create(
+            ApiKeyCreate(name="restricted", role_id=role.id), creator_id=uid
+        )
+        assert row.role_id == role.id
+        # The authenticated token carries the restricting role_id.
+        auth = await TokenService(session).authenticate(raw_key)
+        assert auth.role_id == role.id
+
+    async def test_create_without_role_id_defaults_none(
+        self, service: ApiKeyService, session: AsyncSession
+    ) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        _raw, row = await service.create(ApiKeyCreate(name="no-role"), creator_id=uid)
+        assert row.role_id is None
 
 
 class TestGetApiKey:
@@ -272,6 +295,17 @@ class TestUpdateApiKey:
     async def test_update_missing_raises(self, service: ApiKeyService) -> None:
         with pytest.raises(ApiKeyNotFoundError):
             await service.update(uuid.uuid4(), ApiKeyUpdate(name="x"))
+
+    async def test_update_role_id(self, service: ApiKeyService, session: AsyncSession) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        _t, key = await service.create(ApiKeyCreate(name="key"), creator_id=uid)
+        assert key.role_id is None
+        role = Role(name=f"upd-restrict-{uid.hex[:8]}")
+        session.add(role)
+        await session.flush()
+        updated = await service.update(key.id, ApiKeyUpdate(role_id=role.id))
+        assert updated.role_id == role.id
 
 
 class TestDeleteApiKey:

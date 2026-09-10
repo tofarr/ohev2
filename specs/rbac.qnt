@@ -100,6 +100,29 @@ module rbac {
         }
     }
 
+  // Combine two filters with AND semantics (conjunction/intersection).
+  // Used when an API key carries a restricting role: the role's filter is
+  // ANDed with the user-roles filter so the key can only narrow access.
+  // All AND x = x; None AND x = None; Custom AND Custom = Custom;
+  // AclFilter AND All = AclFilter; AclFilter AND Custom = Custom.
+  pure def andFilters(f1: Filter, f2: Filter): Filter =
+    match f1 {
+      | All => f2
+      | None => None
+      | AclFilter => match f2 {
+          | All => AclFilter
+          | None => None
+          | Custom => Custom
+          | AclFilter => Custom
+        }
+      | Custom => match f2 {
+          | All => Custom
+          | None => None
+          | Custom => Custom
+          | AclFilter => Custom
+        }
+    }
+
   // Get all roles assigned to a user.
   pure def rolesForUser(userId: str, rs: Set[Role], urs: Set[UserRole]): Set[Role] =
     rs.filter(r => urs.exists(ur => ur.userId == userId and ur.roleId == r.id))
@@ -111,6 +134,27 @@ module rbac {
     rolesForUser(userId, rs, urs).fold(None, (acc, r) =>
       orFilters(acc, permissionToFilter(getPermission(r, entity), act))
     )
+
+  // Compute the effective filter when the principal authenticates via an API
+  // key with a restricting roleId. The user-roles filter (OR of all user
+  // roles) is ANDed (intersected) with the restricting role's filter, so the
+  // key can only narrow — never widen — the principal's access. An empty
+  // keyRoleId means no restriction (the key carries no role).
+  pure def effectiveFilterWithApiKey(userId: str, entity: str, act: str,
+                                    keyRoleId: str,
+                                    rs: Set[Role], urs: Set[UserRole]): Filter =
+    if (keyRoleId == "")
+      effectiveFilter(userId, entity, act, rs, urs)
+    else
+      andFilters(
+        effectiveFilter(userId, entity, act, rs, urs),
+        rs.fold(None, (acc, r) =>
+          if (r.id == keyRoleId)
+            orFilters(acc, permissionToFilter(getPermission(r, entity), act))
+          else
+            acc
+        )
+      )
 
   // Create a role.
   action createRole(r: Role): bool = all {
@@ -449,6 +493,116 @@ module rbac {
       .then(assignRole("u2", "r1"))
       .then(all {
         assert(userRoles.filter(ur => ur.roleId == "r1").size() == 2),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // ------------------------------------------------------------------ #
+  // API key role restriction (AND semantics).
+  // An API key with a restricting role ANDs that role's filter with the
+  // user-roles filter, so the key can only narrow access.
+  // ------------------------------------------------------------------ #
+
+  // No restricting role: the key's effective filter equals the user's.
+  run apiKeyNoRoleEqualsUserFilter = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "", roles, userRoles) == All),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "", roles, userRoles) == All),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Permitted user AND Permitted key-role = All (no narrowing).
+  run apiKeyPermittedAndPermittedIsAll = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == All),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Permitted user AND ReadOnly key-role = All for read, None for create.
+  // The key narrows create access even though the user's own role permits it.
+  run apiKeyReadOnlyNarrowsCreate = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> ReadOnly) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == All),
+        assert(effectiveFilterWithApiKey("u1", "user", "search", "rk", roles, userRoles) == All),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "rk", roles, userRoles) == None),
+        assert(effectiveFilterWithApiKey("u1", "user", "update", "rk", roles, userRoles) == None),
+        assert(effectiveFilterWithApiKey("u1", "user", "delete", "rk", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Permitted user AND Denied key-role = None for all actions.
+  // The key's deny policy overrides the user's permit (AND with None = None).
+  run apiKeyDeniedOverridesPermitted = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> Denied) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == None),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "rk", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // ReadOnly user AND Permitted key-role = ReadOnly (the key cannot widen).
+  // The user's ReadOnly limits read to All but create to None; the key's
+  // Permitted is ANDed, so create stays None (All AND None = None).
+  run apiKeyPermittedCannotWidenReadOnly = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> ReadOnly) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == All),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "rk", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // Denied user AND Permitted key-role = None (AND with None = None).
+  // The user's deny cannot be widened by the key's permit.
+  run apiKeyPermittedCannotWidenDenied = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Denied) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> Permitted) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == None),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "rk", roles, userRoles) == None),
+        roles' = roles,
+        userRoles' = userRoles,
+      })
+  }
+
+  // ACL key-role narrows a Permitted user to the ACL filter for read.
+  run apiKeyAclNarrowsPermitted = {
+    init
+      .then(createRole({ id: "r1", permissions: Map("user" -> Permitted) }))
+      .then(createRole({ id: "rk", permissions: Map("user" -> AclPerm(Map("read" -> Set("u2")))) }))
+      .then(assignRole("u1", "r1"))
+      .then(all {
+        assert(effectiveFilterWithApiKey("u1", "user", "read", "rk", roles, userRoles) == AclFilter),
+        assert(effectiveFilterWithApiKey("u1", "user", "create", "rk", roles, userRoles) == None),
         roles' = roles,
         userRoles' = userRoles,
       })

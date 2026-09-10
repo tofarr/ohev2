@@ -90,6 +90,12 @@ class AuthToken(BaseModel):
     # API keys). Carried in the JWE ``scp`` claim so the UserInfo endpoint and
     # other consumers can gate claims without re-decrypting.
     scopes: frozenset[str] = frozenset()
+    # For API_KEY tokens: the optional role restricting the key's effective
+    # permissions. When set, the role's per-entity policies are ANDed
+    # (intersected) with the principal's user-role policies, so the key can
+    # only ever reduce access. None for non-API_KEY tokens and API keys
+    # without a restricting role.
+    role_id: uuid.UUID | None = None
 
 
 class ApiKey(Base):
@@ -100,7 +106,10 @@ class ApiKey(Base):
     a SHA-256 ``key_hash`` of the raw value (looked up on authentication) and a
     non-secret ``prefix`` (the first characters of the raw key) so listings can
     identify a key without exposing the secret. A key whose hash has no live,
-    enabled, unexpired row is rejected on authentication.
+    enabled, unexpired row is rejected on authentication. An optional ``role_id``
+    restricts the key's effective permissions: when set, the role's per-entity
+    policies are ANDed (intersected) with the principal's user-role policies at
+    authorization time, so the key can only narrow — never widen — access.
     """
 
     __tablename__ = "api_keys"
@@ -122,6 +131,17 @@ class ApiKey(Base):
     )
     name: Mapped[str | None] = mapped_column(default=None, nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # Optional role restricting this key's effective permissions. When set, the
+    # role's per-entity policies are ANDed (intersected) with the principal's
+    # user-role policies at authorization time, so a key can only narrow access.
+    # ondelete SET NULL so deleting the role widens the key back to the user's
+    # baseline permissions rather than orphaning it.
+    role_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("roles.id", ondelete="SET NULL"),
+        default=None,
+        nullable=True,
+        index=True,
+    )
     expires_at: Mapped[datetime | None] = mapped_column(
         _TZ,
         default=None,

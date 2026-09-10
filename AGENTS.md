@@ -248,6 +248,7 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
     `total_duration_ms` sums + `invocations` counts, gated by
     `mcp_aggregated_usage_permission`).
 * Authorization checks live in services (not just routers) — defense in depth.
+* **API key role restriction.** An `ApiKey` carries an optional `role_id` (FK → `roles.id`, `ondelete=SET NULL`). When set, the restricting role’s per-entity permission filter is ANDed (intersected) with the principal’s user-roles OR filter in `_resolve_column_filter` / `_narrow_with_api_key_role`, so the key can only **narrow** — never widen — the principal’s access. A `NULL`/deny policy on the restricting role yields `None` (403, fail-closed). Deleting the restricting role SET NULLs `role_id` so the key widens back to baseline at authenticate time; a rare race (role deleted between authenticate and authz) fails closed (deny). The Quint spec mirrors this in `effectiveFilterWithApiKey` / `andFilters` (`specs/rbac.qnt`).
 * **Every route is protected by an auth dependency.** Each registered API route
   must transitively depend on a protecting dependency from `auth_dependencies`
   — `depends_access_token`, `depends_user_id`, `depends_role_ids`,
