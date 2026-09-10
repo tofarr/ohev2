@@ -16,8 +16,9 @@
 
 module role {
   // Permission policies. Mirrors security_models.py: Permitted grants all,
-  // Denied grants none, ReadOnly grants read/search only.
-  type Permission = Permitted | Denied | ReadOnly
+  // Denied grants none, ReadOnly grants read/search only, ACLPermission grants
+  // access to a bounded set of item ids per action.
+  type Permission = Permitted | Denied | ReadOnly | AclPerm(str -> Set[str])
 
   // A role bundles a name and per-entity permission policies.
   // The map keys are entity names (e.g. "user", "role", "api_key").
@@ -62,6 +63,8 @@ module role {
       | Permitted => true
       | Denied => false
       | ReadOnly => act == "read" or act == "search"
+      | AclPerm(ids) =>
+          ids.keys().contains(act) and ids.get(act).size() > 0
     }
 
   // Create a role; id and name must not already exist, name must be non-empty.
