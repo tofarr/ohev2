@@ -70,13 +70,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -105,13 +105,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -140,13 +140,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -173,13 +173,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -204,13 +204,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -244,13 +244,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -274,7 +274,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -301,7 +301,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -459,13 +459,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -484,7 +484,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -518,13 +518,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -548,13 +548,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -585,13 +585,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -657,13 +657,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
@@ -686,13 +686,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -749,13 +749,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -809,13 +809,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -850,13 +850,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -887,13 +887,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -911,7 +911,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -956,7 +956,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -1004,13 +1004,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -1058,7 +1058,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -1175,13 +1175,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
@@ -1219,7 +1219,7 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -1273,13 +1273,13 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
         sa.ForeignKeyConstraint(

@@ -96,11 +96,11 @@ class StoredProviderConnection(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -197,11 +197,11 @@ class StoredLLM(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -268,7 +268,7 @@ class LlmUsage(Base):
         DateTime(timezone=True),
         primary_key=True,
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -354,11 +354,11 @@ class LlmAggregatedUsage(Base):
     accumulated_cost: Mapped[float] = mapped_column(Numeric(18, 6), default=0.0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 

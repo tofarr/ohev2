@@ -38,5 +38,5 @@ class AllowedOrigin(Base):
     origin: Mapped[str] = mapped_column(String(2048), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         init=False,
-        server_default=func.now(),
+        server_default=func.clock_timestamp(),
     )

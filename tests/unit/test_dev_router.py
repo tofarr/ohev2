@@ -17,13 +17,11 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pytest_postgresql.executor import PostgreSQLExecutor
-from pytest_postgresql.janitor import DatabaseJanitor
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from openhands.ev2.app import create_app
@@ -31,7 +29,6 @@ from openhands.ev2.auth.auth_models import OAuthClient
 from openhands.ev2.auth.dev_router import DevIdpService
 from openhands.ev2.config import get_config
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
-from openhands.ev2.db import dispose_engine_factory
 from openhands.ev2.db import get_session as _app_get_session
 from openhands.ev2.user.user_models import User  # noqa: F401
 from openhands.ev2.util.password import hash_password
@@ -72,11 +69,14 @@ def _set_dev_config(
     monkeypatch.setenv("OHE_IDP_CLIENT_SECRET", "changeme")
     monkeypatch.setenv("OHE_BASE_URL", "http://test")
     monkeypatch.setenv("OHE_CLEANUP_INTERVAL", "0")
+    monkeypatch.setenv("OHE_LLM_USAGE_PARTITION_INTERVAL", "0")
+    monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
+    monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
+    monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
 
 
-async def _seed_dev_user(engine: create_async_engine) -> uuid.UUID:
+async def _seed_dev_user(factory: async_sessionmaker) -> uuid.UUID:
     """Insert an enabled user with a hashed password for /authorize auth."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
         await s.execute(
             text(
@@ -99,49 +99,57 @@ async def _seed_dev_user(engine: create_async_engine) -> uuid.UUID:
 @pytest_asyncio.fixture
 async def dev_engine(
     monkeypatch: pytest.MonkeyPatch,
-    pg_server: PostgreSQLExecutor,
+    pg_server: tuple[PostgreSQLExecutor, AsyncEngine],
 ) -> AsyncGenerator[AsyncEngine, None]:
-    """A per-test engine on a fresh DB cloned from the session template."""
-    proc = pg_server
-    host = proc.host
-    port = proc.port
-    user = proc.user
-    password = proc.password or ""
-    template_dbname = proc.template_dbname
-    test_dbname = f"dev_{uuid.uuid4().hex[:12]}"
-    janitor = DatabaseJanitor(
-        user=user,
-        host=host,
-        port=port,
-        dbname=test_dbname,
-        template_dbname=template_dbname,
-        version=proc.version,
-        password=password or None,
-    )
-    janitor.init()
+    """A per-test savepoint transaction on the shared DB, with dev-IdP config.
+
+    Seeds the dev user within the savepoint so it is visible to the test
+    but rolled back after it.
+    """
+    _proc, db_engine = pg_server
+    host = db_engine.url.host
+    port = str(db_engine.url.port)
+    user = db_engine.url.username
+    password = db_engine.url.password or ""
+    db_name = db_engine.url.database
     _set_dev_config(
         monkeypatch,
         host=host,
-        port=str(port),
-        db_name=test_dbname,
+        port=port,
+        db_name=db_name,
         username=user,
         password=password,
     )
-    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{test_dbname}"
-    eng = create_async_engine(url)
-    await _seed_dev_user(eng)
-    yield eng
-    await eng.dispose()
-    janitor.drop()
-    await dispose_engine_factory()
+
+    from openhands.ev2 import db as db_module
+
+    conn = await db_engine.connect()
+    tx = await conn.begin()
+    factory = async_sessionmaker(
+        bind=conn,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    old_engine = db_module._engine
+    old_factory = db_module._factory
+    db_module._engine = db_engine
+    db_module._factory = factory
+
+    await _seed_dev_user(factory)
+    yield db_engine
+
+    db_module._factory = old_factory
+    db_module._engine = old_engine
+    await tx.rollback()
+    await conn.close()
 
 
 @pytest_asyncio.fixture
 async def dev_app(dev_engine, monkeypatch: pytest.MonkeyPatch):
-    # DB + dev-IdP config was set by dev_engine; just clear the config cache
-    # so create_app() rebuilds AppConfig from the env vars.
     get_config.cache_clear()
-    factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+    from openhands.ev2.db import get_session_factory
+
+    factory = get_session_factory()
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
         async with factory() as s:
@@ -151,7 +159,6 @@ async def dev_app(dev_engine, monkeypatch: pytest.MonkeyPatch):
     application.dependency_overrides[_app_get_session] = _override_get_session
     yield application
     application.dependency_overrides.clear()
-    await dispose_engine_factory()
 
 
 @pytest_asyncio.fixture
@@ -254,8 +261,9 @@ class TestDevLogin:
 
         from openhands.ev2.auth.auth_models import IdpAccessToken, IdpRefreshToken
         from openhands.ev2.db import Base  # noqa: F401
+        from openhands.ev2.db import get_session_factory as _gsf
 
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        factory = _gsf()
         async with factory() as s:
             refresh = (await s.execute(select(IdpRefreshToken))).scalars().all()
             access = (await s.execute(select(IdpAccessToken))).scalars().all()
@@ -538,7 +546,9 @@ class TestDevIdpServicePkce:
         from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         _set_dev_config(monkeypatch)
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        from openhands.ev2.db import get_session_factory as _gsf
+
+        factory = _gsf()
         verifier = "v" * 64
         challenge = (
             base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -578,7 +588,9 @@ class TestDevIdpServicePkce:
         from openhands.ev2.encryption.encryption_service import get_encryption_service
 
         _set_dev_config(monkeypatch)
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        from openhands.ev2.db import get_session_factory as _gsf
+
+        factory = _gsf()
         verifier = "v" * 64
         challenge = (
             base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -623,7 +635,9 @@ class TestAuthServiceDevUrlResolution:
         from openhands.ev2.auth.auth_service import AuthService
 
         _set_dev_config(monkeypatch)
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        from openhands.ev2.db import get_session_factory as _gsf
+
+        factory = _gsf()
         async with factory() as session:
             client = OAuthClient(
                 client_id="ohe",
@@ -658,7 +672,9 @@ class TestAuthServiceDevUrlResolution:
         from openhands.ev2.auth.auth_service import AuthService
 
         _set_dev_config(monkeypatch)
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        from openhands.ev2.db import get_session_factory as _gsf
+
+        factory = _gsf()
         async with factory() as session:
             service = AuthService(session)
             assert service._idp_base() == "http://test/auth/dev"
@@ -672,7 +688,9 @@ class TestAuthServiceDevUrlResolution:
         _set_dev_config(monkeypatch)
         monkeypatch.setenv("OHE_IDP_URL", "https://real-idp.example.com")
         get_config.cache_clear()
-        factory = async_sessionmaker(dev_engine, expire_on_commit=False)
+        from openhands.ev2.db import get_session_factory as _gsf
+
+        factory = _gsf()
         async with factory() as session:
             service = AuthService(session)
             assert service._idp_base() == "https://real-idp.example.com"
