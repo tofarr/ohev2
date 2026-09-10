@@ -18,16 +18,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox
+from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,
     Sandbox,
+    SandboxSnapshot,
     SandboxStatus,
     SandboxTemplate,
+    SnapshotMode,
     VolumeMount,
 )
 from openhands.ev2.util.search_filter import BaseSearchFilter
@@ -49,6 +51,10 @@ class SandboxTemplateCreate(BaseModel):
     max_age_seconds: int | None = Field(default=None, gt=0)
     max_memory: int | None = Field(default=None, gt=0)
     exposed_ports: list[ExposedPort] = Field(default_factory=list)
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description="Snapshot strategy supported by sandboxes built from this template.",
+    )
 
 
 class SandboxTemplateRead(BaseModel):
@@ -65,6 +71,7 @@ class SandboxTemplateRead(BaseModel):
     max_age_seconds: int | None
     max_memory: int | None
     exposed_ports: list[ExposedPort]
+    snapshot_mode: SnapshotMode
     created_at: datetime
 
 
@@ -166,6 +173,7 @@ class SandboxRead(BaseModel):
     sandbox_spec_id: str
     status: SandboxStatus
     desired_status: SandboxStatus
+    snapshot_mode: SnapshotMode
     session_api_key: str | None
     exposed_urls: list[ExposedUrl]
     created_at: datetime
@@ -228,8 +236,116 @@ class SandboxBatchWriteRequest(BaseModel):
     )
 
 
+# --------------------------------------------------------------------------- #
+# Sandbox snapshots.
+# --------------------------------------------------------------------------- #
+
+
+class SandboxSnapshotCreate(BaseModel):
+    """Payload to create a sandbox snapshot.
+
+    Exactly one source is supplied: ``sandbox_id`` snapshots an existing
+    sandbox, while ``file`` (handled by the router as a multipart upload)
+    together with ``schema_type`` imports a snapshot from an uploaded artifact.
+    The service receives already-read file bytes via ``file_data`` when a file
+    import is requested.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(min_length=1, max_length=255, description="Caller-chosen snapshot id.")
+    sandbox_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Sandbox id to snapshot. Mutually exclusive with file import.",
+    )
+    schema_type: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Schema type of an uploaded snapshot file (e.g. ``docker-image-tar``).",
+    )
+    file_data: bytes | None = Field(
+        default=None,
+        description="Raw bytes of an uploaded snapshot file; set by the router, not by callers.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_exclusive_source(self) -> SandboxSnapshotCreate:
+        if self.sandbox_id is not None and self.file_data is not None:
+            raise ValueError("sandbox_id and file are mutually exclusive.")
+        if self.sandbox_id is None and self.file_data is None:
+            raise ValueError("Either sandbox_id or a file upload is required.")
+        if self.file_data is not None and not self.schema_type:
+            raise ValueError("schema_type is required when importing a file.")
+        return self
+
+
+class SandboxSnapshotRead(BaseModel):
+    """Sandbox snapshot representation returned by the public API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    download_url: str | None
+    image_id: str | None = None
+    sandbox_id: str | None = None
+
+
+class SandboxSnapshotSearchFilter(BaseSearchFilter[SandboxSnapshot]):
+    """Optional filters for ``GET /sandbox_v2/sandbox-snapshots``."""
+
+    id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
+    id__eq: str | None = Field(default=None, description="Exact id match.")
+    sandbox_id__eq: str | None = Field(default=None, description="Exact source sandbox id match.")
+    created_at__gte: datetime | None = Field(default=None)
+    created_at__lt: datetime | None = Field(default=None)
+    created_at__gt: datetime | None = Field(default=None)
+    created_at__lte: datetime | None = Field(default=None)
+
+
+class SandboxSnapshotSearchResult(BaseModel):
+    """Paginated collection of sandbox snapshots."""
+
+    items: list[SandboxSnapshotRead]
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor for the next page; null when no more results.",
+    )
+    limit: int
+
+
+class SandboxSnapshotBatchDelete(BaseModel):
+    """Delete operation within a snapshot batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: str
+
+
+SandboxSnapshotBatchOp = Annotated[
+    SandboxSnapshotBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class SandboxSnapshotBatchWriteRequest(BaseModel):
+    """Request body for ``POST /sandbox_v2/sandbox-snapshots/batch``.
+
+    Snapshots are created through the multipart create endpoint (a file may be
+    involved), so the batch write supports delete operations only.
+    """
+
+    operations: list[SandboxSnapshotBatchOp] = Field(
+        min_length=1,
+        max_length=100,
+        description="Delete operations to apply atomically.",
+    )
+
+
 __all__ = [
     "DockerSandbox",
+    "DockerSandboxSnapshot",
     "DockerSandboxTemplate",
     "Sandbox",
     "SandboxBatchCreate",
@@ -239,6 +355,14 @@ __all__ = [
     "SandboxRead",
     "SandboxSearchFilter",
     "SandboxSearchResult",
+    "SandboxSnapshot",
+    "SandboxSnapshotBatchDelete",
+    "SandboxSnapshotBatchOp",
+    "SandboxSnapshotBatchWriteRequest",
+    "SandboxSnapshotCreate",
+    "SandboxSnapshotRead",
+    "SandboxSnapshotSearchFilter",
+    "SandboxSnapshotSearchResult",
     "SandboxStatus",
     "SandboxTemplate",
     "SandboxTemplateBatchCreate",
@@ -249,4 +373,5 @@ __all__ = [
     "SandboxTemplateSearchFilter",
     "SandboxTemplateSearchResult",
     "SandboxUpdate",
+    "SnapshotMode",
 ]

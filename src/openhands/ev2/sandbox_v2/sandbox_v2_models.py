@@ -36,6 +36,20 @@ class SandboxStatus(enum.StrEnum):
     ERROR = "error"
 
 
+class SnapshotMode(enum.StrEnum):
+    """Provider-neutral snapshot support strategy for a sandbox.
+
+    ``UNSUPPORTED`` — snapshots are not available. ``MANUAL`` — snapshots are
+    created on demand (a caller invokes the create endpoint). ``AUTOMATIC`` —
+    the provider maintains a rolling snapshot in the background and updates it
+    as the sandbox evolves; callers may still create explicit pins.
+    """
+
+    UNSUPPORTED = "unsupported"
+    MANUAL = "manual"
+    AUTOMATIC = "automatic"
+
+
 class ExposedPort(BaseModel):
     """Exposed port within a container to be matched to a free port on the host.
 
@@ -72,6 +86,11 @@ class SandboxTemplate(DiscriminatedUnionMixin, ABC):
 
     Templates are functionally immutable: they are created and deleted only,
     never updated — image/label metadata is set at build time.
+
+    ``snapshot_mode`` declares the snapshot strategy a sandbox built from this
+    template supports; when a provider supports multiple modes the one in use
+    is recorded on the template (the sandbox spec) so callers can discover it
+    without a separate probe.
     """
 
     id: str
@@ -90,6 +109,10 @@ class SandboxTemplate(DiscriminatedUnionMixin, ABC):
     )
     max_age_seconds: int | None = Field(
         default=None, description="Max age for sandboxes after which they will be deleted."
+    )
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description="Snapshot strategy supported by sandboxes built from this template.",
     )
 
 
@@ -113,6 +136,14 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
     sandbox_spec_id: str
     status: SandboxStatus
     desired_status: SandboxStatus
+    snapshot_mode: SnapshotMode = Field(
+        default=SnapshotMode.UNSUPPORTED,
+        description=(
+            "Snapshot strategy in use for this sandbox. Mirrors the template's "
+            "mode when the sandbox is created; providers that support more than "
+            "one mode report the active one here."
+        ),
+    )
     session_api_key: str | None = Field(
         default=None,
         description=(
@@ -139,12 +170,33 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
     )
 
 
+class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
+    """A point-in-time snapshot of a sandbox.
+
+    Snapshots are created either from an existing sandbox (``sandbox_id``) or
+    by importing an uploaded snapshot file (``schema_type``). Each snapshot
+    carries an id, the time it was created, and a download URL the caller can
+    use to fetch the snapshot artifact. Provider-specific subclasses (e.g.
+    :class:`DockerSandboxSnapshot`) carry implementation detail such as the
+    backing image id.
+    """
+
+    id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    download_url: str | None = Field(
+        default=None,
+        description="URL to download the snapshot artifact, when available.",
+    )
+
+
 __all__ = [
     "DockerSandboxTemplate",
     "ExposedPort",
     "ExposedUrl",
     "Sandbox",
+    "SandboxSnapshot",
     "SandboxStatus",
     "SandboxTemplate",
+    "SnapshotMode",
     "VolumeMount",
 ]
