@@ -188,6 +188,24 @@ class SearchFilter(DiscriminatedUnionMixin, ABC, Generic[T]):  # noqa: UP046
         """
         raise NotImplementedError
 
+    def negated_sql_condition(self) -> SqlCondition:
+        """SQL condition for the complement (items NOT matching this filter).
+
+        Defaults to SQL ``NOT`` of :meth:`sql_condition`. Subclasses whose
+        match predicate is NULL-sensitive (e.g. equality on a nullable column,
+        where ``col != x`` is false for ``NULL``) override to produce a
+        NULL-safe complement such as ``IS DISTINCT FROM`` so ``NULL`` rows
+        fall into the complement rather than vanishing from both branches.
+
+        Returning ``None`` means the complement imposes no restriction
+        (matches every row) — e.g. when this filter itself matches nothing.
+        """
+        cond = self.sql_condition()
+        if cond is None:
+            # This filter matches every row, so its complement matches none.
+            return false()
+        return ~cond
+
     def filter_sql(self, stmt: S) -> S:
         """Return *stmt* with this filter's WHERE clause applied.
 

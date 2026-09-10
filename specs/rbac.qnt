@@ -25,12 +25,15 @@
 // user_secret_permissions, role_mcp_server_config_permissions,
 // role_sandbox_template_permissions) and their grant-permission columns have
 // been removed. Item-level access is now expressed via the generic
-// ACLPermission policy stored in the role's per-entity JSONB column.
+// AclPermission policy stored in the role's per-entity JSONB column.
 
 module rbac {
   // Simplified permission policies (mirrors role.qnt).
-  // ACLPermission models the item-level grant policy: a bounded set of ids
-  // per action. The cap (ACL_MAX_IDS) forces large grants to custom classes.
+  // AclPermission models the item-level grant policy: a bounded set of ids
+  // with per-outcome sub-policies. The cap (ACL_MAX_IDS) forces large grants
+  // to custom classes. (The real implementation splits items into in-list vs
+  // out-of-list sets governed by on_match / on_mismatch, with on_create for
+  // CREATE; this abstract model reduces that to a per-action id set.)
   type Permission = Permitted | Denied | ReadOnly | AclPerm(str -> Set[str])
 
   // Simplified search filter results.
@@ -248,7 +251,7 @@ module rbac {
       })
   }
 
-  // ACLPermission grants access only to listed ids for the specified action.
+  // AclPermission grants access only to listed ids for the specified action.
   run aclGrantsOnlyListedAction = {
     init
       .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set("u2", "u3")))) }))
@@ -263,7 +266,7 @@ module rbac {
       })
   }
 
-  // ACLPermission with empty id set denies (no ids = no access).
+  // AclPermission with empty id set denies (no ids = no access).
   run aclEmptyDenies = {
     init
       .then(createRole({ id: "r1", permissions: Map("user" -> AclPerm(Map("read" -> Set()))) }))

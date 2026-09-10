@@ -16,8 +16,9 @@
 
 module role {
   // Permission policies. Mirrors security_models.py: Permitted grants all,
-  // Denied grants none, ReadOnly grants read/search only, ACLPermission grants
-  // access to a bounded set of item ids per action.
+  // Denied grants none, ReadOnly grants read/search only, AclPermission grants
+  // access via an item-id list with per-outcome sub-policies (on_match governs
+  // listed ids, on_mismatch governs the rest, on_create governs CREATE).
   type Permission = Permitted | Denied | ReadOnly | AclPerm(str -> Set[str])
 
   // A role bundles a name and per-entity permission policies.

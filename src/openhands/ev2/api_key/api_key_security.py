@@ -65,8 +65,9 @@ class ApiKeyAccess(Permission):
         self,
         user_id: uuid.UUID | None,
         action: Action,
+        groups: frozenset[uuid.UUID] = frozenset(),
     ) -> SearchFilter[Any]:
-        _ = action  # every action is scoped identically to the principal's own keys
+        _ = action, groups  # every action is scoped identically to the principal's own keys
         if user_id is None:
             return NoneSearchFilter[Any]()
         return ApiKeyAccessFilter[Any](creator_id=user_id)

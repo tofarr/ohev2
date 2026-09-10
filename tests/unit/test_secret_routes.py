@@ -3,7 +3,7 @@
 The default ``client`` fixture is the test principal, whose seeded admin role
 carries ``Permitted()`` on every entity column including ``secret_permission``,
 so it has full CRUD. Item-level access control is now handled by the generic
-:class:`ACLPermission` policy stored in the role's JSONB ``secret_permission``
+:class:`AclPermission` policy stored in the role's JSONB ``secret_permission``
 column — the per-secret link tables have been removed.
 """
 
@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from tests.unit._auth_helpers import assign_role as _assign_role
 from tests.unit._auth_helpers import make_principal as _make_principal
 
-from openhands.ev2.security.security_models import ACLPermission, Action
+from openhands.ev2.security.security_models import AclPermission, Permitted
 from openhands.ev2.util.auth_token import create_auth_token
 
 
@@ -142,8 +142,8 @@ class TestSecretBatchRoute:
 
 
 class TestSecretAclPolicy:
-    """A principal with an ``ACLPermission`` on ``secret_permission`` is gated
-    by the permitted id list — no link tables involved."""
+    """A principal with an ``AclPermission`` on ``secret_permission`` is gated
+    by the item id list — no link tables involved."""
 
     async def test_read_denied_without_permitted_id(self, client: AsyncClient, session) -> None:
         sid = (await client.post("/secrets", json=_create_payload("ACL_READ"))).json()["id"]
@@ -153,12 +153,12 @@ class TestSecretAclPolicy:
         await _assign_role(
             session,
             principal.id,
-            {"secret_permission": ACLPermission(permitted_ids={Action.READ: []})},
+            {"secret_permission": AclPermission(item_ids=[], on_match=Permitted())},
         )
         await session.commit()
         token = create_auth_token(principal.id)
         resp = await client.get(f"/secrets/{sid}", headers={"Authorization": f"Bearer {token}"})
-        # Empty permitted_ids => NoneSearchFilter => dependency raises 403.
+        # Empty item_ids => on_mismatch (default Denied) => 403.
         assert resp.status_code == 403
 
     async def test_read_allowed_with_permitted_id(self, client: AsyncClient, session) -> None:
@@ -167,7 +167,7 @@ class TestSecretAclPolicy:
         await _assign_role(
             session,
             principal.id,
-            {"secret_permission": ACLPermission(permitted_ids={Action.READ: [uuid.UUID(sid)]})},
+            {"secret_permission": AclPermission(item_ids=[uuid.UUID(sid)], on_match=Permitted())},
         )
         await session.commit()
         token = create_auth_token(principal.id)

@@ -10,7 +10,7 @@ surface. Decrypted plaintext is revealed solely through the
 to the secret and the separate ``secret_value_permission``. Every endpoint here
 is guarded by the centralized permission checker (AGENTS.md §9) over the
 ``secret`` resource; item-level access is controlled by the role's
-``secret_permission`` column (e.g. :class:`ACLPermission` or
+``secret_permission`` column (e.g. :class:`AclPermission` or
 :class:`Permitted`).
 """
 
