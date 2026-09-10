@@ -2,8 +2,9 @@
 
 Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox_v2/``: the
 collection is ``/sandbox_v2/sandbox-templates`` with cursor pagination; create
-is ``POST``, update is ``PATCH``, retrieve is ``GET``, remove is ``DELETE``,
-plus batch read/write and count.
+is ``POST``, retrieve is ``GET``, remove is ``DELETE``, plus batch read/write
+and count. Templates are functionally immutable (no ``PATCH``): the batch
+write accepts create and delete operations only.
 
 Template state is owned by the configured :class:`SandboxService` (a
 per-app async context manager), not by a request-scoped session, so handlers
@@ -24,7 +25,6 @@ from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
     SandboxTemplateRead,
     SandboxTemplateSearchFilter,
     SandboxTemplateSearchResult,
-    SandboxTemplateUpdate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     BatchPermissionDeniedError,
@@ -151,10 +151,6 @@ async def write_sandbox_templates_batch(
         SearchFilter[SandboxTemplate] | None,
         Depends(depends_permissions_or_none(SandboxTemplate, Action.CREATE)),
     ],
-    update_filter: Annotated[
-        SearchFilter[SandboxTemplate] | None,
-        Depends(depends_permissions_or_none(SandboxTemplate, Action.UPDATE)),
-    ],
     delete_filter: Annotated[
         SearchFilter[SandboxTemplate] | None,
         Depends(depends_permissions_or_none(SandboxTemplate, Action.DELETE)),
@@ -163,7 +159,6 @@ async def write_sandbox_templates_batch(
     service = await get_sandbox_service(request)
     perm_filters = {
         Action.CREATE: create_filter,
-        Action.UPDATE: update_filter,
         Action.DELETE: delete_filter,
     }
     try:
@@ -188,24 +183,6 @@ async def get_sandbox_template(
     try:
         template = await service.get_template(template_id, perm_filter=perm_filter)
     except SandboxTemplateNotFoundError as exc:
-        raise _map_exception_to_status(exc) from exc
-    return SandboxTemplateRead.model_validate(template)
-
-
-@router.patch("/{template_id}", response_model=SandboxTemplateRead)
-async def update_sandbox_template(
-    template_id: str,
-    payload: SandboxTemplateUpdate,
-    request: Request,
-    perm_filter: Annotated[
-        SearchFilter[SandboxTemplate],
-        Depends(depends_permissions(SandboxTemplate, Action.UPDATE)),
-    ],
-) -> SandboxTemplateRead:
-    service = await get_sandbox_service(request)
-    try:
-        template = await service.update_template(template_id, payload, perm_filter=perm_filter)
-    except Exception as exc:
         raise _map_exception_to_status(exc) from exc
     return SandboxTemplateRead.model_validate(template)
 

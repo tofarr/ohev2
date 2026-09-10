@@ -62,6 +62,7 @@ from openhands.ev2.sandbox.sandbox_router import (
 from openhands.ev2.sandbox_v2.role_sandbox_template_permission_router import (
     router as sandbox_v2_role_sandbox_template_permission_router,
 )
+from openhands.ev2.sandbox_v2.sandbox_router import router as sandbox_v2_sandbox_router
 from openhands.ev2.sandbox_v2.sandbox_template_router import router as sandbox_v2_template_router
 from openhands.ev2.secret.role_secret_permission_router import (
     router as role_secret_permission_router,
@@ -282,6 +283,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "sandbox-v2-templates",
         "description": "Pluggable sandbox_v2 templates (provider-backed) and role access grants.",
     },
+    {
+        "name": "sandbox-v2-sandboxes",
+        "description": "Pluggable sandbox_v2 sandboxes (provider-backed) and role access grants.",
+    },
 ]
 
 
@@ -327,6 +332,7 @@ def create_app() -> FastAPI:
     app.include_router(role_sandbox_permission_router)
     app.include_router(role_sandbox_snapshot_permission_router)
     app.include_router(sandbox_v2_template_router)
+    app.include_router(sandbox_v2_sandbox_router)
     app.include_router(sandbox_v2_role_sandbox_template_permission_router)
     app.include_router(user_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the

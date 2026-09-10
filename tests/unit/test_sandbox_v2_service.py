@@ -14,19 +14,27 @@ from typing import Any
 import pytest
 
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
+    DockerSandbox,
     DockerSandboxTemplate,
+    Sandbox,
+    SandboxStatus,
     SandboxTemplate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+    SandboxBatchCreate,
+    SandboxBatchDelete,
+    SandboxCreate,
     SandboxTemplateBatchCreate,
     SandboxTemplateBatchDelete,
-    SandboxTemplateBatchUpdate,
     SandboxTemplateCreate,
     SandboxTemplateSearchFilter,
-    SandboxTemplateUpdate,
+    SandboxUpdate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     BatchPermissionDeniedError,
+    SandboxConflictError,
+    SandboxNotFoundError,
+    SandboxPermissionScopeError,
     SandboxService,
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
@@ -43,6 +51,7 @@ class _MemorySandboxService(SandboxService):
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
         self._templates: dict[str, SandboxTemplate] = {}
+        self._sandboxes: dict[str, Sandbox] = {}
         self._closed = False
 
     async def _list_templates(self) -> list[SandboxTemplate]:
@@ -72,49 +81,52 @@ class _MemorySandboxService(SandboxService):
         self._templates[template.id] = template
         return template
 
-    async def _update_template(
-        self,
-        template: SandboxTemplate,
-        payload: SandboxTemplateUpdate,
-    ) -> SandboxTemplate:
-        updated = _apply_update(template, payload)
-        self._templates[template.id] = updated
-        return updated
-
     async def _delete_template(self, template_id: str) -> None:
         if template_id not in self._templates:
             raise SandboxTemplateNotFoundError(template_id) from None
         del self._templates[template_id]
 
+    async def _list_sandboxes(self) -> list[Sandbox]:
+        return list(self._sandboxes.values())
+
+    async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
+        try:
+            return self._sandboxes[sandbox_id]
+        except KeyError:
+            raise SandboxNotFoundError(sandbox_id) from None
+
+    def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
+        return DockerSandbox(
+            id=payload.id,
+            sandbox_spec_id=payload.sandbox_spec_id,
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+
+    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+        if sandbox.id in self._sandboxes:
+            raise SandboxConflictError(sandbox.id)
+        self._sandboxes[sandbox.id] = sandbox
+        return sandbox
+
+    async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
+        sandbox = self._sandboxes[sandbox_id]
+        updated = sandbox.model_copy(
+            update={
+                "desired_status": payload.desired_status,
+                "status": payload.desired_status,
+            }
+        )
+        self._sandboxes[sandbox_id] = updated
+        return updated
+
+    async def _delete_sandbox(self, sandbox_id: str) -> None:
+        if sandbox_id not in self._sandboxes:
+            raise SandboxNotFoundError(sandbox_id) from None
+        del self._sandboxes[sandbox_id]
+
     async def aclose(self) -> None:
         self._closed = True
-
-
-def _apply_update(
-    template: SandboxTemplate,
-    payload: SandboxTemplateUpdate,
-) -> DockerSandboxTemplate:
-    assert isinstance(template, DockerSandboxTemplate)
-    return DockerSandboxTemplate(
-        id=template.id,
-        command=template.command if payload.command is None else payload.command,
-        initial_env=(template.initial_env if payload.initial_env is None else payload.initial_env),
-        working_dir=(template.working_dir if payload.working_dir is None else payload.working_dir),
-        idle_pause_seconds=(
-            template.idle_pause_seconds
-            if payload.idle_pause_seconds is None
-            else payload.idle_pause_seconds
-        ),
-        paused_delete_seconds=(
-            template.paused_delete_seconds
-            if payload.paused_delete_seconds is None
-            else payload.paused_delete_seconds
-        ),
-        max_age_seconds=(
-            template.max_age_seconds if payload.max_age_seconds is None else payload.max_age_seconds
-        ),
-        max_memory=template.max_memory if payload.max_memory is None else payload.max_memory,
-    )
 
 
 def _create_payload(template_id: str = "img-a", **overrides: Any) -> SandboxTemplateCreate:
@@ -204,35 +216,6 @@ async def test_create_template_conflict_propagates() -> None:
     await service.create_template(_create_payload("img-a"))
     with pytest.raises(SandboxTemplateConflictError):
         await service.create_template(_create_payload("img-a"))
-
-
-# --------------------------------------------------------------------------- #
-# update_template (scopes via get_template, applies payload).
-# --------------------------------------------------------------------------- #
-
-
-async def test_update_template_applies_fields() -> None:
-    service = _MemorySandboxService()
-    await service.create_template(_create_payload("img-a"))
-    updated = await service.update_template(
-        "img-a", SandboxTemplateUpdate.model_validate({"working_dir": "/new"})
-    )
-    assert updated.working_dir == "/new"
-
-
-async def test_update_template_missing_raises_not_found() -> None:
-    service = _MemorySandboxService()
-    with pytest.raises(SandboxTemplateNotFoundError):
-        await service.update_template("nope", SandboxTemplateUpdate.model_validate({}))
-
-
-async def test_update_template_out_of_scope_raises_not_found() -> None:
-    service = _MemorySandboxService()
-    await service.create_template(_create_payload("img-a"))
-    with pytest.raises(SandboxTemplateNotFoundError):
-        await service.update_template(
-            "img-a", SandboxTemplateUpdate.model_validate({}), perm_filter=NONE
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -375,22 +358,18 @@ async def test_count_templates_respects_perm_filter() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_apply_batch_mixed_create_update_delete() -> None:
+async def test_apply_batch_mixed_create_delete() -> None:
     service = _MemorySandboxService()
     await service.create_template(_create_payload("img-a"))
     results = await service.apply_batch(
         [
             SandboxTemplateBatchCreate(data=_create_payload("img-b")),
-            SandboxTemplateBatchUpdate(
-                id="img-a", data=SandboxTemplateUpdate.model_validate({"working_dir": "/w"})
-            ),
             SandboxTemplateBatchDelete(id="img-a"),
         ],
-        {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: ALL},
+        {Action.CREATE: ALL, Action.DELETE: ALL},
     )
     assert results[0] is not None and results[0].id == "img-b"
-    assert results[1] is not None and results[1].working_dir == "/w"
-    assert results[2] is None
+    assert results[1] is None
     with pytest.raises(SandboxTemplateNotFoundError):
         await service.get_template("img-a")
 
@@ -400,17 +379,7 @@ async def test_apply_batch_create_denied_raises() -> None:
     with pytest.raises(BatchPermissionDeniedError):
         await service.apply_batch(
             [SandboxTemplateBatchCreate(data=_create_payload("img-a"))],
-            {Action.CREATE: None, Action.UPDATE: ALL, Action.DELETE: ALL},
-        )
-
-
-async def test_apply_batch_update_denied_raises() -> None:
-    service = _MemorySandboxService()
-    await service.create_template(_create_payload("img-a"))
-    with pytest.raises(BatchPermissionDeniedError):
-        await service.apply_batch(
-            [SandboxTemplateBatchUpdate(id="img-a", data=SandboxTemplateUpdate.model_validate({}))],
-            {Action.CREATE: ALL, Action.UPDATE: None, Action.DELETE: ALL},
+            {Action.CREATE: None, Action.DELETE: ALL},
         )
 
 
@@ -420,7 +389,7 @@ async def test_apply_batch_delete_denied_raises() -> None:
     with pytest.raises(BatchPermissionDeniedError):
         await service.apply_batch(
             [SandboxTemplateBatchDelete(id="img-a")],
-            {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: None},
+            {Action.CREATE: ALL, Action.DELETE: None},
         )
 
 
@@ -433,7 +402,7 @@ async def test_apply_batch_unknown_op_raises_type_error() -> None:
     with pytest.raises(TypeError):
         await service.apply_batch(  # type: ignore[list-item]
             [_Unknown()],
-            {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: ALL},
+            {Action.CREATE: ALL, Action.DELETE: ALL},
         )
 
 
@@ -443,7 +412,7 @@ async def test_apply_batch_create_perm_filter_scopes_create() -> None:
     with pytest.raises(SandboxTemplatePermissionScopeError):
         await service.apply_batch(
             [SandboxTemplateBatchCreate(data=_create_payload("img-a"))],
-            {Action.CREATE: deny_a, Action.UPDATE: ALL, Action.DELETE: ALL},
+            {Action.CREATE: deny_a, Action.DELETE: ALL},
         )
 
 
@@ -474,3 +443,186 @@ def _deny_id_filter(denied_id: str) -> SearchFilter[SandboxTemplate]:
         value=denied_id,
         condition=Condition.NE,
     )
+
+
+def _deny_sandbox_id_filter(denied_id: str) -> SearchFilter[Sandbox]:
+    """Return a filter that matches every sandbox except *denied_id*."""
+    return AttributeFilter[Sandbox](
+        attribute="id",
+        value=denied_id,
+        condition=Condition.NE,
+    )
+
+
+def _sandbox_payload(sandbox_id: str = "sb-a", spec: str = "img-a") -> SandboxCreate:
+    return SandboxCreate.model_validate({"id": sandbox_id, "sandbox_spec_id": spec})
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox CRUD (generic helpers over the provider hooks).
+# --------------------------------------------------------------------------- #
+
+
+async def test_list_sandboxes_filters_by_perm_filter() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    await service.create_sandbox(_sandbox_payload("sb-b"))
+    visible = await service.list_sandboxes(perm_filter=_deny_sandbox_id_filter("sb-b"))
+    assert [sb.id for sb in visible] == ["sb-a"]
+
+
+async def test_get_sandbox_returns_sandbox() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    sandbox = await service.get_sandbox("sb-a")
+    assert sandbox.id == "sb-a"
+
+
+async def test_get_sandbox_missing_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    with pytest.raises(SandboxNotFoundError):
+        await service.get_sandbox("nope")
+
+
+async def test_get_sandbox_out_of_scope_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    with pytest.raises(SandboxNotFoundError):
+        await service.get_sandbox("sb-a", perm_filter=NONE)
+
+
+async def test_create_sandbox_persists() -> None:
+    service = _MemorySandboxService()
+    sandbox = await service.create_sandbox(_sandbox_payload("sb-a"))
+    assert sandbox.id == "sb-a"
+    assert (await service.get_sandbox("sb-a")).id == "sb-a"
+
+
+async def test_create_sandbox_out_of_scope_raises_scope_error() -> None:
+    service = _MemorySandboxService()
+    with pytest.raises(SandboxPermissionScopeError):
+        await service.create_sandbox(_sandbox_payload("sb-a"), perm_filter=NONE)
+
+
+async def test_create_sandbox_conflict_propagates() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    with pytest.raises(SandboxConflictError):
+        await service.create_sandbox(_sandbox_payload("sb-a"))
+
+
+async def test_update_sandbox_changes_desired_status() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    updated = await service.update_sandbox(
+        "sb-a", SandboxUpdate.model_validate({"desired_status": "active"})
+    )
+    assert updated.desired_status is SandboxStatus.ACTIVE
+    assert updated.status is SandboxStatus.ACTIVE
+
+
+async def test_update_sandbox_missing_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    with pytest.raises(SandboxNotFoundError):
+        await service.update_sandbox(
+            "nope", SandboxUpdate.model_validate({"desired_status": "active"})
+        )
+
+
+async def test_update_sandbox_out_of_scope_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    with pytest.raises(SandboxNotFoundError):
+        await service.update_sandbox(
+            "sb-a", SandboxUpdate.model_validate({"desired_status": "active"}), perm_filter=NONE
+        )
+
+
+async def test_delete_sandbox_removes() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    await service.delete_sandbox("sb-a")
+    with pytest.raises(SandboxNotFoundError):
+        await service.get_sandbox("sb-a")
+
+
+async def test_delete_sandbox_missing_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    with pytest.raises(SandboxNotFoundError):
+        await service.delete_sandbox("nope")
+
+
+async def test_delete_sandbox_out_of_scope_raises_not_found() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    with pytest.raises(SandboxNotFoundError):
+        await service.delete_sandbox("sb-a", perm_filter=NONE)
+
+
+async def test_get_sandboxes_aligned_with_none() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    await service.create_sandbox(_sandbox_payload("sb-b"))
+    results = await service.get_sandboxes(["sb-a", "missing", "sb-b"])
+    assert results[0] is not None and results[0].id == "sb-a"
+    assert results[1] is None
+    assert results[2] is not None and results[2].id == "sb-b"
+
+
+async def test_get_sandboxes_respects_perm_filter() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    await service.create_sandbox(_sandbox_payload("sb-b"))
+    results = await service.get_sandboxes(
+        ["sb-a", "sb-b"], perm_filter=_deny_sandbox_id_filter("sb-a")
+    )
+    assert results[0] is None
+    assert results[1] is not None and results[1].id == "sb-b"
+
+
+async def test_apply_sandbox_batch_create_and_delete() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    results = await service.apply_sandbox_batch(
+        [
+            SandboxBatchCreate(data=_sandbox_payload("sb-b")),
+            SandboxBatchDelete(id="sb-a"),
+        ],
+        {Action.CREATE: ALL, Action.DELETE: ALL},
+    )
+    assert results[0] is not None and results[0].id == "sb-b"
+    assert results[1] is None
+    with pytest.raises(SandboxNotFoundError):
+        await service.get_sandbox("sb-a")
+
+
+async def test_apply_sandbox_batch_create_denied_raises() -> None:
+    service = _MemorySandboxService()
+    with pytest.raises(BatchPermissionDeniedError):
+        await service.apply_sandbox_batch(
+            [SandboxBatchCreate(data=_sandbox_payload("sb-a"))],
+            {Action.CREATE: None, Action.DELETE: ALL},
+        )
+
+
+async def test_apply_sandbox_batch_delete_denied_raises() -> None:
+    service = _MemorySandboxService()
+    await service.create_sandbox(_sandbox_payload("sb-a"))
+    with pytest.raises(BatchPermissionDeniedError):
+        await service.apply_sandbox_batch(
+            [SandboxBatchDelete(id="sb-a")],
+            {Action.CREATE: ALL, Action.DELETE: None},
+        )
+
+
+async def test_apply_sandbox_batch_unknown_op_raises_type_error() -> None:
+    service = _MemorySandboxService()
+
+    class _Unknown:
+        pass
+
+    with pytest.raises(TypeError):
+        await service.apply_sandbox_batch(  # type: ignore[list-item]
+            [_Unknown()],
+            {Action.CREATE: ALL, Action.DELETE: ALL},
+        )
