@@ -7,9 +7,14 @@ service factory/config wiring.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
+import httpx
 import pytest
+import respx
 from docker.errors import ImageNotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
@@ -42,6 +47,8 @@ from openhands.ev2.sandbox.sandbox_models import (
 )
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
+    SandboxRead,
+    SandboxSearchFilter,
     SandboxSnapshotCreate,
     SandboxTemplateCreate,
     SandboxTemplateRead,
@@ -1831,3 +1838,385 @@ def test_exposed_urls_skips_binding_without_host_port() -> None:
     ports_binding: dict[str, Any] = {"8000/tcp": [{}]}
     result = _exposed_urls_from_ports(list(DEFAULT_EXPOSED_PORTS), ports_binding)
     assert result == []
+
+
+# --------------------------------------------------------------------------- #
+# last_accessed_at + lifecycle sweep.
+# --------------------------------------------------------------------------- #
+
+
+class _MutableContainer:
+    """Fake Docker container that records pause/unpause/start/remove and labels."""
+
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+        self.events: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return self.attrs["Name"].lstrip("/")
+
+    def reload(self) -> None:
+        return None
+
+    def pause(self) -> None:
+        self.attrs["State"]["Status"] = "paused"
+        self.events.append("pause")
+
+    def unpause(self) -> None:
+        self.attrs["State"]["Status"] = "running"
+        self.events.append("unpause")
+
+    def start(self) -> None:
+        self.attrs["State"]["Status"] = "running"
+        self.events.append("start")
+
+    def remove(self, force: bool = False) -> None:
+        self.events.append("remove")
+
+
+class _MutableContainers:
+    def __init__(self, containers: list[_MutableContainer]) -> None:
+        self._containers = {c.name: c for c in containers}
+
+    def list(self, all: bool = False) -> list[_MutableContainer]:  # noqa: A002
+        return list(self._containers.values())
+
+    def get(self, name: str) -> _MutableContainer:
+        try:
+            return self._containers[name]
+        except KeyError:
+            from docker.errors import NotFound  # type: ignore[import-untyped]
+
+            raise NotFound(name) from None
+
+
+class _FakeImageObj:
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+
+
+class _FakeImages:
+    def __init__(self, images: list[_FakeImageObj]) -> None:
+        self._images = {image.attrs["RepoTags"][0]: image for image in images}
+
+    def list(self) -> list[_FakeImageObj]:
+        return list(self._images.values())
+
+    def get(self, name: str) -> _FakeImageObj:
+        try:
+            return self._images[name]
+        except KeyError:
+            raise ImageNotFound(name) from None
+
+
+class _LifecycleClient:
+    """Fake Docker client with both ``containers`` and ``images``."""
+
+    def __init__(self, containers: list[_MutableContainer], images: list[_FakeImageObj]) -> None:
+        self.containers = _MutableContainers(containers)
+        self.images = _FakeImages(images)
+
+
+def _lifecycle_image_attrs(template_id: str, *, idle_pause: int | None = None) -> dict[str, Any]:
+    labels: dict[str, str] = {}
+    if idle_pause is not None:
+        labels["io.openhands.sandbox.idle_pause_seconds"] = str(idle_pause)
+    return {
+        "RepoTags": [template_id],
+        "Created": "2024-01-02T03:04:05Z",
+        "Config": {"Cmd": None, "Env": None, "WorkingDir": None, "Labels": labels},
+        "HostConfig": {},
+    }
+
+
+def _lifecycle_container_attrs(
+    name: str,
+    *,
+    template_id: str = "img",
+    status: str = "running",
+    created: str | None = None,
+    paused_at: str | None = None,
+    host_port: int = 32771,
+) -> dict[str, Any]:
+    labels: dict[str, str] = {
+        "io.openhands.sandbox.sandbox_id": name,
+        "io.openhands.sandbox.sandbox_template_id": template_id,
+    }
+    if paused_at is not None:
+        labels["io.openhands.sandbox.paused_at"] = paused_at
+    return {
+        "Name": f"/{name}",
+        "Created": created or "2024-01-02T03:04:05Z",
+        "State": {"Status": status, "Error": None},
+        "Config": {"Image": template_id, "Labels": labels},
+        "HostConfig": {"Binds": []},
+        "NetworkSettings": {"Ports": {"8000/tcp": [{"HostPort": str(host_port)}]}},
+    }
+
+
+def _service_with(client: _LifecycleClient, **fields: Any) -> DockerSandboxService:
+    service = DockerSandboxService(
+        image_name_patterns=["*"],
+        sandbox_lifecycle_interval=0,
+        agent_server_probe_timeout=1.0,
+        **fields,
+    )
+    service._client = client
+    return service
+
+
+def test_sandbox_model_last_accessed_at_defaults_none() -> None:
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+    )
+    assert sandbox.last_accessed_at is None
+
+
+def test_sandbox_read_carries_last_accessed_at() -> None:
+    accessed = datetime(2024, 6, 5, 12, tzinfo=UTC)
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        last_accessed_at=accessed,
+    )
+    read = SandboxRead.model_validate(sandbox)
+    assert read.last_accessed_at == accessed
+
+
+def test_sandbox_search_filter_last_accessed_at_gte() -> None:
+    cutoff = datetime(2024, 6, 5, 12, tzinfo=UTC)
+    young = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        last_accessed_at=datetime(2024, 6, 6, tzinfo=UTC),
+    )
+    old = DockerSandbox(
+        id="sb-2",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        last_accessed_at=datetime(2024, 6, 1, tzinfo=UTC),
+    )
+    flt = SandboxSearchFilter.model_validate({"last_accessed_at__gte": cutoff})
+    assert flt.matches(young)
+    assert not flt.matches(old)
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_from_idle_time() -> None:
+    service = _service_with(_LifecycleClient([], []))
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
+    )
+    respx.get("http://localhost:32771/").mock(
+        return_value=httpx.Response(200, json={"idle_time": 30})
+    )
+    accessed = await service._resolve_last_accessed_at(sandbox)
+    assert accessed is not None
+    elapsed = (datetime.now(UTC) - accessed).total_seconds()
+    assert 29 <= elapsed <= 31
+
+
+async def test_resolve_last_accessed_at_none_when_not_active() -> None:
+    service = _service_with(_LifecycleClient([], []))
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.INACTIVE,
+        desired_status=SandboxStatus.INACTIVE,
+        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
+    )
+    assert await service._resolve_last_accessed_at(sandbox) is None
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_none_on_http_error() -> None:
+    service = _service_with(_LifecycleClient([], []))
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
+    )
+    respx.get("http://localhost:32771/").mock(side_effect=httpx.ConnectError("boom"))
+    assert await service._resolve_last_accessed_at(sandbox) is None
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_none_when_idle_time_missing() -> None:
+    service = _service_with(_LifecycleClient([], []))
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
+    )
+    respx.get("http://localhost:32771/").mock(return_value=httpx.Response(200, json={"other": 1}))
+    assert await service._resolve_last_accessed_at(sandbox) is None
+
+
+@respx.mock
+async def test_list_sandboxes_enriches_last_accessed_at() -> None:
+    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
+    image = _FakeImageObj(_lifecycle_image_attrs("img"))
+    service = _service_with(_LifecycleClient([container], [image]))
+    respx.get("http://localhost:32771/").mock(
+        return_value=httpx.Response(200, json={"idle_time": 5})
+    )
+    sandboxes = await service._list_sandboxes()
+    assert len(sandboxes) == 1
+    assert sandboxes[0].last_accessed_at is not None
+
+
+async def test_sweep_pauses_idle_active_sandbox() -> None:
+    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
+    image = _FakeImageObj(_lifecycle_image_attrs("img", idle_pause=10))
+    service = _service_with(_LifecycleClient([container], [image]))
+    # Pre-seed last_accessed_at so the sandbox is well past idle_pause_seconds.
+    sandbox = await service._get_sandbox("sb-1")
+    sandbox.last_accessed_at = datetime.now(UTC) - timedelta(seconds=120)
+
+    # _list_sandboxes re-probes; bypass the probe by stubbing it to keep the
+    # stale value so the sweep sees the idle sandbox.
+    async def _no_probe(sb: DockerSandbox) -> None:
+        sb.last_accessed_at = datetime.now(UTC) - timedelta(seconds=120)
+
+    service._enrich_last_accessed_at = _no_probe  # type: ignore[method-assign]
+    summary = await service.sweep_lifecycle()
+    assert summary is not None
+    assert "paused 1" in summary
+    assert container.events == ["pause"]
+    # paused_at label is stamped.
+    assert container.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_at"]
+
+
+async def test_sweep_skips_active_sandbox_under_idle_threshold() -> None:
+    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
+    image = _FakeImageObj(_lifecycle_image_attrs("img", idle_pause=600))
+    service = _service_with(_LifecycleClient([container], [image]))
+
+    async def _fresh(sb: DockerSandbox) -> None:
+        sb.last_accessed_at = datetime.now(UTC)
+
+    service._enrich_last_accessed_at = _fresh  # type: ignore[method-assign]
+    summary = await service.sweep_lifecycle()
+    assert summary is None
+    assert container.events == []
+
+
+async def test_sweep_deletes_paused_sandbox_past_paused_delete() -> None:
+    paused_at = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
+    container = _MutableContainer(
+        _lifecycle_container_attrs("sb-1", status="paused", paused_at=paused_at)
+    )
+    image = _FakeImageObj(_lifecycle_image_attrs("img"))
+    # paused_delete is a template label; add it.
+    image.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_delete_seconds"] = "60"
+    service = _service_with(_LifecycleClient([container], [image]))
+    summary = await service.sweep_lifecycle()
+    assert summary is not None
+    assert "deleted 1" in summary
+    assert container.events == ["remove"]
+
+
+async def test_sweep_deletes_sandbox_past_max_age() -> None:
+    old_created = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat()
+    container = _MutableContainer(
+        _lifecycle_container_attrs("sb-1", status="running", created=old_created)
+    )
+    image = _FakeImageObj(_lifecycle_image_attrs("img"))
+    image.attrs["Config"]["Labels"]["io.openhands.sandbox.max_age_seconds"] = "60"
+    service = _service_with(_LifecycleClient([container], [image]))
+    summary = await service.sweep_lifecycle()
+    assert summary is not None
+    assert "deleted 1" in summary
+    assert container.events == ["remove"]
+
+
+async def test_sweep_no_op_when_no_thresholds_set() -> None:
+    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
+    image = _FakeImageObj(_lifecycle_image_attrs("img"))
+    service = _service_with(_LifecycleClient([container], [image]))
+    summary = await service.sweep_lifecycle()
+    assert summary is None
+    assert container.events == []
+
+
+async def test_aenter_starts_lifecycle_task() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=1.0)
+    service._client = _LifecycleClient([], [])
+    async with service:
+        assert service._lifecycle_task is not None
+        assert not service._lifecycle_task.done()
+    assert service._lifecycle_task is None
+
+
+async def test_aenter_skips_task_when_interval_zero() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0)
+    async with service:
+        assert service._lifecycle_task is None
+
+
+async def test_aclose_cancels_lifecycle_task() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=1.0)
+    await service.__aenter__()
+    task = service._lifecycle_task
+    assert task is not None
+    await service.aclose()
+    assert task.cancelled()
+    assert service._lifecycle_task is None
+
+
+async def test_aclose_closes_http_client() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0)
+    # Force the lazy http client to be created.
+    service._http = httpx.AsyncClient(timeout=1.0)
+    await service.aclose()
+    assert service._http is None
+
+
+async def test_lifecycle_loop_runs_one_sweep_then_cancels() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0.01)
+    service._client = _LifecycleClient([], [])
+    service._start_lifecycle_loop()
+    task = service._lifecycle_task
+    assert task is not None
+    # Let at least one sleep+sweep cycle elapse, then cancel.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+async def test_pause_container_stamps_paused_at_label() -> None:
+    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
+    service = _service_with(_LifecycleClient([container], []))
+    service._pause_container(container, "running")
+    assert container.attrs["State"]["Status"] == "paused"
+    assert "io.openhands.sandbox.paused_at" in container.attrs["Config"]["Labels"]
+
+
+async def test_activate_container_clears_paused_at_label() -> None:
+    paused_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    container = _MutableContainer(
+        _lifecycle_container_attrs("sb-1", status="paused", paused_at=paused_at)
+    )
+    service = _service_with(_LifecycleClient([container], []))
+    service._activate_container(container, "paused")
+    assert container.attrs["State"]["Status"] == "running"
+    assert "io.openhands.sandbox.paused_at" not in container.attrs["Config"]["Labels"]

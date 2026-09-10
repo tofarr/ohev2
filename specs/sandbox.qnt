@@ -13,6 +13,9 @@ module sandbox {
   type ProviderKind = Docker | Kubernetes | E2B
   type StorageKind = Fusey | OtherStorage
 
+  // Optional epoch-seconds timestamp; Absent when unknown / not applicable.
+  type OptInt = Present(int) | Absent
+
   type SandboxState = Inactive | Activating | Active | Deactivating | Deleting | Error
   type ComputeState = Warming | Dormant | Claimed | Mounting | Initializing | Serving | Draining | Released | Failed | Deleted
   type SnapshotState = Creating | Ready | SnapshotDeleting | SnapshotError
@@ -24,6 +27,8 @@ module sandbox {
     filesystemId: str,
     currentComputeId: str,
     currentSnapshotId: str,
+    lastAccessedAt: OptInt,  // Present(epoch) when probed; Absent when unknown
+    pausedAt: OptInt,        // Present(epoch) when sweep paused; Absent when active
   }
 
   type Compute = {
@@ -59,11 +64,24 @@ module sandbox {
   def noCompute(id: str): bool = not(computeExists(id))
   def snapshotExists(id: str): bool = snapshots.exists(s => s.id == id)
 
+  pure def isPresent(o: OptInt): bool =
+    match o {
+      | Present(_) => true
+      | Absent => false
+    }
+  pure def value(o: OptInt): int =
+    match o {
+      | Present(v) => v
+      | Absent => 0
+    }
+
   action create(s: Sandbox): bool = all {
     noSandbox(s.id),
     s.owner != "",
     s.filesystemId != "",
     s.currentComputeId == "",
+    s.lastAccessedAt == Absent,
+    s.pausedAt == Absent,
     sandboxes' = sandboxes.union(Set(s)),
     states' = states.set(s.id, Inactive),
     computes' = computes,
@@ -91,7 +109,8 @@ module sandbox {
       if (s.id == id)
         { id: s.id, owner: s.owner, providerKind: s.providerKind,
           filesystemId: s.filesystemId, currentComputeId: computeId,
-          currentSnapshotId: s.currentSnapshotId }
+          currentSnapshotId: s.currentSnapshotId,
+          lastAccessedAt: s.lastAccessedAt, pausedAt: Absent }
       else
         s),
     states' = states.set(id, Active),
@@ -124,7 +143,8 @@ module sandbox {
       if (s.id == id)
         { id: s.id, owner: s.owner, providerKind: s.providerKind,
           filesystemId: s.filesystemId, currentComputeId: "",
-          currentSnapshotId: s.currentSnapshotId }
+          currentSnapshotId: s.currentSnapshotId,
+          lastAccessedAt: s.lastAccessedAt, pausedAt: s.pausedAt }
       else
         s),
     states' = states.set(id, Inactive),
@@ -180,11 +200,74 @@ module sandbox {
       if (s.id == id)
         { id: s.id, owner: s.owner, providerKind: s.providerKind,
           filesystemId: s.filesystemId, currentComputeId: s.currentComputeId,
-          currentSnapshotId: snap.id }
+          currentSnapshotId: snap.id,
+          lastAccessedAt: s.lastAccessedAt, pausedAt: s.pausedAt }
       else
         s),
     states' = states,
     computes' = computes,
+    true
+  }
+
+  // Lifecycle sweep: pause an active sandbox that has been idle longer than
+  // idlePauseSeconds (lastAccessedAt known and now - lastAccessedAt > threshold),
+  // recording pausedAt so a future pausedDeleteSeconds sweep can reap it.
+  action sweepPauseIdle(id: str, now: int, idlePauseSeconds: int): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Active,
+    sandboxes.exists(s => s.id == id and isPresent(s.lastAccessedAt)
+      and (now - value(s.lastAccessedAt)) > idlePauseSeconds),
+    sandboxes' = sandboxes.map(s =>
+      if (s.id == id)
+        { id: s.id, owner: s.owner, providerKind: s.providerKind,
+          filesystemId: s.filesystemId, currentComputeId: s.currentComputeId,
+          currentSnapshotId: s.currentSnapshotId,
+          lastAccessedAt: s.lastAccessedAt, pausedAt: Present(now) }
+      else
+        s),
+    states' = states.set(id, Deactivating),
+    computes' = computes,
+    snapshots' = snapshots,
+    true
+  }
+
+  // Lifecycle sweep: delete an inactive sandbox paused longer than
+  // pausedDeleteSeconds (pausedAt known and now - pausedAt > threshold).
+  action sweepDeletePaused(id: str, now: int, pausedDeleteSeconds: int): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Inactive,
+    sandboxes.exists(s => s.id == id and isPresent(s.pausedAt)
+      and (now - value(s.pausedAt)) > pausedDeleteSeconds),
+    sandboxes' = sandboxes.filter(s => s.id != id),
+    states' = states.keys().filter(k => k != id).fold(
+      Map(),
+      (acc, k) => acc.set(k, states.get(k))
+    ),
+    computes' = computes.map(c =>
+      if (c.sandboxId == id)
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+      else
+        c),
+    snapshots' = snapshots,
+    true
+  }
+
+  // Lifecycle sweep: delete a sandbox older than maxAgeSeconds (now - created > threshold).
+  // `created` is passed in because the spec does not model a created timestamp on Sandbox.
+  action sweepDeleteMaxAge(id: str, now: int, created: int, maxAgeSeconds: int): bool = all {
+    states.keys().contains(id),
+    (now - created) > maxAgeSeconds,
+    sandboxes' = sandboxes.filter(s => s.id != id),
+    states' = states.keys().filter(k => k != id).fold(
+      Map(),
+      (acc, k) => acc.set(k, states.get(k))
+    ),
+    computes' = computes.map(c =>
+      if (c.sandboxId == id)
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+      else
+        c),
+    snapshots' = snapshots,
     true
   }
 
@@ -224,9 +307,15 @@ module sandbox {
       s.currentSnapshotId == "" or
         snapshots.exists(sn => sn.id == s.currentSnapshotId and sn.filesystemId == s.filesystemId))
 
+  // pausedAt is recorded only for sandboxes the sweep has paused (not Active);
+  // an Active sandbox must not carry a pausedAt timestamp.
+  val pausedAtConsistent: bool =
+    sandboxes.forall(s =>
+      states.get(s.id) == Active implies s.pausedAt == Absent)
+
   run createStartsInactive = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(all {
         assert(states.get("sb1") == Inactive),
         noop
@@ -235,7 +324,7 @@ module sandbox {
 
   run activateLifecycle = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(beginActivate("sb1"))
       .then(all {
         assert(states.get("sb1") == Activating),
@@ -251,7 +340,7 @@ module sandbox {
 
   run deactivateReleasesCompute = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(beginActivate("sb1"))
       .then(finishActivate("sb1", "c1", Docker))
       .then(beginDeactivate("sb1"))
@@ -270,7 +359,7 @@ module sandbox {
 
   run cannotActivateActiveSandbox = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(beginActivate("sb1"))
       .then(finishActivate("sb1", "c1", Docker))
       .then(beginActivate("sb1"))
@@ -279,7 +368,7 @@ module sandbox {
 
   run snapshotPinsFuseyGeneration = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(createSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: Fusey,
         generation: "generation-1", state: Ready }))
       .then(all {
@@ -291,7 +380,7 @@ module sandbox {
 
   run deleteRemovesSandbox = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
-      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "" }))
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
       .then(beginDelete("sb1"))
       .then(all {
         assert(states.get("sb1") == Deleting),
@@ -300,6 +389,35 @@ module sandbox {
       .then(finishDelete("sb1"))
       .then(all {
         assert(not(sandboxExists("sb1"))),
+        noop
+      })
+  }
+
+  run sweepPausesIdleSandbox = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
+      .then(beginActivate("sb1"))
+      .then(finishActivate("sb1", "c1", Docker))
+      // lastAccessedAt is set by the agent-server probe; model it as 100s ago.
+      .then(all {
+        sandboxes' = sandboxes.map(s =>
+          if (s.id == "sb1")
+            { id: s.id, owner: s.owner, providerKind: s.providerKind,
+              filesystemId: s.filesystemId, currentComputeId: s.currentComputeId,
+              currentSnapshotId: s.currentSnapshotId,
+              lastAccessedAt: Present(100), pausedAt: s.pausedAt }
+          else
+            s),
+        states' = states,
+        computes' = computes,
+        snapshots' = snapshots,
+        true
+      })
+      .then(sweepPauseIdle("sb1", 200, 50))
+      .then(all {
+        assert(states.get("sb1") == Deactivating),
+        assert(sandboxes.exists(s => s.id == "sb1" and s.pausedAt == Present(200))),
+        assert(pausedAtConsistent),
         noop
       })
   }

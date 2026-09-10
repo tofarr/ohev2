@@ -407,3 +407,42 @@ as `llm.usage`:
 
 A `DEFAULT` partition is created by the initial migration so inserts never
 fail before the manager's first sweep (or for out-of-range timestamps).
+
+## Sandbox lifecycle
+
+Each sandbox carries a nullable `last_accessed_at` timestamp derived from the
+agent server running inside the container. The Docker sandbox service probes
+the container's `agent_server` exposed port root endpoint (`GET /`), which
+returns JSON with an `idle_time` (seconds since last activity); the
+last-accessed time is `now - idle_time`. The probe is best-effort: a sandbox
+that is not `active`, unreachable, or returns no usable `idle_time` reports
+`last_accessed_at = null`. The field is exposed on `SandboxRead` and
+filterable via `last_accessed_at__gte/__gt/__lt/__lte` on
+`GET /sandbox/sandboxes`.
+
+Template lifespan knobs drive an automatic lifecycle enforced by a background
+sweep started when the sandbox service enters its async context (the FastAPI
+lifespan). The sweep is configured on the `DockerSandboxService` (env prefix
+`OHE_SANDBOX`):
+
+* `sandbox_lifecycle_interval` (`OHE_SANDBOX_LIFECYCLE_INTERVAL`, default
+  `60`): seconds between sweeps. **Non-zero** runs an `asyncio` loop tied to
+  the app lifespan — no external scheduler needed.
+* `sandbox_lifecycle_interval = 0` **disables** the in-process loop; drive
+  the sweep with an external scheduler calling
+  `DockerSandboxService.sweep_lifecycle`.
+* `agent_server_probe_timeout` (`OHE_SANDBOX_AGENT_SERVER_PROBE_TIMEOUT`,
+  default `2`): per-sandbox HTTP timeout for the `last_accessed_at` probe.
+
+Each sweep lists every sandbox, resolves its template, and applies the
+highest-priority action (a `None` knob is not enforced):
+
+1. **`max_age_seconds`** — delete a sandbox whose `created_at` is older than
+   the threshold.
+2. **`idle_pause_seconds`** — pause an `active` sandbox whose idle time
+   exceeds the threshold (sets `desired_status = inactive`).
+3. **`paused_delete_seconds`** — delete an `inactive` sandbox paused longer
+   than the threshold. The pause time is read from the
+   `io.openhands.sandbox.paused_at` container label, stamped when the sweep
+   (or a caller) pauses the sandbox and cleared on resume, so it survives
+   restarts.
