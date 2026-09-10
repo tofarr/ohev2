@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
+from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.scripts.seed_db import _assign_role, _parse_args, seed_admin, seed_db
 from openhands.ev2.security.security_models import Action, Permitted
@@ -249,6 +250,82 @@ async def _named_role(session: AsyncSession, name: str) -> Role:
     role = await session.scalar(select(Role).where(Role.name == name))
     assert role is not None, f"role {name!r} not seeded"
     return role
+
+
+async def _default_group(session: AsyncSession) -> Group:
+    group = await session.scalar(select(Group).where(Group.name == "default"))
+    assert group is not None, "default group not seeded"
+    return group
+
+
+class TestSeedDbDefaultGroup:
+    async def test_admin_only_in_default_group(self, session: AsyncSession) -> None:
+        admin, regular = await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        assert regular is None
+
+        group = await _default_group(session)
+        assert group.creator_id == admin.id
+        assert group.description == "Default group for seeded users."
+
+        memberships = list(
+            (await session.scalars(select(GroupUser).where(GroupUser.group_id == group.id))).all()
+        )
+        assert len(memberships) == 1
+        assert memberships[0].user_id == admin.id
+        assert memberships[0].creator_id == admin.id
+
+    async def test_both_users_in_default_group(self, session: AsyncSession) -> None:
+        admin, regular = await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            user_username="joe",
+            user_email="joe@example.com",
+            user_password="pw",
+        )
+        assert regular is not None
+
+        group = await _default_group(session)
+        member_ids = {
+            m.user_id
+            for m in (
+                await session.scalars(select(GroupUser).where(GroupUser.group_id == group.id))
+            ).all()
+        }
+        assert member_ids == {admin.id, regular.id}
+
+    async def test_default_group_rerun_is_idempotent(self, session: AsyncSession) -> None:
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            user_username="joe",
+            user_email="joe@example.com",
+            user_password="pw",
+        )
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            user_username="joe",
+            user_email="joe@example.com",
+            user_password="second",
+        )
+        groups = await session.scalars(select(Group).where(Group.name == "default"))
+        assert len(groups.all()) == 1
+        group = await _default_group(session)
+        memberships = list(
+            (await session.scalars(select(GroupUser).where(GroupUser.group_id == group.id))).all()
+        )
+        assert len(memberships) == 2
 
 
 class TestSeedDbValidation:
