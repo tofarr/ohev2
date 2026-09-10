@@ -47,6 +47,7 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlagRoleAssignment,
     FeatureFlagUserAssignment,
 )
+from openhands.ev2.group.group_models import Group, GroupUser  # noqa: F401
 from openhands.ev2.llm.llm_models import (  # noqa: F401
     LlmAggregatedUsage,
     LlmUsage,
@@ -85,6 +86,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.auth.auth_models
     import openhands.ev2.cors.cors_models
     import openhands.ev2.feature_flag.feature_flag_models
+    import openhands.ev2.group.group_models
     import openhands.ev2.llm.llm_models
     import openhands.ev2.mcp_server_config.mcp_server_config_models
     import openhands.ev2.mcp_server_config.mcp_usage_models
