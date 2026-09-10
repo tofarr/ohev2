@@ -259,11 +259,14 @@ class SandboxSnapshotCreate(BaseModel):
     together with ``schema_type`` imports a snapshot from an uploaded artifact.
     The service receives already-read file bytes via ``file_data`` when a file
     import is requested.
+
+    The snapshot ``id`` is assigned by the sandbox service implementation (the
+    provider generates it), never supplied by the caller — mirroring how
+    :class:`SandboxCreate` delegates id generation to the provider.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: str = Field(min_length=1, max_length=255, description="Caller-chosen snapshot id.")
     sandbox_id: str | None = Field(
         default=None,
         min_length=1,
