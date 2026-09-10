@@ -56,8 +56,6 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "sandbox_permission",
     "sandbox_snapshot_permission",
     "sandbox_template_grant_permission",
-    "sandbox_grant_permission",
-    "sandbox_snapshot_grant_permission",
 )
 
 
@@ -193,16 +191,6 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for role-sandbox-template grant resources; null = deny.",
-    )
-    sandbox_grant_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role-sandbox grant resources; null = deny.",
-    )
-    sandbox_snapshot_grant_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role-sandbox-snapshot grant resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,
