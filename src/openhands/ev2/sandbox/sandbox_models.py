@@ -32,6 +32,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
 from openhands.ev2.db import Base
+from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxStatus
 from openhands.ev2.user.user_models import User
 
 _TZ = DateTime(timezone=True)
@@ -81,17 +82,6 @@ class SandboxStorageKind(enum.StrEnum):
     """Persistent storage implementations for sandbox filesystems."""
 
     FUSEY = "fusey"
-
-
-class SandboxStatus(enum.StrEnum):
-    """Provider-neutral public sandbox lifecycle states."""
-
-    INACTIVE = "inactive"
-    ACTIVATING = "activating"
-    ACTIVE = "active"
-    DEACTIVATING = "deactivating"
-    DELETING = "deleting"
-    ERROR = "error"
 
 
 class SandboxFilesystemStatus(enum.StrEnum):

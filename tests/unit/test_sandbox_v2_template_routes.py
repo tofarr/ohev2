@@ -18,10 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from openhands.ev2.config import get_config
 from openhands.ev2.sandbox_v2.sandbox_v2_models import DockerSandboxTemplate, SandboxTemplate
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
-    SandboxTemplateCreate,
-    SandboxTemplateUpdate,
-)
+from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxTemplateCreate
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     SandboxService,
     SandboxTemplateConflictError,
@@ -66,45 +63,30 @@ class _FakeSandboxService(SandboxService):
         self._templates[template.id] = template
         return template
 
-    async def _update_template(
-        self,
-        template: SandboxTemplate,
-        payload: SandboxTemplateUpdate,
-    ) -> SandboxTemplate:
-        assert isinstance(template, DockerSandboxTemplate)
-        updated = DockerSandboxTemplate(
-            id=template.id,
-            command=template.command if payload.command is None else payload.command,
-            initial_env=(
-                template.initial_env if payload.initial_env is None else payload.initial_env
-            ),
-            working_dir=(
-                template.working_dir if payload.working_dir is None else payload.working_dir
-            ),
-            idle_pause_seconds=(
-                template.idle_pause_seconds
-                if payload.idle_pause_seconds is None
-                else payload.idle_pause_seconds
-            ),
-            paused_delete_seconds=(
-                template.paused_delete_seconds
-                if payload.paused_delete_seconds is None
-                else payload.paused_delete_seconds
-            ),
-            max_age_seconds=(
-                template.max_age_seconds
-                if payload.max_age_seconds is None
-                else payload.max_age_seconds
-            ),
-            max_memory=template.max_memory if payload.max_memory is None else payload.max_memory,
-        )
-        self._templates[template.id] = updated
-        return updated
-
     async def _delete_template(self, template_id: str) -> None:
         if template_id not in self._templates:
             raise SandboxTemplateNotFoundError(template_id) from None
         del self._templates[template_id]
+
+    # The sandbox hooks are not exercised by the template-route tests but the
+    # abstract base requires concrete implementations.
+    async def _list_sandboxes(self) -> list[Any]:
+        return []
+
+    async def _get_sandbox(self, sandbox_id: str) -> Any:
+        raise NotImplementedError
+
+    def _sandbox_from_create(self, payload: Any) -> Any:
+        raise NotImplementedError
+
+    async def _create_sandbox(self, sandbox: Any) -> Any:
+        raise NotImplementedError
+
+    async def _update_sandbox(self, sandbox_id: str, payload: Any) -> Any:
+        raise NotImplementedError
+
+    async def _delete_sandbox(self, sandbox_id: str) -> None:
+        raise NotImplementedError
 
 
 def _template_payload(template_id: str = "img-a", **overrides: Any) -> dict[str, Any]:
@@ -237,22 +219,13 @@ class TestCrud:
         resp = await client.get("/sandbox_v2/sandbox-templates/nope")
         assert resp.status_code == 404
 
-    async def test_update_template(self, client: AsyncClient) -> None:
+    async def test_update_template_not_supported(self, client: AsyncClient) -> None:
         await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
         resp = await client.patch(
             "/sandbox_v2/sandbox-templates/img-a",
-            json={"working_dir": "/new", "idle_pause_seconds": 30},
+            json={"working_dir": "/new"},
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["working_dir"] == "/new"
-        assert body["idle_pause_seconds"] == 30
-
-    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.patch(
-            "/sandbox_v2/sandbox-templates/nope", json={"working_dir": "/new"}
-        )
-        assert resp.status_code == 404
+        assert resp.status_code == 405
 
     async def test_delete_template(self, client: AsyncClient) -> None:
         await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
@@ -296,11 +269,6 @@ class TestBatch:
             json={
                 "operations": [
                     {"op": "create", "data": _template_payload("img-b")},
-                    {
-                        "op": "update",
-                        "id": "img-a",
-                        "data": {"working_dir": "/w"},
-                    },
                     {"op": "delete", "id": "img-a"},
                 ]
             },
@@ -308,8 +276,7 @@ class TestBatch:
         assert resp.status_code == 200, resp.text
         items = resp.json()["items"]
         assert items[0]["id"] == "img-b"
-        assert items[1]["working_dir"] == "/w"
-        assert items[2] is None
+        assert items[1] is None
 
     async def test_batch_write_empty_ops_rejected(self, client: AsyncClient) -> None:
         resp = await client.post("/sandbox_v2/sandbox-templates/batch", json={"operations": []})

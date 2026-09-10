@@ -1,11 +1,19 @@
 """Service layer for the sandbox_v2 feature.
 
 The sandbox control plane is supplied by a pluggable :class:`SandboxService`
-implementation selected at startup via the ``sandbox_service_class`` config attribute
-(a fully qualified class name). The service is constructed once and held as an
-async context manager tied to the server lifespan; the concrete implementations
-(Docker, Kubernetes, E2B, ...) live in their own modules and are only imported
-when selected via the factory below.
+implementation selected at startup via the ``sandbox_service_class`` config
+attribute (a fully qualified class name). The service is constructed once and
+held as an async context manager tied to the server lifespan; the concrete
+implementations (Docker, Kubernetes, E2B, ...) live in their own modules and
+are only imported when selected via the factory below.
+
+The service owns two governed surfaces:
+
+* **Sandbox templates** — functionally immutable (create and delete only).
+  There is no ``update_template`` path; provider image/label metadata is set
+  at build time and cannot be patched.
+* **Sandboxes** — created from a template, deleted when no longer needed, and
+  paused/resumed by updating the single mutable field ``desired_status``.
 """
 
 from __future__ import annotations
@@ -16,15 +24,18 @@ from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxTemplate
+from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxTemplate
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+    SandboxBatchCreate,
+    SandboxBatchDelete,
+    SandboxBatchOp,
+    SandboxCreate,
     SandboxTemplateBatchCreate,
     SandboxTemplateBatchDelete,
     SandboxTemplateBatchOp,
-    SandboxTemplateBatchUpdate,
     SandboxTemplateCreate,
     SandboxTemplateSearchFilter,
-    SandboxTemplateUpdate,
+    SandboxUpdate,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
@@ -42,6 +53,18 @@ class SandboxTemplatePermissionScopeError(Exception):
     """Raised when a create payload falls outside the principal's scope."""
 
 
+class SandboxNotFoundError(Exception):
+    """Raised when a sandbox does not exist or is out of scope."""
+
+
+class SandboxConflictError(Exception):
+    """Raised when a create collides with an existing sandbox."""
+
+
+class SandboxPermissionScopeError(Exception):
+    """Raised when a sandbox create payload falls outside the principal's scope."""
+
+
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
 
@@ -49,12 +72,17 @@ class BatchPermissionDeniedError(Exception):
 class SandboxService(DiscriminatedUnionMixin, ABC):
     """Abstract base for the sandbox control plane.
 
-    Concrete subclasses provide provider-specific template persistence. The
-    generic CRUD helpers (search, batch, count) are implemented here over the
-    provider hooks and are shared by every implementation. The service is
-    created once at startup and held as an async context manager for the
-    server's lifetime; every request resolves the same instance and passes its
-    own ``perm_filter`` so authorization stays per-principal.
+    Concrete subclasses provide provider-specific template and sandbox
+    persistence. The generic CRUD helpers (search, batch, count) are
+    implemented here over the provider hooks and are shared by every
+    implementation. The service is created once at startup and held as an
+    async context manager for the server's lifetime; every request resolves
+    the same instance and passes its own ``perm_filter`` so authorization
+    stays per-principal.
+
+    Templates are immutable: only ``create_template``/``delete_template`` are
+    exposed (no update). Sandboxes are mutable solely via ``desired_status``
+    (``update_sandbox``), which drives pause/resume.
     """
 
     # ------------------------------------------------------------------ #
@@ -77,7 +105,8 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         return None
 
     # ------------------------------------------------------------------ #
-    # Generic public CRUD (built on the provider hooks below).
+    # Generic public template CRUD (built on the provider hooks below).
+    # Templates are immutable: no update method.
     # ------------------------------------------------------------------ #
     async def list_templates(
         self,
@@ -115,18 +144,6 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         if not perm_filter.matches(template):
             raise SandboxTemplatePermissionScopeError(payload.id)
         return await self._create_template(template)
-
-    async def update_template(
-        self,
-        template_id: str,
-        payload: SandboxTemplateUpdate,
-        *,
-        perm_filter: SearchFilter[SandboxTemplate] = ALL,
-    ) -> SandboxTemplate:
-        """Partially update a template. Raises when missing or out of scope."""
-        await self.get_template(template_id, perm_filter=perm_filter)
-        template = await self._get_template(template_id)
-        return await self._update_template(template, payload)
 
     async def delete_template(
         self,
@@ -185,7 +202,7 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         operations: list[SandboxTemplateBatchOp],
         perm_filters: dict[Action, SearchFilter[SandboxTemplate] | None],
     ) -> list[SandboxTemplate | None]:
-        """Apply a mix of create/update/delete operations.
+        """Apply a mix of create/delete template operations.
 
         Each operation is authorized against its own action via *perm_filters*;
         an action with a ``None`` filter denies that operation. Operations are
@@ -193,9 +210,9 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         atomicity cannot be guaranteed. Returns results positionally aligned
         with *operations* (``None`` for deletes).
         """
-        return [await self._apply_batch_op(op, perm_filters) for op in operations]
+        return [await self._apply_template_batch_op(op, perm_filters) for op in operations]
 
-    async def _apply_batch_op(
+    async def _apply_template_batch_op(
         self,
         op: SandboxTemplateBatchOp,
         perm_filters: dict[Action, SearchFilter[SandboxTemplate] | None],
@@ -203,28 +220,128 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         if isinstance(op, SandboxTemplateBatchCreate):
             filt = self._require_action(perm_filters, Action.CREATE, "create")
             return await self.create_template(op.data, perm_filter=filt)
-        if isinstance(op, SandboxTemplateBatchUpdate):
-            filt = self._require_action(perm_filters, Action.UPDATE, "update")
-            return await self.update_template(op.id, op.data, perm_filter=filt)
         if isinstance(op, SandboxTemplateBatchDelete):
             filt = self._require_action(perm_filters, Action.DELETE, "delete")
             await self.delete_template(op.id, perm_filter=filt)
             return None
         raise TypeError(f"Unknown sandbox-template batch op: {type(op).__name__}")
 
+    # ------------------------------------------------------------------ #
+    # Generic public sandbox CRUD (built on the provider hooks below).
+    # Only ``desired_status`` is mutable (via ``update_sandbox``).
+    # ------------------------------------------------------------------ #
+    async def list_sandboxes(
+        self,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> list[Sandbox]:
+        """List every sandbox the principal may see."""
+        sandboxes = await self._list_sandboxes()
+        return [sandbox for sandbox in sandboxes if perm_filter.matches(sandbox)]
+
+    async def get_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Retrieve a sandbox, scoped by ``perm_filter``.
+
+        Raises :class:`SandboxNotFoundError` when missing or out of scope so
+        callers return 404 without leaking existence.
+        """
+        sandbox = await self._get_sandbox(sandbox_id)
+        if not perm_filter.matches(sandbox):
+            raise SandboxNotFoundError(sandbox_id)
+        return sandbox
+
+    async def create_sandbox(
+        self,
+        payload: SandboxCreate,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Create a sandbox. Raises on out-of-scope payload or duplicate id."""
+        sandbox = self._sandbox_from_create(payload)
+        if not perm_filter.matches(sandbox):
+            raise SandboxPermissionScopeError(payload.id)
+        return await self._create_sandbox(sandbox)
+
+    async def update_sandbox(
+        self,
+        sandbox_id: str,
+        payload: SandboxUpdate,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> Sandbox:
+        """Update a sandbox's ``desired_status`` (pause/resume).
+
+        Raises :class:`SandboxNotFoundError` when missing or out of scope.
+        """
+        await self.get_sandbox(sandbox_id, perm_filter=perm_filter)
+        return await self._update_sandbox(sandbox_id, payload)
+
+    async def delete_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> None:
+        """Delete a sandbox. Raises when missing or out of scope."""
+        await self.get_sandbox(sandbox_id, perm_filter=perm_filter)
+        await self._delete_sandbox(sandbox_id)
+
+    async def get_sandboxes(
+        self,
+        sandbox_ids: list[str],
+        *,
+        perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> list[Sandbox | None]:
+        """Batch retrieve sandboxes, positionally aligned with the ids."""
+        sandboxes = await self.list_sandboxes(perm_filter=perm_filter)
+        by_id = {sandbox.id: sandbox for sandbox in sandboxes}
+        return [by_id.get(sandbox_id) for sandbox_id in sandbox_ids]
+
+    async def apply_sandbox_batch(
+        self,
+        operations: list[SandboxBatchOp],
+        perm_filters: dict[Action, SearchFilter[Sandbox] | None],
+    ) -> list[Sandbox | None]:
+        """Apply a mix of create/delete sandbox operations.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter denies that operation. Returns results
+        aligned with *operations* (the sandbox for create, ``None`` for delete).
+        """
+        return [await self._apply_sandbox_batch_op(op, perm_filters) for op in operations]
+
+    async def _apply_sandbox_batch_op(
+        self,
+        op: SandboxBatchOp,
+        perm_filters: dict[Action, SearchFilter[Sandbox] | None],
+    ) -> Sandbox | None:
+        if isinstance(op, SandboxBatchCreate):
+            filt = self._require_action(perm_filters, Action.CREATE, "create")
+            return await self.create_sandbox(op.data, perm_filter=filt)
+        if isinstance(op, SandboxBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_sandbox(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown sandbox batch op: {type(op).__name__}")
+
     @staticmethod
     def _require_action(
-        perm_filters: dict[Action, SearchFilter[SandboxTemplate] | None],
+        perm_filters: dict[Action, SearchFilter[Any] | None],
         action: Action,
         label: str,
-    ) -> SearchFilter[SandboxTemplate]:
+    ) -> SearchFilter[Any]:
         filt = perm_filters.get(action)
         if filt is None:
             raise BatchPermissionDeniedError(label)
         return filt
 
     # ------------------------------------------------------------------ #
-    # Provider hooks (overridden by implementations).
+    # Provider hooks — templates (overridden by implementations).
     # ------------------------------------------------------------------ #
     @abstractmethod
     async def _list_templates(self) -> list[SandboxTemplate]:
@@ -243,16 +360,35 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         """Persist a freshly-built template."""
 
     @abstractmethod
-    async def _update_template(
-        self,
-        template: SandboxTemplate,
-        payload: SandboxTemplateUpdate,
-    ) -> SandboxTemplate:
-        """Persist changes from *payload* onto *template* and return the result."""
-
-    @abstractmethod
     async def _delete_template(self, template_id: str) -> None:
         """Remove a template from the provider."""
+
+    # ------------------------------------------------------------------ #
+    # Provider hooks — sandboxes (overridden by implementations).
+    # ------------------------------------------------------------------ #
+    @abstractmethod
+    async def _list_sandboxes(self) -> list[Sandbox]:
+        """Return all sandboxes known to the provider (unfiltered)."""
+
+    @abstractmethod
+    async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
+        """Return a sandbox, raising ``SandboxNotFoundError`` if absent."""
+
+    @abstractmethod
+    def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
+        """Build a provider sandbox model from a create payload (no persistence)."""
+
+    @abstractmethod
+    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+        """Persist a freshly-built sandbox and start its backing compute."""
+
+    @abstractmethod
+    async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
+        """Apply a ``desired_status`` change (pause/resume) and return the sandbox."""
+
+    @abstractmethod
+    async def _delete_sandbox(self, sandbox_id: str) -> None:
+        """Remove a sandbox (and its backing compute) from the provider."""
 
 
 def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
@@ -272,6 +408,9 @@ def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
 
 __all__ = [
     "BatchPermissionDeniedError",
+    "SandboxConflictError",
+    "SandboxNotFoundError",
+    "SandboxPermissionScopeError",
     "SandboxService",
     "SandboxTemplateConflictError",
     "SandboxTemplateNotFoundError",

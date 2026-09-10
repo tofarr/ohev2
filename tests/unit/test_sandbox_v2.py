@@ -13,24 +13,34 @@ import pytest
 from docker.errors import ImageNotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
+from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox_v2.docker_sandbox_service import (
+    DEFAULT_EXPOSED_PORTS,
     DockerSandboxService,
-    _apply_template_update,
     _docker_template_from_payload,
+    _exposed_urls_from_ports,
     _label_int,
     _parse_created,
     _parse_env,
+    _sandbox_from_container_attrs,
     _template_from_image_attrs,
+    _volume_mounts_from_binds,
     _wildcard_match,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     DockerSandboxTemplate,
+    ExposedPort,
+    ExposedUrl,
+    Sandbox,
+    SandboxStatus,
     SandboxTemplate,
+    VolumeMount,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+    SandboxCreate,
     SandboxTemplateCreate,
     SandboxTemplateRead,
-    SandboxTemplateUpdate,
+    SandboxUpdate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_service import (
     SandboxService,
@@ -51,7 +61,76 @@ def test_docker_template_defaults() -> None:
     assert template.paused_delete_seconds is None
     assert template.max_age_seconds is None
     assert template.max_memory is None
+    assert template.exposed_ports == []
     assert template.kind == "DockerSandboxTemplate"
+
+
+def test_docker_template_carries_exposed_ports() -> None:
+    template = DockerSandboxTemplate(
+        id="img",
+        exposed_ports=[
+            ExposedPort(name="agent_server", description="agent server", container_port=8000),
+        ],
+    )
+    assert len(template.exposed_ports) == 1
+    assert template.exposed_ports[0].name == "agent_server"
+
+
+def test_sandbox_model_round_trip() -> None:
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_spec_id="img:latest",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        session_api_key="key",
+        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:8001", port=8001)],
+        volume_mounts=[VolumeMount(host_path="/h", container_path="/c")],
+    )
+    restored = Sandbox.model_validate(sandbox.model_dump(mode="json"))
+    assert isinstance(restored, DockerSandbox)
+    assert restored.id == "sb-1"
+    assert restored.sandbox_spec_id == "img:latest"
+    assert restored.status is SandboxStatus.ACTIVE
+    assert restored.session_api_key == "key"
+    assert restored.exposed_urls[0].name == "agent_server"
+    assert restored.volume_mounts[0].host_path == "/h"
+
+
+def test_sandbox_defaults() -> None:
+    sandbox = DockerSandbox(
+        id="sb",
+        sandbox_spec_id="img",
+        status=SandboxStatus.INACTIVE,
+        desired_status=SandboxStatus.INACTIVE,
+    )
+    assert sandbox.session_api_key is None
+    assert sandbox.exposed_urls == []
+    assert sandbox.volume_mounts == []
+    assert sandbox.status_detail is None
+
+
+def test_exposed_port_is_frozen() -> None:
+    port = ExposedPort(name="x", description="d")
+    with pytest.raises(ValidationError):
+        port.container_port = 9  # type: ignore[misc]
+
+
+def test_default_exposed_ports_include_agent_server_and_vscode() -> None:
+    names = {p.name for p in DEFAULT_EXPOSED_PORTS}
+    assert "agent_server" in names
+    assert "vscode" in names
+
+
+def test_sandbox_create_and_update_payloads() -> None:
+    create = SandboxCreate.model_validate({"id": "sb", "sandbox_spec_id": "img"})
+    assert create.id == "sb"
+    update = SandboxUpdate.model_validate({"desired_status": "active"})
+    assert update.desired_status is SandboxStatus.ACTIVE
+
+
+def test_sandbox_update_requires_desired_status() -> None:
+    with pytest.raises(ValidationError):
+        SandboxUpdate.model_validate({})  # type: ignore[arg-type]
 
 
 def test_template_discriminated_union_round_trip() -> None:
@@ -84,6 +163,7 @@ def test_create_payload_defaults() -> None:
     assert payload.initial_env == {}
     assert payload.working_dir == "/home/openhands/workspace"
     assert payload.max_memory is None
+    assert payload.exposed_ports == []
 
 
 def test_create_payload_rejects_non_positive_timeouts() -> None:
@@ -93,12 +173,6 @@ def test_create_payload_rejects_non_positive_timeouts() -> None:
         SandboxTemplateCreate.model_validate({"id": "img", "max_age_seconds": -1})
 
 
-def test_update_payload_all_fields_optional() -> None:
-    payload = SandboxTemplateUpdate.model_validate({})
-    assert payload.command is None
-    assert payload.working_dir is None
-
-
 def test_read_model_from_template() -> None:
     template = DockerSandboxTemplate(id="img", idle_pause_seconds=30, max_memory=2048)
     read = SandboxTemplateRead.model_validate(template)
@@ -106,11 +180,15 @@ def test_read_model_from_template() -> None:
     assert read.idle_pause_seconds == 30
     assert read.max_memory == 2048
     assert read.created_at == template.created_at
+    assert read.exposed_ports == []
 
 
 # --------------------------------------------------------------------------- #
 # Docker Image attribute mapping.
 # --------------------------------------------------------------------------- #
+
+
+_PORTS = list(DEFAULT_EXPOSED_PORTS)
 
 
 def test_template_from_image_attrs_basic() -> None:
@@ -128,7 +206,7 @@ def test_template_from_image_attrs_basic() -> None:
         },
         "HostConfig": {"Memory": 1073741824},
     }
-    template = _template_from_image_attrs(attrs)
+    template = _template_from_image_attrs(attrs, _PORTS)
     assert isinstance(template, DockerSandboxTemplate)
     assert template.id == "ghcr.io/org/agent-server:latest"
     assert template.command == ["bash", "-c", "sleep infinity"]
@@ -138,6 +216,7 @@ def test_template_from_image_attrs_basic() -> None:
     assert template.paused_delete_seconds is None
     assert template.max_age_seconds == 3600
     assert template.max_memory == 1073741824
+    assert [p.name for p in template.exposed_ports] == ["agent_server", "vscode"]
 
 
 def test_template_from_image_attrs_untagged_is_not_template() -> None:
@@ -146,7 +225,7 @@ def test_template_from_image_attrs_untagged_is_not_template() -> None:
     )
 
     with pytest.raises(SandboxTemplateNotFoundError):
-        _template_from_image_attrs({"RepoTags": ["<none>:<none>"]})
+        _template_from_image_attrs({"RepoTags": ["<none>:<none>"]}, _PORTS)
 
 
 def test_parse_env_skips_malformed() -> None:
@@ -182,7 +261,7 @@ def test_docker_template_from_payload() -> None:
             "max_memory": 512,
         }
     )
-    template = _docker_template_from_payload(payload)
+    template = _docker_template_from_payload(payload, _PORTS)
     assert isinstance(template, DockerSandboxTemplate)
     assert template.id == "img"
     assert template.command == ["echo", "hi"]
@@ -190,31 +269,47 @@ def test_docker_template_from_payload() -> None:
     assert template.working_dir == "/app"
     assert template.idle_pause_seconds == 10
     assert template.max_memory == 512
+    assert [p.name for p in template.exposed_ports] == ["agent_server", "vscode"]
 
 
-def test_apply_template_update_partial() -> None:
-    original = DockerSandboxTemplate(
-        id="img",
-        command=["a"],
-        initial_env={"A": "1"},
-        working_dir="/ws",
-        idle_pause_seconds=10,
-        paused_delete_seconds=20,
-        max_age_seconds=30,
-        max_memory=40,
+def test_docker_template_from_payload_custom_ports() -> None:
+    payload = SandboxTemplateCreate.model_validate(
+        {
+            "id": "img",
+            "exposed_ports": [
+                {"name": "custom", "description": "d", "container_port": 9000},
+            ],
+        }
     )
-    updated = _apply_template_update(
-        original,
-        SandboxTemplateUpdate.model_validate({"idle_pause_seconds": 99}),
-    )
-    assert updated.id == "img"
-    assert updated.command == ["a"]
-    assert updated.initial_env == {"A": "1"}
-    assert updated.working_dir == "/ws"
-    assert updated.idle_pause_seconds == 99
-    assert updated.paused_delete_seconds == 20
-    assert updated.max_age_seconds == 30
-    assert updated.max_memory == 40
+    template = _docker_template_from_payload(payload, list(DEFAULT_EXPOSED_PORTS))
+    assert [p.name for p in template.exposed_ports] == ["custom"]
+
+
+def test_exposed_urls_from_ports() -> None:
+    ports = list(DEFAULT_EXPOSED_PORTS)
+    binding = {"8000/tcp": [{"HostPort": "32771"}], "8001/tcp": None}
+    urls = _exposed_urls_from_ports(ports, binding)
+    assert [u.name for u in urls] == ["agent_server"]
+    assert urls[0].port == 32771
+    assert urls[0].url == "http://localhost:32771"
+
+
+def test_exposed_urls_empty_when_no_binding() -> None:
+    assert _exposed_urls_from_ports(list(DEFAULT_EXPOSED_PORTS), {}) == []
+
+
+def test_volume_mounts_from_binds() -> None:
+    binds = ["/host:/container", "/h2:/c2:ro", "bad"]
+    mounts = _volume_mounts_from_binds(binds)
+    assert len(mounts) == 2
+    assert mounts[0].host_path == "/host"
+    assert mounts[0].container_path == "/container"
+    assert mounts[0].mode == "rw"
+    assert mounts[1].mode == "ro"
+
+
+def test_volume_mounts_empty() -> None:
+    assert _volume_mounts_from_binds([]) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -396,3 +491,147 @@ def test_exception_to_status_mapping() -> None:
         _map_exception_to_status(RuntimeError("boom")).status_code
         == http_status.HTTP_500_INTERNAL_SERVER_ERROR
     )
+
+
+def test_sandbox_router_exception_to_status_mapping() -> None:
+    from fastapi import status as http_status
+
+    from openhands.ev2.sandbox_v2.sandbox_router import _map_exception_to_status
+    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+        BatchPermissionDeniedError,
+        SandboxConflictError,
+        SandboxNotFoundError,
+        SandboxPermissionScopeError,
+    )
+
+    assert _map_exception_to_status(SandboxNotFoundError("x")).status_code == 404
+    assert _map_exception_to_status(SandboxConflictError("x")).status_code == 409
+    assert _map_exception_to_status(SandboxPermissionScopeError("x")).status_code == 403
+    assert _map_exception_to_status(BatchPermissionDeniedError("x")).status_code == 403
+    assert (
+        _map_exception_to_status(RuntimeError("boom")).status_code
+        == http_status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Docker container attribute mapping (sandbox projection).
+# --------------------------------------------------------------------------- #
+
+
+class _FakeContainer:
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+
+    def reload(self) -> None:
+        return None
+
+
+class _FakeContainers:
+    def __init__(self, containers: list[_FakeContainer]) -> None:
+        self._containers = {c.attrs["Name"].lstrip("/"): c for c in containers}
+
+    def list(self, all: bool = False) -> list[_FakeContainer]:  # noqa: A002
+        return list(self._containers.values())
+
+    def get(self, name: str) -> _FakeContainer:
+        try:
+            return self._containers[name]
+        except KeyError:
+            from docker.errors import NotFound  # type: ignore[import-untyped]
+
+            raise NotFound(name) from None
+
+
+class _FakeContainerClient:
+    def __init__(self, containers: list[_FakeContainer]) -> None:
+        self.containers = _FakeContainers(containers)
+
+
+def _container_attrs(name: str, *, image: str = "img", status: str = "running") -> dict[str, Any]:
+    return {
+        "Name": f"/{name}",
+        "Created": "2024-01-02T03:04:05Z",
+        "State": {"Status": status, "Error": None},
+        "Config": {
+            "Image": image,
+            "Labels": {
+                "io.openhands.sandbox_v2.sandbox_id": name,
+                "io.openhands.sandbox_v2.sandbox_spec_id": image,
+            },
+        },
+        "HostConfig": {"Binds": ["/host:/container:rw"]},
+        "NetworkSettings": {"Ports": {"8000/tcp": [{"HostPort": "32771"}]}},
+    }
+
+
+def test_sandbox_from_container_attrs_running() -> None:
+    container = _FakeContainer(_container_attrs("sb-1", status="running"))
+    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
+    assert isinstance(sandbox, DockerSandbox)
+    assert sandbox.id == "sb-1"
+    assert sandbox.sandbox_spec_id == "img"
+    assert sandbox.status is SandboxStatus.ACTIVE
+    assert sandbox.desired_status is SandboxStatus.ACTIVE
+    assert [u.name for u in (sandbox.exposed_urls or [])] == ["agent_server"]
+    assert sandbox.volume_mounts[0].host_path == "/host"
+
+
+def test_sandbox_from_container_attrs_paused_is_inactive() -> None:
+    container = _FakeContainer(_container_attrs("sb-2", status="paused"))
+    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
+    assert sandbox is not None
+    assert sandbox.status is SandboxStatus.INACTIVE
+
+
+def test_sandbox_from_container_attrs_no_label_returns_none() -> None:
+    attrs = _container_attrs("anon", status="running")
+    attrs["Config"]["Labels"] = {}
+    container = _FakeContainer(attrs)
+    assert _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS)) is None
+
+
+def test_sandbox_from_container_attrs_exited_is_inactive() -> None:
+    container = _FakeContainer(_container_attrs("sb-3", status="exited"))
+    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
+    assert sandbox is not None
+    assert sandbox.status is SandboxStatus.INACTIVE
+
+
+def test_sync_list_sandboxes_projects_containers() -> None:
+    service = DockerSandboxService()
+    service._client = _FakeContainerClient(
+        [
+            _FakeContainer(_container_attrs("sb-1")),
+            _FakeContainer(_container_attrs("sb-2", status="paused")),
+        ]
+    )
+    sandboxes = service._sync_list_sandboxes()
+    assert {sb.id for sb in sandboxes} == {"sb-1", "sb-2"}
+
+
+def test_sync_get_sandbox_returns_container() -> None:
+    service = DockerSandboxService()
+    service._client = _FakeContainerClient([_FakeContainer(_container_attrs("sb-1"))])
+    sandbox = service._sync_get_sandbox("sb-1")
+    assert sandbox.id == "sb-1"
+
+
+def test_sync_get_sandbox_missing_raises_not_found() -> None:
+    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+
+    service = DockerSandboxService()
+    service._client = _FakeContainerClient([])
+    with pytest.raises(SandboxNotFoundError):
+        service._sync_get_sandbox("nope")
+
+
+def test_sync_get_sandbox_unlabeled_raises_not_found() -> None:
+    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+
+    service = DockerSandboxService()
+    attrs = _container_attrs("anon", status="running")
+    attrs["Config"]["Labels"] = {}
+    service._client = _FakeContainerClient([_FakeContainer(attrs)])
+    with pytest.raises(SandboxNotFoundError):
+        service._sync_get_sandbox("anon")

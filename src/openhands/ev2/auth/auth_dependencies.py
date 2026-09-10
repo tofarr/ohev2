@@ -603,6 +603,9 @@ from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
     SandboxTemplate as _SandboxTemplate,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_models import (  # noqa: E402
+    Sandbox as _SandboxV2Sandbox,
+)
+from openhands.ev2.sandbox_v2.sandbox_v2_models import (  # noqa: E402
     SandboxTemplate as _SandboxV2Template,
 )
 from openhands.ev2.secret import (  # noqa: E402,F401
@@ -642,6 +645,11 @@ register_resource_policy(_RoleSandboxSnapshotPermission, "sandbox_snapshot_grant
 # templates are the successor surface for the same logical resource, and the
 # per-resource grant table already keys on the template id string.
 register_resource_policy(_SandboxV2Template, "sandbox_template_permission")
+# The sandbox_v2 sandbox model is a separate governed entity. It reuses the
+# existing ``sandbox_permission`` Role column: the sandbox_v2 sandboxes are the
+# successor surface for the same logical resource, and the per-resource grant
+# table already keys on the sandbox id string.
+register_resource_policy(_SandboxV2Sandbox, "sandbox_permission")
 
 
 def depends_permissions(
