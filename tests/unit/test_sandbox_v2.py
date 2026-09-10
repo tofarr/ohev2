@@ -953,6 +953,10 @@ class _FakeContainersWithCommit:
         detach: bool = False,
         ports: dict[str, Any] | None = None,
         labels: dict[str, str] | None = None,
+        init: bool = False,
+        extra_hosts: dict[str, str] | None = None,
+        devices: list[str] | None = None,
+        environment: dict[str, str] | None = None,
     ) -> _FakeContainerWithCommit:
         attrs = _container_attrs(name, image=image)
         attrs["State"]["Status"] = "running"
