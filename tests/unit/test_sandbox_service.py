@@ -110,7 +110,7 @@ class _MemorySandboxService(SandboxService):
             desired_status=SandboxStatus.INACTIVE,
         )
 
-    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+    async def _create_sandbox(self, sandbox: Sandbox, *, snapshot_id: str | None = None) -> Sandbox:
         # Assign a generated id (mimics the provider generating one).
         generated_id = f"sb-{uuid.uuid4().hex[:8]}"
         created = sandbox.model_copy(update={"id": generated_id})
@@ -167,7 +167,6 @@ class _MemorySandboxService(SandboxService):
     ) -> SandboxSnapshot:
         snapshot_id = f"snap-{uuid.uuid4().hex[:8]}"
         snapshot.id = snapshot_id
-        snapshot.image_id = f"img-{snapshot_id}"
         snapshot.download_url = f"/sandbox/sandbox-snapshots/{snapshot_id}/download"
         if snapshot.id in self._snapshots:
             raise SandboxSnapshotConflictError(snapshot.id)
@@ -951,7 +950,9 @@ async def test_unsupported_snapshot_service_raises_unsupported() -> None:
         def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
             raise NotImplementedError
 
-        async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+        async def _create_sandbox(
+            self, sandbox: Sandbox, *, snapshot_id: str | None = None
+        ) -> Sandbox:
             raise NotImplementedError
 
         async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:

@@ -3,20 +3,24 @@
 // Models the sandbox split:
 //   - Sandbox is durable user-facing state with provider-neutral public states.
 //   - Compute is an internal replaceable attachment that may come from a warm pool.
-//   - Snapshots are named pins of Fusey filesystem generations.
+//   - Snapshots are gzip tarballs of the sandbox workspace, analogous to a
+//     Kubernetes VolumeSnapshot of a PVC. Snapshots round-trip between providers.
 //
 // Public sandbox states are intentionally provider-neutral:
 // inactive -> activating -> active -> deactivating -> inactive, with deleting
-// and error transitions. Docker/Kubernetes/E2B-specific terms are not exposed.
+// and error transitions. A snapshot capture briefly enters a `snapshotting`
+// state (the workspace must be quiescent for a consistent tarball):
+// inactive -> snapshotting -> inactive. Docker/Kubernetes/E2B-specific terms
+// are not exposed.
 
 module sandbox {
   type ProviderKind = Docker | Kubernetes | E2B
-  type StorageKind = Fusey | OtherStorage
+  type StorageKind = TarballStore | OtherStorage
 
   // Optional epoch-seconds timestamp; Absent when unknown / not applicable.
   type OptInt = Present(int) | Absent
 
-  type SandboxState = Inactive | Activating | Active | Deactivating | Deleting | Error
+  type SandboxState = Inactive | Activating | Active | Deactivating | Deleting | Snapshotting | Error
   type ComputeState = Warming | Dormant | Claimed | Mounting | Initializing | Serving | Draining | Released | Failed | Deleted
   type SnapshotState = Creating | Ready | SnapshotDeleting | SnapshotError
 
@@ -42,7 +46,7 @@ module sandbox {
     id: str,
     filesystemId: str,
     storageKind: StorageKind,
-    generation: str,
+    archivePath: str,
     state: SnapshotState,
   }
 
@@ -189,13 +193,19 @@ module sandbox {
     true
   }
 
-  action createSnapshot(id: str, snap: Snapshot): bool = all {
+  // Begin a snapshot capture: the sandbox must be Inactive (workspace
+  // quiescent) and transitions to Snapshotting. The snapshot record is added
+  // in the Creating state. finishSnapshot moves the snapshot to Ready and the
+  // sandbox back to Inactive.
+  action beginSnapshot(id: str, snap: Snapshot): bool = all {
     sandboxExists(id),
     not(snapshotExists(snap.id)),
-    snap.storageKind == Fusey,
-    snap.generation != "",
+    snap.storageKind == TarballStore,
+    snap.archivePath != "",
     sandboxes.exists(s => s.id == id and s.filesystemId == snap.filesystemId),
-    snapshots' = snapshots.union(Set(snap)),
+    states.get(id) == Inactive,
+    snapshots' = snapshots.union(Set({ id: snap.id, filesystemId: snap.filesystemId,
+      storageKind: snap.storageKind, archivePath: snap.archivePath, state: Creating })),
     sandboxes' = sandboxes.map(s =>
       if (s.id == id)
         { id: s.id, owner: s.owner, providerKind: s.providerKind,
@@ -204,8 +214,42 @@ module sandbox {
           lastAccessedAt: s.lastAccessedAt, pausedAt: s.pausedAt }
       else
         s),
-    states' = states,
+    states' = states.set(id, Snapshotting),
     computes' = computes,
+    true
+  }
+
+  action finishSnapshot(id: str, snapId: str): bool = all {
+    sandboxExists(id),
+    snapshotExists(snapId),
+    states.get(id) == Snapshotting,
+    snapshots' = snapshots.map(sn =>
+      if (sn.id == snapId)
+        { id: sn.id, filesystemId: sn.filesystemId, storageKind: sn.storageKind,
+          archivePath: sn.archivePath, state: Ready }
+      else
+        sn),
+    states' = states.set(id, Inactive),
+    sandboxes' = sandboxes,
+    computes' = computes,
+    true
+  }
+
+  // Create a new sandbox from a snapshot: the snapshot must be Ready, and the
+  // new sandbox's filesystemId matches the snapshot's. This is the restore
+  // path (analogous to creating a PVC from a VolumeSnapshot).
+  action createFromSnapshot(id: str, owner: str, providerKind: ProviderKind,
+    filesystemId: str, snapId: str): bool = all {
+    not(sandboxExists(id)),
+    snapshotExists(snapId),
+    snapshots.exists(sn => sn.id == snapId and sn.state == Ready
+      and sn.filesystemId == filesystemId),
+    sandboxes' = sandboxes.union(Set({ id: id, owner: owner, providerKind: providerKind,
+      filesystemId: filesystemId, currentComputeId: "", currentSnapshotId: snapId,
+      lastAccessedAt: Absent, pausedAt: Absent })),
+    states' = states.set(id, Inactive),
+    computes' = computes,
+    snapshots' = snapshots,
     true
   }
 
@@ -299,8 +343,8 @@ module sandbox {
   val computeAttachedToAtMostOneSandbox: bool =
     computes.forall(c1 => computes.forall(c2 => c1.id == c2.id implies c1 == c2))
 
-  val snapshotsHaveFuseyGeneration: bool =
-    snapshots.forall(s => s.storageKind == Fusey and s.generation != "")
+  val snapshotsHaveArchivePath: bool =
+    snapshots.forall(s => s.storageKind == TarballStore and s.archivePath != "")
 
   val currentSnapshotValid: bool =
     sandboxes.forall(s =>
@@ -366,14 +410,37 @@ module sandbox {
       .fail()
   }
 
-  run snapshotPinsFuseyGeneration = {
+  run snapshotCapturesTarball = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
       filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
-      .then(createSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: Fusey,
-        generation: "generation-1", state: Ready }))
+      .then(beginSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: TarballStore,
+        archivePath: "/snapshots/sn1.tar.gz", state: Ready }))
       .then(all {
-        assert(snapshotsHaveFuseyGeneration),
+        assert(states.get("sb1") == Snapshotting),
+        assert(snapshots.exists(s => s.id == "sn1" and s.state == Creating)),
+        noop
+      })
+      .then(finishSnapshot("sb1", "sn1"))
+      .then(all {
+        assert(states.get("sb1") == Inactive),
+        assert(snapshotsHaveArchivePath),
+        assert(snapshots.exists(s => s.id == "sn1" and s.state == Ready)),
         assert(currentSnapshotValid),
+        noop
+      })
+  }
+
+  run createFromSnapshotRestoresWorkspace = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
+      .then(beginSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: TarballStore,
+        archivePath: "/snapshots/sn1.tar.gz", state: Ready }))
+      .then(finishSnapshot("sb1", "sn1"))
+      .then(createFromSnapshot("sb2", "u2", Kubernetes, "fs1", "sn1"))
+      .then(all {
+        assert(sandboxExists("sb2")),
+        assert(states.get("sb2") == Inactive),
+        assert(sandboxes.exists(s => s.id == "sb2" and s.currentSnapshotId == "sn1")),
         noop
       })
   }

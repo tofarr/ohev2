@@ -64,7 +64,7 @@ class _FakeSnapshotService(SandboxService):
             snapshot_mode=SnapshotMode.MANUAL,
         )
 
-    async def _create_sandbox(self, sandbox: Any) -> Any:
+    async def _create_sandbox(self, sandbox: Any, *, snapshot_id: str | None = None) -> Any:
         sandbox_id = self._next_sandbox_id()
         sandbox.id = sandbox_id
         self._sandboxes[sandbox_id] = sandbox
@@ -88,21 +88,17 @@ class _FakeSnapshotService(SandboxService):
 
     async def _snapshot_from_sandbox(self, payload: SandboxSnapshotCreate, sandbox: Any) -> Any:
         return DockerSandboxSnapshot(
-            image_id=f"image-{sandbox.id}",
             sandbox_id=sandbox.id,
         )
 
     async def _snapshot_from_file(self, payload: SandboxSnapshotCreate) -> Any:
         return DockerSandboxSnapshot(
-            image_id="image-file",
             sandbox_id=None,
         )
 
     async def _create_snapshot(self, snapshot: Any, payload: SandboxSnapshotCreate) -> Any:
         snapshot_id = self._next_sandbox_id()
         snapshot.id = snapshot_id
-        if snapshot.image_id:
-            snapshot.image_id = f"image-{snapshot_id}"
         if snapshot.id in self._snapshots:
             raise SandboxSnapshotConflictError(snapshot.id)
         self._snapshots[snapshot.id] = snapshot
@@ -287,7 +283,7 @@ class TestCrud:
         snapshot_id = create.json()["id"]
         resp = await client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}/download")
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "application/x-tar"
+        assert resp.headers["content-type"] == "application/gzip"
         assert "attachment" in resp.headers["content-disposition"]
 
     async def test_download_missing_returns_404(self, client: AsyncClient) -> None:

@@ -60,7 +60,7 @@ class _FakeSandboxService(SandboxService):
             snapshot_mode=SnapshotMode.UNSUPPORTED,
         )
 
-    async def _create_sandbox(self, sandbox: Any) -> Any:
+    async def _create_sandbox(self, sandbox: Any, *, snapshot_id: str | None = None) -> Any:
         sandbox_id = self._next_id()
         sandbox.id = sandbox_id
         sandbox.status = SandboxStatus.ACTIVE

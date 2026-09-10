@@ -197,6 +197,34 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
   external-scheduler-fallback convention as the LLM/MCP usage loops (config:
   `sandbox_lifecycle_interval`). Pause stamps an `io.openhands.sandbox.paused_at`
   container label so the paused-since time survives restarts; resume clears it.
+* **Deactivation mode.** The Docker backend supports two deactivation
+  strategies via `deactivate_mode` (env `OHE_SANDBOX_DEACTIVATE_MODE`):
+  `pause` (default) uses the Docker cgroup freezer (`docker pause`) — memory
+  and filesystem are frozen in place; `stop` uses `docker stop` then
+  `docker start` on resume — processes are torn down (memory lost) but the
+  writable layer / bind mount persists, giving a fresh restart analogous to
+  scaling a Kubernetes Deployment to zero. This addresses the case where
+  `docker pause` freezes both the filesystem and internal memory; `stop`
+  stores only the filesystem and does a more thorough server restart.
+* **Workspace bind mount.** The Docker backend accepts a `workspace_dir`
+  (env `OHE_SANDBOX_WORKSPACE_DIR`, default `None`). When set, each sandbox
+  is created with a bind mount of `<workspace_dir>/<sandbox_id>` onto the
+  container working directory (`/home/openhands`), giving the sandbox a
+  persistent workspace analogous to a Kubernetes PVC. When `None` the sandbox
+  has no persistent workspace — its container writable layer is ephemeral.
+* **Tarball snapshots.** Both the Docker and Kubernetes backends persist
+  snapshots as gzip-compressed tarballs of the sandbox workspace directory,
+  stored in `snapshot_dir` (env `OHE_SANDBOX_SNAPSHOT_DIR`, default
+  `$HOME/.openhands/enterprise/snapshots`), replacing the previous
+  `docker commit`-based image snapshots. This mirrors the Kubernetes
+  VolumeSnapshot / PVC model: a snapshot is a tarball of the workspace;
+  `SandboxCreate.snapshot_id` restores a snapshot's workspace into a new
+  sandbox before it starts (analogous to creating a PVC from a
+  VolumeSnapshot). Snapshots round-trip between the Docker and Kubernetes
+  providers because the tarball store is shared. A new `SNAPSHOTTING`
+  `SandboxStatus` covers the quiescent capture window
+  (`inactive -> snapshotting -> inactive`). The shared tar/untar logic
+  lives in `util/snapshot_store.py`.
 
 ## 9. Auth
 

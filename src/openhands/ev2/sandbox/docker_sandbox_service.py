@@ -20,9 +20,11 @@ import asyncio
 import contextlib
 import logging
 import re
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 import httpx
@@ -52,11 +54,18 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     SandboxSnapshotConflictError,
     SandboxSnapshotNotFoundError,
+    SandboxSnapshotUnsupportedError,
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
 )
+from openhands.ev2.util import snapshot_store
 
 logger = logging.getLogger(__name__)
+
+# Default working directory mounted into every Docker sandbox container. Both
+# Docker and Kubernetes providers converge on this path so a snapshot taken
+# from one provider restores cleanly into the other.
+_DEFAULT_WORKING_DIR = "/home/openhands"
 
 # Docker image labels carrying the lifespan metadata.
 _TAG_IDLE_PAUSE_SECONDS = "io.openhands.sandbox.idle_pause_seconds"
@@ -92,14 +101,6 @@ _TAG_SANDBOX_TEMPLATE_ID = "io.openhands.sandbox.sandbox_template_id"
 # sweep, so ``paused_delete_seconds`` can be enforced across restarts. Cleared
 # whenever the sandbox is resumed.
 _TAG_PAUSED_AT = "io.openhands.sandbox.paused_at"
-# Label recording that an image is a sandbox snapshot (rather than a template).
-_TAG_SNAPSHOT_ID = "io.openhands.sandbox.snapshot_id"
-# Label recording the source sandbox a snapshot image was committed from.
-_TAG_SNAPSHOT_SANDBOX_ID = "io.openhands.sandbox.snapshot_sandbox_id"
-# Label recording the created-at timestamp for a snapshot image.
-_TAG_SNAPSHOT_CREATED_AT = "io.openhands.sandbox.snapshot_created_at"
-# Docker image tag prefix for committed sandbox snapshot images.
-_SNAPSHOT_IMAGE_PREFIX = "openhands-sandbox-snapshot"
 
 
 class DockerSandboxService(SandboxService):
@@ -111,7 +112,19 @@ class DockerSandboxService(SandboxService):
 
     Sandbox state is the Docker container inventory: a container whose image
     matches one of ``image_name_patterns`` is a valid sandbox. ``desired_status``
-    maps to ``active`` (unpause/start) and ``inactive`` (pause).
+    maps to ``active`` (unpause/start) and ``inactive`` (pause or stop, per
+    ``deactivate_mode``).
+
+    When ``workspace_dir`` is set, each sandbox is created with a bind mount
+    of ``<workspace_dir>/<sandbox_id>`` onto the container working directory,
+    giving the sandbox a persistent workspace analogous to a Kubernetes PVC.
+    When ``workspace_dir`` is ``None`` the sandbox has no persistent workspace
+    (its container writable layer is ephemeral) — the "no PVC" case.
+
+    Snapshots are gzip tarballs of the workspace directory, stored in
+    ``snapshot_dir`` and restored into a new sandbox's workspace before the
+    container starts. This mirrors the Kubernetes VolumeSnapshot model and
+    lets snapshots round-trip between providers.
 
     ``image_name_patterns`` restricts which images are treated as templates;
     only images whose repository/tag matches one of the glob patterns (``*``
@@ -154,13 +167,42 @@ class DockerSandboxService(SandboxService):
             "to have KVM available (/dev/kvm must exist and be accessible). "
         ),
     )
+    workspace_dir: str | None = Field(
+        default=None,
+        description=(
+            "Host directory under which per-sandbox workspace bind mounts are "
+            "created (``<workspace_dir>/<sandbox_id>``). When null the sandbox "
+            "has no persistent workspace — its container writable layer is "
+            "ephemeral (the 'no PVC' case). When set, the directory is created "
+            "with parents if missing on sandbox creation."
+        ),
+    )
+    snapshot_dir: str = Field(
+        default_factory=lambda: str(Path.home() / ".openhands" / "enterprise" / "snapshots"),
+        description=(
+            "Host directory storing snapshot tarballs "
+            "(``<snapshot_dir>/<snapshot_id>.tar.gz``). Created with parents if "
+            "missing. Must be accessible to both this process (for gzip/gunzip) "
+            "and, when streaming, for reading."
+        ),
+    )
+    deactivate_mode: Literal["pause", "stop"] = Field(
+        default="pause",
+        description=(
+            "How a sandbox is deactivated. ``pause`` uses the Docker cgroup "
+            "freezer (``docker pause``) — memory and filesystem are frozen in "
+            "place. ``stop`` uses ``docker stop`` then ``docker start`` on "
+            "resume — processes are torn down (memory lost) but the writable "
+            "layer / bind mount persists, giving a fresh restart analogous to "
+            "scaling a Kubernetes Deployment to zero."
+        ),
+    )
     snapshot_mode: SnapshotMode = Field(
         default=SnapshotMode.MANUAL,
         description=(
             "Snapshot strategy advertised by every Docker sandbox/template. "
-            "Docker supports manual snapshots (``docker commit``) by default; "
-            "set to ``unsupported`` to disable, or ``automatic`` if a background "
-            "commit loop is configured externally."
+            "Docker supports manual workspace snapshots (gzip tarball of the "
+            "workspace directory) by default; set to ``unsupported`` to disable."
         ),
     )
     sandbox_lifecycle_interval: float = Field(
@@ -268,9 +310,13 @@ class DockerSandboxService(SandboxService):
             volume_mounts=[],
         )
 
-    async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
+    async def _create_sandbox(self, sandbox: Sandbox, *, snapshot_id: str | None = None) -> Sandbox:
         docker_sandbox = cast(DockerSandbox, sandbox)
-        container_name = await asyncio.to_thread(self._sync_create_sandbox, docker_sandbox)
+        if snapshot_id is not None and self.snapshot_mode is SnapshotMode.UNSUPPORTED:
+            raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+        container_name = await asyncio.to_thread(
+            self._sync_create_sandbox, docker_sandbox, snapshot_id
+        )
         return await self._get_sandbox(container_name)
 
     async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
@@ -437,14 +483,12 @@ class DockerSandboxService(SandboxService):
 
     # ------------------------------------------------------------------ #
     # Provider hooks - snapshots.
-    # A Docker snapshot is an image produced by ``docker commit`` of a
-    # sandbox container. Snapshot images are tagged
-    # ``openhands-sandbox-snapshot:<snapshot_id>`` and carry labels that mark
-    # them as snapshots (so they are excluded from the template inventory)
-    # and record the source sandbox + created-at timestamp. Importing a
-    # snapshot from an uploaded file uses ``docker load`` to ingest the
-    # tarball, then re-tags the resulting image. Download is served by a
-    # router endpoint that streams ``docker save`` of the snapshot image.
+    # A Docker snapshot is a gzip tarball of the sandbox workspace bind-mount
+    # directory, stored in ``snapshot_dir`` as ``<snapshot_id>.tar.gz``. The
+    # sandbox must be paused (or stopped) before snapshotting so the workspace
+    # is quiescent. Importing a snapshot from an uploaded file writes the raw
+    # bytes into the snapshot store. Download streams the tarball. Restore
+    # happens at sandbox creation time (see ``_sync_create_sandbox``).
     # ------------------------------------------------------------------ #
     async def _list_snapshots(self) -> list[SandboxSnapshot]:
         return cast("list[SandboxSnapshot]", await asyncio.to_thread(self._sync_list_snapshots))
@@ -457,20 +501,22 @@ class DockerSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
         sandbox: Sandbox,
     ) -> SandboxSnapshot:
-        # Pre-persistence model; the id and image_id are assigned during
-        # _create_snapshot when the provider generates the snapshot id.
+        # Pre-persistence model; the id is assigned during _create_snapshot
+        # when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
             sandbox_id=sandbox.id,
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
         )
 
     async def _snapshot_from_file(
         self,
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
-        # Pre-persistence model; the id and image_id are assigned during
-        # _create_snapshot when the provider generates the snapshot id.
+        # Pre-persistence model; the id is assigned during _create_snapshot
+        # when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
             sandbox_id=None,
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
         )
 
     async def _create_snapshot(
@@ -481,24 +527,22 @@ class DockerSandboxService(SandboxService):
         docker_snapshot = cast(DockerSandboxSnapshot, snapshot)
         snapshot_id = _generate_snapshot_id()
         docker_snapshot.id = snapshot_id
-        docker_snapshot.image_id = _snapshot_image_tag(snapshot_id)
+        docker_snapshot.archive_path = str(
+            snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
+        )
         if payload.sandbox_id is not None:
-            await asyncio.to_thread(self._sync_commit_snapshot, docker_snapshot)
+            await asyncio.to_thread(self._sync_tar_snapshot, docker_snapshot, payload.sandbox_id)
         else:
             assert payload.file_data is not None
-            await asyncio.to_thread(self._sync_load_snapshot, docker_snapshot, payload.file_data)
+            await asyncio.to_thread(self._sync_import_snapshot, docker_snapshot, payload.file_data)
         return await self._get_snapshot(snapshot_id)
 
     async def _delete_snapshot(self, snapshot_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
 
     async def stream_snapshot(self, snapshot_id: str) -> Any:
-        """Stream a snapshot's image as a tar archive (``docker save``)."""
-        image_tag = _snapshot_image_tag(snapshot_id)
-        image = await asyncio.to_thread(self._images.get, image_tag)
-        # The Docker SDK image.save() returns a generator of bytes suitable for
-        # a StreamingResponse.
-        return image.save(named=True)
+        """Stream the snapshot tarball (gzip) for download."""
+        return snapshot_store.stream_snapshot(self.snapshot_dir, snapshot_id)
 
     # ------------------------------------------------------------------ #
     # Synchronous Docker Image API calls (offloaded from the event loop).
@@ -514,10 +558,8 @@ class DockerSandboxService(SandboxService):
     def _template_from_image(self, image: Any) -> DockerSandboxTemplate | None:
         """Convert a Docker image to a template, or ``None`` if it is not one.
 
-        Snapshot images and untagged intermediates are skipped.
+        Untagged intermediates are skipped.
         """
-        if _is_snapshot_image(image.attrs):
-            return None
         try:
             template = _template_from_image_attrs(
                 image.attrs, self.exposed_ports, self.snapshot_mode
@@ -531,8 +573,6 @@ class DockerSandboxService(SandboxService):
             image = self._images.get(template_id)
         except ImageNotFound:
             raise SandboxTemplateNotFoundError(template_id) from None
-        if _is_snapshot_image(image.attrs):
-            raise SandboxTemplateNotFoundError(template_id)
         template = _template_from_image_attrs(image.attrs, self.exposed_ports, self.snapshot_mode)
         if not self._matches_image_name_patterns(template.id):
             raise SandboxTemplateNotFoundError(template_id)
@@ -587,22 +627,36 @@ class DockerSandboxService(SandboxService):
             raise SandboxNotFoundError(sandbox_id)
         return sandbox
 
-    def _sync_create_sandbox(self, sandbox: DockerSandbox) -> str:
+    def _sync_create_sandbox(self, sandbox: DockerSandbox, snapshot_id: str | None = None) -> str:
         # A sandbox is a container based on the image named by sandbox_template_id.
-        # The container name (sandbox id) is generated by Docker when ``name`` is
-        # not supplied — Docker mints a humorous two-word name (e.g. ``serene-wright``).
+        # The sandbox id is generated up front so the workspace bind-mount source
+        # directory can be created (and a snapshot restored into it) before the
+        # container starts — the restore must happen against a quiescent host
+        # directory, not a running container's filesystem.
         containers = self._containers
+        sandbox_id = _generate_sandbox_id()
         ports: dict[str, Any] = {}
         for port in self.exposed_ports:
             ports[f"{port.container_port}/tcp"] = None
+        binds: list[str] = []
+        working_dir = _DEFAULT_WORKING_DIR
+        if self.workspace_dir is not None:
+            host_workspace = Path(self.workspace_dir) / sandbox_id
+            host_workspace.mkdir(parents=True, exist_ok=True)
+            if snapshot_id is not None:
+                snapshot_store.restore_snapshot(self.snapshot_dir, snapshot_id, host_workspace)
+            binds.append(f"{host_workspace}:{working_dir}")
         container = containers.run(
             image=sandbox.sandbox_template_id,
+            name=sandbox_id,
             detach=True,
             ports=ports or None,
             labels={
                 _TAG_SANDBOX_TEMPLATE_ID: sandbox.sandbox_template_id,
             },
             init=True,
+            volumes=binds or None,
+            working_dir=working_dir,
             extra_hosts=self.extra_hosts
             if self.extra_hosts and not self.use_host_network
             else None,
@@ -613,8 +667,6 @@ class DockerSandboxService(SandboxService):
                 "SESSION_API_KEY": "changeme"
             },
         )
-        # The sandbox id is the Docker-generated container name.
-        sandbox_id = str(container.name)
         # Stamp the sandbox-id label post-creation so the container can be
         # matched back to its sandbox after a restart.
         with contextlib.suppress(Exception):
@@ -630,7 +682,7 @@ class DockerSandboxService(SandboxService):
         if desired is SandboxStatus.ACTIVE:
             self._activate_container(container, state)
         elif desired is SandboxStatus.INACTIVE:
-            self._pause_container(container, state)
+            self._deactivate_container(container, state)
 
     def _activate_container(self, container: Any, state: str) -> None:
         if state == "paused":
@@ -641,105 +693,92 @@ class DockerSandboxService(SandboxService):
         with contextlib.suppress(Exception):
             container.attrs["Config"]["Labels"].pop(_TAG_PAUSED_AT, None)
 
-    def _pause_container(self, container: Any, state: str) -> None:
-        if state == "running":
+    def _deactivate_container(self, container: Any, state: str) -> None:
+        """Deactivate per ``deactivate_mode``: pause (freeze) or stop (teardown)."""
+        if state != "running":
+            return
+        if self.deactivate_mode == "stop":
+            container.stop()
+        else:
             container.pause()
-            # Record when the sandbox was paused for paused_delete enforcement.
-            with contextlib.suppress(Exception):
-                container.attrs["Config"]["Labels"][_TAG_PAUSED_AT] = _iso_utc_now()
+        # Record when the sandbox was paused for paused_delete enforcement.
+        with contextlib.suppress(Exception):
+            container.attrs["Config"]["Labels"][_TAG_PAUSED_AT] = _iso_utc_now()
 
     def _sync_delete_sandbox(self, sandbox_id: str) -> None:
         try:
             container = self._containers.get(sandbox_id)
         except NotFound:
             raise SandboxNotFoundError(sandbox_id) from None
-        # force=True removes a running/paused container without a separate stop.
+        # force=True removes a running/paused/exited container without a stop.
         container.remove(force=True)
+        # Best-effort cleanup of the per-sandbox workspace bind-mount directory.
+        if self.workspace_dir is not None:
+            with contextlib.suppress(OSError):
+                Path(self.workspace_dir, sandbox_id).rmdir()
 
     # ------------------------------------------------------------------ #
-    # Synchronous Docker Image API calls - snapshots.
+    # Synchronous snapshot store calls (offloaded from the event loop).
     # ------------------------------------------------------------------ #
     def _sync_list_snapshots(self) -> list[DockerSandboxSnapshot]:
         snapshots: list[DockerSandboxSnapshot] = []
-        for image in self._images.list():
-            attrs = image.attrs
-            if not _is_snapshot_image(attrs):
-                continue
-            snapshot = _snapshot_from_image_attrs(attrs)
+        for snap_id in snapshot_store.list_snapshot_ids(self.snapshot_dir):
+            snapshot = self._snapshot_from_store(snap_id)
             if snapshot is not None:
                 snapshots.append(snapshot)
         return snapshots
 
     def _sync_get_snapshot(self, snapshot_id: str) -> DockerSandboxSnapshot:
-        image_name = _snapshot_image_tag(snapshot_id)
-        try:
-            image = self._images.get(image_name)
-        except ImageNotFound:
+        snapshot = self._snapshot_from_store(snapshot_id)
+        if snapshot is None:
             raise SandboxSnapshotNotFoundError(snapshot_id) from None
-        snapshot = _snapshot_from_image_attrs(image.attrs)
-        if snapshot is None or snapshot.id != snapshot_id:
-            raise SandboxSnapshotNotFoundError(snapshot_id)
         return snapshot
 
-    def _sync_commit_snapshot(self, snapshot: DockerSandboxSnapshot) -> None:
-        image_tag = _snapshot_image_tag(snapshot.id)
-        try:
-            self._images.get(image_tag)
-        except ImageNotFound:
-            pass
-        else:
-            raise SandboxSnapshotConflictError(snapshot.id)
-        try:
-            container = self._containers.get(snapshot.sandbox_id)
-        except NotFound:
-            raise SandboxNotFoundError(snapshot.sandbox_id or "") from None
-        created_at = _iso_utc_now()
-        container.commit(
-            repository=_SNAPSHOT_IMAGE_PREFIX,
-            tag=snapshot.id,
-            conf={
-                "Labels": {
-                    _TAG_SNAPSHOT_ID: snapshot.id,
-                    _TAG_SNAPSHOT_SANDBOX_ID: snapshot.sandbox_id or "",
-                    _TAG_SNAPSHOT_CREATED_AT: created_at,
-                }
-            },
+    def _snapshot_from_store(self, snapshot_id: str) -> DockerSandboxSnapshot | None:
+        """Build a snapshot model from a stored tarball, or ``None`` if absent."""
+        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
+            return None
+        created = snapshot_store.snapshot_created_at(self.snapshot_dir, snapshot_id)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return DockerSandboxSnapshot(
+            id=snapshot_id,
+            created_at=created or datetime.now(UTC),
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)),
+            size_bytes=size,
+            sandbox_id=None,  # source-sandbox is not recoverable from the tarball alone
         )
 
-    def _sync_load_snapshot(self, snapshot: DockerSandboxSnapshot, file_data: bytes) -> None:
-        image_tag = _snapshot_image_tag(snapshot.id)
-        try:
-            self._images.get(image_tag)
-        except ImageNotFound:
-            pass
-        else:
+    def _sync_tar_snapshot(self, snapshot: DockerSandboxSnapshot, sandbox_id: str) -> None:
+        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot.id):
             raise SandboxSnapshotConflictError(snapshot.id)
-        result = self._client.images.load(file_data)
-        # ``load`` returns a list of loaded images; re-tag the first one so the
-        # snapshot is addressable by its snapshot id.
-        loaded = result[0] if isinstance(result, list) else result
-        loaded.tag(_SNAPSHOT_IMAGE_PREFIX, tag=snapshot.id)
-        # Record snapshot metadata via a label by re-committing the re-tagged image.
-        created_at = _iso_utc_now()
-        self._client.api.commit(
-            image_tag,
-            repository=_SNAPSHOT_IMAGE_PREFIX,
-            tag=snapshot.id,
-            conf={
-                "Labels": {
-                    _TAG_SNAPSHOT_ID: snapshot.id,
-                    _TAG_SNAPSHOT_SANDBOX_ID: "",
-                    _TAG_SNAPSHOT_CREATED_AT: created_at,
-                }
-            },
-        )
+        workspace = self._workspace_path_for_sandbox(sandbox_id)
+        if workspace is None:
+            raise SandboxNotFoundError(sandbox_id)
+        snapshot_store.create_snapshot(self.snapshot_dir, snapshot.id, workspace)
+
+    def _sync_import_snapshot(self, snapshot: DockerSandboxSnapshot, file_data: bytes) -> None:
+        try:
+            snapshot_store.import_snapshot(self.snapshot_dir, snapshot.id, file_data)
+        except FileExistsError as exc:
+            raise SandboxSnapshotConflictError(snapshot.id) from exc
 
     def _sync_delete_snapshot(self, snapshot_id: str) -> None:
-        image_tag = _snapshot_image_tag(snapshot_id)
-        try:
-            self._images.remove(image=image_tag, force=True)
-        except ImageNotFound:
+        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
             raise SandboxSnapshotNotFoundError(snapshot_id) from None
+        snapshot_store.delete_snapshot(self.snapshot_dir, snapshot_id)
+
+    def _workspace_path_for_sandbox(self, sandbox_id: str) -> Path | None:
+        """Return the host workspace dir for *sandbox_id*, or ``None``.
+
+        When ``workspace_dir`` is unset the sandbox has no persistent workspace
+        to snapshot, so snapshotting is unsupported for that sandbox.
+        """
+        if self.workspace_dir is None:
+            return None
+        workspace = Path(self.workspace_dir) / sandbox_id
+        if not workspace.is_dir():
+            raise SandboxNotFoundError(sandbox_id) from None
+        return workspace
 
 
 def _container_state(container: Any) -> str:
@@ -773,7 +812,7 @@ def _template_from_image_attrs(
         command=config.get("Cmd"),
         created_at=_parse_created(attrs.get("Created")),
         initial_env=_parse_env(config.get("Env")),
-        working_dir=config.get("WorkingDir") or "/home/openhands/workspace",
+        working_dir=config.get("WorkingDir") or _DEFAULT_WORKING_DIR,
         idle_pause_seconds=_label_int(labels, _TAG_IDLE_PAUSE_SECONDS),
         paused_delete_seconds=_label_int(labels, _TAG_PAUSED_DELETE_SECONDS),
         max_age_seconds=_label_int(labels, _TAG_MAX_AGE_SECONDS),
@@ -985,42 +1024,16 @@ def _iso_utc_now() -> str:
 
 
 def _generate_snapshot_id() -> str:
-    """Generate a unique snapshot id (used as the Docker image tag)."""
+    """Generate a unique snapshot id (used as the tarball filename stem)."""
     return uuid.uuid4().hex
 
 
-def _snapshot_image_tag(snapshot_id: str) -> str:
-    """Return the Docker image reference for a snapshot id."""
-    return f"{_SNAPSHOT_IMAGE_PREFIX}:{snapshot_id}"
+def _generate_sandbox_id() -> str:
+    """Generate a unique, human-friendly sandbox (container) name.
 
-
-def _is_snapshot_image(attrs: dict[str, Any]) -> bool:
-    """Return ``True`` when a Docker image's attrs carry the snapshot label."""
-    config = attrs.get("Config") or {}
-    labels = config.get("Labels") or {}
-    return bool(labels.get(_TAG_SNAPSHOT_ID))
-
-
-def _snapshot_from_image_attrs(attrs: dict[str, Any]) -> DockerSandboxSnapshot | None:
-    """Build a :class:`DockerSandboxSnapshot` from a Docker image's attrs.
-
-    Returns ``None`` when the image is not labeled as a snapshot.
+    Docker container names must match ``/?[a-zA-Z0-9][a-zA-Z0-9_.-]+``. We
+    mint a short lowercase alphanumeric id prefixed with ``sandbox-`` so the
+    per-sandbox workspace directory (``<workspace_dir>/<sandbox_id>``) has a
+    predictable, collision-resistant name known before the container starts.
     """
-    config = attrs.get("Config") or {}
-    labels = config.get("Labels") or {}
-    snapshot_id = labels.get(_TAG_SNAPSHOT_ID)
-    if not snapshot_id:
-        return None
-    sandbox_id = labels.get(_TAG_SNAPSHOT_SANDBOX_ID) or None
-    tags = [tag for tag in (attrs.get("RepoTags") or []) if tag != "<none>:<none>"]
-    image_id = tags[0] if tags else _snapshot_image_tag(str(snapshot_id))
-    created_raw = labels.get(_TAG_SNAPSHOT_CREATED_AT)
-    return DockerSandboxSnapshot(
-        id=str(snapshot_id),
-        created_at=_parse_created(created_raw)
-        if created_raw
-        else _parse_created(attrs.get("Created")),
-        download_url=None,
-        image_id=image_id,
-        sandbox_id=sandbox_id if sandbox_id else None,
-    )
+    return f"sandbox-{secrets.token_hex(8)}"

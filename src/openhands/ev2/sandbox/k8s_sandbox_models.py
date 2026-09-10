@@ -22,6 +22,7 @@ from pydantic import Field
 from openhands.ev2.sandbox.sandbox_models import (
     ExposedPort,
     Sandbox,
+    SandboxSnapshot,
     SandboxTemplate,
     VolumeMount,
 )
@@ -53,3 +54,16 @@ class K8sSandbox(Sandbox):
 
     pvc_name: str | None = None
     volume_mounts: list[VolumeMount] = Field(default_factory=list)
+
+
+class K8sSandboxSnapshot(SandboxSnapshot):
+    """A snapshot backed by a gzip tarball restored into / from a PVC.
+
+    A Kubernetes snapshot is produced by tarring the sandbox workspace (the PVC
+    contents, captured while the sandbox is scaled to zero) into a tarball in
+    the configured snapshot store. ``archive_path`` is the path of the stored
+    tarball. Restore populates a new PVC from the tarball before the sandbox
+    Deployment is created, analogous to creating a PVC from a VolumeSnapshot.
+    """
+
+    archive_path: str | None = None
