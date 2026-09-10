@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
+import httpx
 from docker.errors import ImageNotFound, NotFound  # type: ignore[import-untyped]
 from pydantic import Field
 
@@ -52,6 +54,8 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
 )
+
+logger = logging.getLogger(__name__)
 
 # Docker image labels carrying the lifespan metadata.
 _TAG_IDLE_PAUSE_SECONDS = "io.openhands.sandbox.idle_pause_seconds"
@@ -83,6 +87,10 @@ DEFAULT_EXPOSED_PORTS: tuple[ExposedPort, ...] = (
 _TAG_SANDBOX_ID = "io.openhands.sandbox.sandbox_id"
 # Label recording the template id (image name) the container was built from.
 _TAG_SANDBOX_TEMPLATE_ID = "io.openhands.sandbox.sandbox_template_id"
+# Label recording the wall-clock time a sandbox was paused by the lifecycle
+# sweep, so ``paused_delete_seconds`` can be enforced across restarts. Cleared
+# whenever the sandbox is resumed.
+_TAG_PAUSED_AT = "io.openhands.sandbox.paused_at"
 # Label recording that an image is a sandbox snapshot (rather than a template).
 _TAG_SNAPSHOT_ID = "io.openhands.sandbox.snapshot_id"
 # Label recording the source sandbox a snapshot image was committed from.
@@ -154,15 +162,48 @@ class DockerSandboxService(SandboxService):
             "commit loop is configured externally."
         ),
     )
+    sandbox_lifecycle_interval: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds between background sweeps that enforce the template "
+            "lifespan knobs (``idle_pause_seconds``, ``paused_delete_seconds``, "
+            "``max_age_seconds``) on every sandbox. When 0 the in-process loop "
+            "is disabled and the sweep must be driven by an external scheduler "
+            "calling ``DockerSandboxService.sweep_lifecycle``; see README "
+            "'Sandbox lifecycle'."
+        ),
+    )
+    agent_server_probe_timeout: float = Field(
+        default=2.0,
+        ge=0,
+        description=(
+            "Per-sandbox HTTP timeout (seconds) for probing the agent server "
+            "root endpoint to derive ``last_accessed_at`` from its reported "
+            "``idle_time``."
+        ),
+    )
 
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
         self._client: Any = None
+        self._http: httpx.AsyncClient | None = None
+        self._lifecycle_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> DockerSandboxService:
+        self._start_lifecycle_loop()
         return self
 
     async def aclose(self) -> None:
+        task = self._lifecycle_task
+        self._lifecycle_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
         self._client = None
 
     @property
@@ -203,10 +244,14 @@ class DockerSandboxService(SandboxService):
     # Provider hooks — sandboxes.
     # ------------------------------------------------------------------ #
     async def _list_sandboxes(self) -> list[Sandbox]:
-        return cast("list[Sandbox]", await asyncio.to_thread(self._sync_list_sandboxes))
+        sandboxes = cast("list[DockerSandbox]", await asyncio.to_thread(self._sync_list_sandboxes))
+        await asyncio.gather(*(self._enrich_last_accessed_at(sb) for sb in sandboxes))
+        return cast("list[Sandbox]", sandboxes)
 
     async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
-        return await asyncio.to_thread(self._sync_get_sandbox, sandbox_id)
+        sandbox = cast(DockerSandbox, await asyncio.to_thread(self._sync_get_sandbox, sandbox_id))
+        await self._enrich_last_accessed_at(sandbox)
+        return cast(Sandbox, sandbox)
 
     def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
         # ``id`` is assigned by the provider during ``_create_sandbox``; the
@@ -233,6 +278,161 @@ class DockerSandboxService(SandboxService):
 
     async def _delete_sandbox(self, sandbox_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_sandbox, sandbox_id)
+
+    # ------------------------------------------------------------------ #
+    # last_accessed_at derivation + lifecycle sweep.
+    # ------------------------------------------------------------------ #
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self.agent_server_probe_timeout)
+        return self._http
+
+    def _agent_server_url(self, sandbox: DockerSandbox) -> str | None:
+        """Return the agent server root URL for *sandbox*, or ``None``.
+
+        Only an ``active`` sandbox exposes a reachable agent server; sandboxes
+        in any other state have no URL to probe.
+        """
+        if sandbox.status is not SandboxStatus.ACTIVE or not sandbox.exposed_urls:
+            return None
+        for url in sandbox.exposed_urls:
+            if url.name == AGENT_SERVER:
+                return url.url.rstrip("/")
+        return None
+
+    async def _resolve_last_accessed_at(self, sandbox: DockerSandbox) -> datetime | None:
+        """Probe the agent server root to derive ``last_accessed_at``.
+
+        The agent server exposes ``{"idle_time": <seconds>}`` at ``/``; the
+        last-accessed time is ``now - idle_time``. Returns ``None`` when the
+        sandbox has no agent server URL, the probe fails, or the payload omits
+        a usable ``idle_time``.
+        """
+        root = self._agent_server_url(sandbox)
+        if root is None:
+            return None
+        try:
+            response = await self._http_client().get(f"{root}/")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        idle = payload.get("idle_time") if isinstance(payload, dict) else None
+        if not isinstance(idle, (int, float)) or idle < 0:
+            return None
+        return datetime.now(UTC) - timedelta(seconds=float(idle))
+
+    async def _enrich_last_accessed_at(self, sandbox: DockerSandbox) -> None:
+        """Fill ``last_accessed_at`` from the agent server probe, best-effort."""
+        accessed = await self._resolve_last_accessed_at(sandbox)
+        sandbox.last_accessed_at = accessed
+
+    def _start_lifecycle_loop(self) -> None:
+        """Start the background lifecycle sweep if configured (``interval > 0``)."""
+        if self.sandbox_lifecycle_interval <= 0 or self._lifecycle_task is not None:
+            return
+        self._lifecycle_task = asyncio.create_task(self._lifecycle_loop(), name="sandbox-lifecycle")
+
+    async def _lifecycle_loop(self) -> None:
+        """Run :meth:`sweep_lifecycle` every interval until cancelled."""
+        while True:
+            await asyncio.sleep(self.sandbox_lifecycle_interval)
+            try:
+                summary = await self.sweep_lifecycle()
+            except Exception:
+                logger.exception("sandbox lifecycle sweep failed; will retry next interval")
+            else:
+                if summary:
+                    logger.info("sandbox lifecycle: %s", summary)
+
+    async def sweep_lifecycle(self) -> str | None:
+        """Enforce template lifespan knobs across every sandbox.
+
+        For each sandbox the template's ``idle_pause_seconds``,
+        ``paused_delete_seconds`` and ``max_age_seconds`` are consulted (a
+        ``None`` knob is not enforced). Actions, in priority order:
+
+        * ``max_age_seconds`` — delete a sandbox whose ``created_at`` is older.
+        * ``idle_pause_seconds`` — pause an ``active`` sandbox whose agent
+          server reports idle time beyond the threshold.
+        * ``paused_delete_seconds`` — delete an ``inactive`` sandbox paused
+          longer than the threshold (the pause time is read from the
+          ``io.openhands.sandbox.paused_at`` container label).
+
+        Returns a one-line summary of actions taken, or ``None`` when idle.
+        """
+        sandboxes = cast("list[DockerSandbox]", await self._list_sandboxes())
+        paused = 0
+        deleted = 0
+        for sandbox in sandboxes:
+            template = await self._safe_template(sandbox.sandbox_template_id)
+            if template is None:
+                continue
+            action = await self._lifecycle_action(sandbox, template)
+            if action == "deleted":
+                deleted += 1
+            elif action == "paused":
+                paused += 1
+        parts: list[str] = []
+        if paused:
+            parts.append(f"paused {paused} idle sandbox(es)")
+        if deleted:
+            parts.append(f"deleted {deleted} sandbox(es)")
+        return "; ".join(parts) if parts else None
+
+    async def _safe_template(self, template_id: str) -> DockerSandboxTemplate | None:
+        try:
+            return cast(DockerSandboxTemplate, await self._get_template(template_id))
+        except SandboxTemplateNotFoundError:
+            return None
+
+    async def _lifecycle_action(
+        self, sandbox: DockerSandbox, template: SandboxTemplate
+    ) -> str | None:
+        """Apply the highest-priority lifespan action to *sandbox*."""
+        now = datetime.now(UTC)
+        if template.max_age_seconds is not None and (now - sandbox.created_at) > timedelta(
+            seconds=template.max_age_seconds
+        ):
+            await self._delete_sandbox(sandbox.id)
+            return "deleted"
+        if sandbox.status is SandboxStatus.ACTIVE and template.idle_pause_seconds is not None:
+            idle_seconds = self._idle_seconds(sandbox)
+            if idle_seconds is not None and idle_seconds > template.idle_pause_seconds:
+                await self._update_sandbox(
+                    sandbox.id, SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
+                )
+                return "paused"
+        if sandbox.status is SandboxStatus.INACTIVE and template.paused_delete_seconds is not None:
+            paused_at = await asyncio.to_thread(self._sync_paused_at, sandbox.id)
+            if paused_at is not None and (now - paused_at) > timedelta(
+                seconds=template.paused_delete_seconds
+            ):
+                await self._delete_sandbox(sandbox.id)
+                return "deleted"
+        return None
+
+    @staticmethod
+    def _idle_seconds(sandbox: DockerSandbox) -> float | None:
+        if sandbox.last_accessed_at is None:
+            return None
+        return (datetime.now(UTC) - sandbox.last_accessed_at).total_seconds()
+
+    def _sync_paused_at(self, sandbox_id: str) -> datetime | None:
+        """Return the ``paused_at`` label timestamp for a sandbox, or ``None``."""
+        try:
+            container = self._containers.get(sandbox_id)
+        except NotFound:
+            return None
+        labels = (container.attrs.get("Config") or {}).get("Labels") or {}
+        raw = labels.get(_TAG_PAUSED_AT)
+        if not raw:
+            return None
+        return _parse_created(raw)
 
     # ------------------------------------------------------------------ #
     # Provider hooks - snapshots.
@@ -434,17 +634,21 @@ class DockerSandboxService(SandboxService):
         elif desired is SandboxStatus.INACTIVE:
             self._pause_container(container, state)
 
-    @staticmethod
-    def _activate_container(container: Any, state: str) -> None:
+    def _activate_container(self, container: Any, state: str) -> None:
         if state == "paused":
             container.unpause()
         elif state in ("exited", "created"):
             container.start()
+        # Clear the paused-at label so a subsequent idle pause re-stamps it.
+        with contextlib.suppress(Exception):
+            container.attrs["Config"]["Labels"].pop(_TAG_PAUSED_AT, None)
 
-    @staticmethod
-    def _pause_container(container: Any, state: str) -> None:
+    def _pause_container(self, container: Any, state: str) -> None:
         if state == "running":
             container.pause()
+            # Record when the sandbox was paused for paused_delete enforcement.
+            with contextlib.suppress(Exception):
+                container.attrs["Config"]["Labels"][_TAG_PAUSED_AT] = _iso_utc_now()
 
     def _sync_delete_sandbox(self, sandbox_id: str) -> None:
         try:

@@ -186,6 +186,17 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
 * A new backend implements the interface and registers via config — no scattering of
   backend-specific calls in services.
 * Both ephemeral and persistent sandboxes are supported via the same interface.
+* `Sandbox` carries a nullable `last_accessed_at`. The Docker backend derives it
+  from the container's agent-server root endpoint (`GET /` → JSON `idle_time`):
+  `last_accessed_at = now - idle_time`. Best-effort — `null` when the sandbox is
+  not `active`, unreachable, or the payload lacks `idle_time`.
+* A background lifecycle sweep enforces the per-template lifespan knobs
+  (`idle_pause_seconds`, `paused_delete_seconds`, `max_age_seconds`). The sweep
+  runs as an in-process `asyncio` loop started by the sandbox service's
+  `__aenter__` (tied to the app lifespan), following the same `= 0` disables /
+  external-scheduler-fallback convention as the LLM/MCP usage loops (config:
+  `sandbox_lifecycle_interval`). Pause stamps an `io.openhands.sandbox.paused_at`
+  container label so the paused-since time survives restarts; resume clears it.
 
 ## 9. Auth
 

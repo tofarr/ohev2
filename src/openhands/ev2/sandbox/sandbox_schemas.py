@@ -179,6 +179,7 @@ class SandboxRead(BaseModel):
     session_api_key: str | None
     exposed_urls: list[ExposedUrl]
     created_at: datetime
+    last_accessed_at: datetime | None
     status_detail: str | None
     volume_mounts: list[VolumeMount]
     user_id: uuid.UUID | None
@@ -198,6 +199,10 @@ class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
     created_at__lt: datetime | None = Field(default=None)
     created_at__gt: datetime | None = Field(default=None)
     created_at__lte: datetime | None = Field(default=None)
+    last_accessed_at__gte: datetime | None = Field(default=None)
+    last_accessed_at__lt: datetime | None = Field(default=None)
+    last_accessed_at__gt: datetime | None = Field(default=None)
+    last_accessed_at__lte: datetime | None = Field(default=None)
 
 
 class SandboxSearchResult(BaseModel):

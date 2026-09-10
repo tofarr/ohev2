@@ -173,6 +173,15 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
         default=None,
         description="The user who created this sandbox; null when unknown.",
     )
+    last_accessed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Last time the sandbox was determined to be active, derived from "
+            "the agent server's reported idle time (now - idle_time). Null when "
+            "the provider could not determine it (e.g. the sandbox is not "
+            "running or the agent server did not respond)."
+        ),
+    )
     status_detail: str | None = Field(
         default=None,
         description=(
