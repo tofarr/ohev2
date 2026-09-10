@@ -18,12 +18,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role
-from openhands.ev2.sandbox.sandbox_models import (
-    DockerSandboxTemplateSpec,
-    FuseySandboxStorageSpec,
-    OpenHandsAgentServerSpec,
-    SandboxTemplate,
-)
 from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchCreate,
     RoleSandboxTemplatePermissionBatchDelete,
@@ -41,29 +35,20 @@ from openhands.ev2.sandbox_v2.role_sandbox_template_permission_service import (
     _classify_integrity_error,
 )
 from openhands.ev2.security.security_models import Action
-from openhands.ev2.user.user_models import User
 from openhands.ev2.util.search_filter import ALL, NONE
 
 # --------------------------------------------------------------------------- #
-# Seed helpers (shared with the sandbox-package service tests in shape).
+# Seed helpers.
+#
+# sandbox_v2 templates are provider-owned (e.g. Docker images), not rows in a
+# ``sandbox_templates`` table, so the grant table's ``sandbox_template_id`` is
+# a free UUID with no foreign key. Tests therefore mint a random template id
+# rather than seeding an ORM template row.
 # --------------------------------------------------------------------------- #
 
 
-async def _seed_template(session: AsyncSession, *, n: int = 0) -> SandboxTemplate:
-    user = User(email=f"v2-{n}@e.com", username=f"v2u{n}")
-    session.add(user)
-    await session.flush()
-    tpl = SandboxTemplate(
-        name=f"v2-tpl-{n}-{uuid.uuid4().hex[:4]}",
-        provider_kind="docker",
-        template_spec=DockerSandboxTemplateSpec(image="img"),
-        server_spec=OpenHandsAgentServerSpec(internal_port=18000),
-        storage_spec=FuseySandboxStorageSpec(mount_path="/ws"),
-        user_id=user.id,
-    )
-    session.add(tpl)
-    await session.flush()
-    return tpl
+def _seed_template_id() -> uuid.UUID:
+    return uuid.uuid4()
 
 
 async def _seed_role(session: AsyncSession, *, n: int = 0) -> Role:
@@ -82,11 +67,11 @@ class TestCreate:
     async def test_defaults(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         assert isinstance(link.id, uuid.UUID)
         assert link.role_id == role.id
-        assert link.sandbox_template_id == tpl.id
+        assert link.sandbox_template_id == tpl_id
         assert link.read_enabled is False
         assert link.update_enabled is False
         assert link.delete_enabled is False
@@ -94,10 +79,10 @@ class TestCreate:
     async def test_with_flags(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
+        tpl_id = _seed_template_id()
         link = await svc.create(
             role_id=role.id,
-            sandbox_template_id=tpl.id,
+            sandbox_template_id=tpl_id,
             read_enabled=True,
             delete_enabled=True,
         )
@@ -108,29 +93,23 @@ class TestCreate:
     async def test_duplicate_conflicts(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         with pytest.raises(RoleSandboxTemplatePermissionConflictError):
-            await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+            await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
 
     async def test_orphan_role_raises(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
-        tpl = await _seed_template(session)
+        tpl_id = _seed_template_id()
         with pytest.raises(RoleSandboxTemplatePermissionOrphanError):
-            await svc.create(role_id=uuid.uuid4(), sandbox_template_id=tpl.id)
-
-    async def test_orphan_template_raises(self, session: AsyncSession) -> None:
-        svc = RoleSandboxTemplatePermissionService(session)
-        role = await _seed_role(session)
-        with pytest.raises(RoleSandboxTemplatePermissionOrphanError):
-            await svc.create(role_id=role.id, sandbox_template_id=uuid.uuid4())
+            await svc.create(role_id=uuid.uuid4(), sandbox_template_id=tpl_id)
 
     async def test_scope_error_when_denied(self, session: AsyncSession) -> None:
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
+        tpl_id = _seed_template_id()
         svc = RoleSandboxTemplatePermissionService(session, NONE)
         with pytest.raises(RoleSandboxTemplatePermissionScopeError):
-            await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+            await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -142,8 +121,8 @@ class TestGet:
     async def test_get_returns_link(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         got = await svc.get(link.id)
         assert got.id == link.id
 
@@ -155,8 +134,8 @@ class TestGet:
     async def test_get_out_of_scope_raises(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         denied = RoleSandboxTemplatePermissionService(session, NONE)
         with pytest.raises(RoleSandboxTemplatePermissionNotFoundError):
             await denied.get(link.id)
@@ -166,8 +145,8 @@ class TestGetMany:
     async def test_aligned_with_nulls(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         results = await svc.get_many([link.id, uuid.uuid4()])
         assert results[0] is not None and results[0].id == link.id
         assert results[1] is None
@@ -186,8 +165,8 @@ class TestSearchCount:
     async def test_search_filters_by_role(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        await svc.create(role_id=role.id, sandbox_template_id=tpl.id, read_enabled=True)
+        tpl_id = _seed_template_id()
+        await svc.create(role_id=role.id, sandbox_template_id=tpl_id, read_enabled=True)
         links, _ = await svc.search_role_sandbox_template_permissions(
             search_filter=RoleSandboxTemplatePermissionSearchFilter(role_id__eq=role.id)
         )
@@ -199,8 +178,8 @@ class TestSearchCount:
         role = await _seed_role(session)
         created: list[uuid.UUID] = []
         for _ in range(3):
-            tpl = await _seed_template(session, n=len(created))
-            link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+            tpl_id = _seed_template_id()
+            link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
             created.append(link.id)
         # Search orders by id; use the smallest id as the cursor so the page
         # excludes exactly that one.
@@ -216,8 +195,8 @@ class TestSearchCount:
         role = await _seed_role(session)
         created: list[uuid.UUID] = []
         for _ in range(3):
-            tpl = await _seed_template(session, n=len(created))
-            link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+            tpl_id = _seed_template_id()
+            link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
             created.append(link.id)
         page, next_cursor = await svc.search_role_sandbox_template_permissions(limit=2)
         assert len(page) == 2
@@ -226,15 +205,15 @@ class TestSearchCount:
     async def test_count(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         assert await svc.count() >= 1
 
     async def test_count_with_filter(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         assert await svc.count(RoleSandboxTemplatePermissionSearchFilter(role_id__eq=role.id)) == 1
 
 
@@ -247,8 +226,8 @@ class TestUpdate:
     async def test_toggles_flags(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         updated = await svc.update(
             link.id,
             RoleSandboxTemplatePermissionUpdate(
@@ -272,8 +251,8 @@ class TestDelete:
     async def test_removes(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         await svc.delete(link.id)
         with pytest.raises(RoleSandboxTemplatePermissionNotFoundError):
             await svc.get(link.id)
@@ -293,20 +272,20 @@ class TestBatch:
     async def test_create_update_delete(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
+        tpl_id = _seed_template_id()
         role2 = await _seed_role(session, n=1)
-        tpl2 = await _seed_template(session, n=1)
+        tpl2 = _seed_template_id()
         results = await svc.apply_batch(
             [
                 RoleSandboxTemplatePermissionBatchCreate(
                     data={
                         "role_id": role.id,
-                        "sandbox_template_id": tpl.id,
+                        "sandbox_template_id": tpl_id,
                         "read_enabled": True,
                     }
                 ),
                 RoleSandboxTemplatePermissionBatchCreate(
-                    data={"role_id": role2.id, "sandbox_template_id": tpl2.id}
+                    data={"role_id": role2.id, "sandbox_template_id": tpl2}
                 ),
                 RoleSandboxTemplatePermissionBatchUpdate(
                     id=uuid.uuid4(),  # placeholder, replaced below
@@ -323,8 +302,8 @@ class TestBatch:
     async def test_batch_update_and_delete(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         results = await svc.apply_batch(
             [
                 RoleSandboxTemplatePermissionBatchUpdate(
@@ -343,12 +322,12 @@ class TestBatch:
     async def test_create_denied_when_action_filter_none(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
+        tpl_id = _seed_template_id()
         with pytest.raises(BatchPermissionDeniedError):
             await svc.apply_batch(
                 [
                     RoleSandboxTemplatePermissionBatchCreate(
-                        data={"role_id": role.id, "sandbox_template_id": tpl.id}
+                        data={"role_id": role.id, "sandbox_template_id": tpl_id}
                     ),
                 ],
                 {Action.CREATE: None, Action.UPDATE: None, Action.DELETE: None},
@@ -357,8 +336,8 @@ class TestBatch:
     async def test_update_denied_when_action_filter_none(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         with pytest.raises(BatchPermissionDeniedError):
             await svc.apply_batch(
                 [
@@ -373,8 +352,8 @@ class TestBatch:
     async def test_delete_denied_when_action_filter_none(self, session: AsyncSession) -> None:
         svc = RoleSandboxTemplatePermissionService(session)
         role = await _seed_role(session)
-        tpl = await _seed_template(session)
-        link = await svc.create(role_id=role.id, sandbox_template_id=tpl.id)
+        tpl_id = _seed_template_id()
+        link = await svc.create(role_id=role.id, sandbox_template_id=tpl_id)
         with pytest.raises(BatchPermissionDeniedError):
             await svc.apply_batch(
                 [RoleSandboxTemplatePermissionBatchDelete(id=link.id)],
@@ -405,17 +384,6 @@ def test_classify_generic_unique_constraint_conflict() -> None:
     )
     result = _classify_integrity_error(exc, uuid.uuid4(), uuid.uuid4())
     assert isinstance(result, RoleSandboxTemplatePermissionConflictError)
-
-
-def test_classify_orphan_sandbox_template() -> None:
-    sandbox_template_id = uuid.uuid4()
-    exc = _integrity(
-        'insert or update on table "role_sandbox_template_permissions" '
-        'violates foreign key constraint "fk_sandbox_template_id"'
-    )
-    result = _classify_integrity_error(exc, uuid.uuid4(), sandbox_template_id)
-    assert isinstance(result, RoleSandboxTemplatePermissionOrphanError)
-    assert str(sandbox_template_id) in str(result)
 
 
 def test_classify_orphan_role() -> None:

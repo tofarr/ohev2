@@ -33,11 +33,7 @@ Tables:
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
 * ``feature_flag_role_assignments``     — per-role overrides of feature flags.
-* ``sandbox_templates``      — reusable sandbox activation templates.
-* ``sandbox_filesystems``    — durable Fusey-backed sandbox filesystems.
-* ``sandboxes``              — user-facing durable sandbox environments.
-* ``sandbox_snapshots``      — named Fusey filesystem generation pins.
-* ``sandbox_computes``       — internal replaceable compute attachments.
+* ``role_sandbox_template_permissions`` — per-role grants of access to sandbox templates.
 """
 
 from __future__ import annotations
@@ -459,18 +455,6 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for role-sandbox-template grant resources; null = deny.",
-        ),
-        sa.Column(
-            "sandbox_grant_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for role-sandbox grant resources; null = deny.",
-        ),
-        sa.Column(
-            "sandbox_snapshot_grant_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for role-sandbox-snapshot grant resources; null = deny.",
         ),
         sa.Column(
             "created_at",
@@ -1007,247 +991,6 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # sandbox_templates
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "sandbox_templates",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("provider_kind", sa.String(length=32), nullable=False),
-        sa.Column("template_spec", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("server_spec", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("storage_spec", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("idle_timeout_seconds", sa.Integer(), nullable=True),
-        sa.Column("max_lifetime_seconds", sa.Integer(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        comment="Reusable sandbox activation templates",
-    )
-    op.create_index("ix_sandbox_templates_name", "sandbox_templates", ["name"], unique=False)
-    op.create_index(
-        "ix_sandbox_templates_provider_kind", "sandbox_templates", ["provider_kind"], unique=False
-    )
-    op.create_index("ix_sandbox_templates_user_id", "sandbox_templates", ["user_id"], unique=False)
-
-    # ------------------------------------------------------------------ #
-    # sandbox_filesystems
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "sandbox_filesystems",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("storage_kind", sa.String(length=32), nullable=False),
-        sa.Column("object_prefix", sa.String(length=2048), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column(
-            "status", sa.String(length=32), server_default=sa.text("'ready'"), nullable=False
-        ),
-        sa.Column("head_generation", sa.String(length=255), nullable=True),
-        sa.Column("mount_path_default", sa.String(length=1024), nullable=False),
-        sa.Column("max_size_bytes", sa.BigInteger(), nullable=True),
-        sa.Column("size_bytes_estimate", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("object_prefix"),
-        comment="Durable Fusey-backed sandbox filesystems",
-    )
-    op.create_index(
-        "ix_sandbox_filesystems_storage_kind", "sandbox_filesystems", ["storage_kind"], unique=False
-    )
-    op.create_index(
-        "ix_sandbox_filesystems_status", "sandbox_filesystems", ["status"], unique=False
-    )
-    op.create_index(
-        "ix_sandbox_filesystems_user_id", "sandbox_filesystems", ["user_id"], unique=False
-    )
-
-    # ------------------------------------------------------------------ #
-    # sandboxes
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "sandboxes",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("template_id", sa.Uuid(), nullable=False),
-        sa.Column("filesystem_id", sa.Uuid(), nullable=False),
-        sa.Column("provider_kind", sa.String(length=32), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column(
-            "status", sa.String(length=32), server_default=sa.text("'inactive'"), nullable=False
-        ),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("status_reason", sa.Text(), nullable=True),
-        sa.Column("current_snapshot_id", sa.Uuid(), nullable=True),
-        sa.Column("current_compute_id", sa.Uuid(), nullable=True),
-        sa.Column(
-            "exposed_urls",
-            postgresql.JSONB(astext_type=sa.Text()),
-            server_default=sa.text("'[]'::jsonb"),
-            nullable=False,
-        ),
-        sa.Column("idle_timeout_seconds", sa.Integer(), nullable=True),
-        sa.Column("max_lifetime_seconds", sa.Integer(), nullable=True),
-        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_activated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_deactivated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("delete_started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["filesystem_id"], ["sandbox_filesystems.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["template_id"], ["sandbox_templates.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        comment="Durable user-facing sandbox environments",
-    )
-    op.create_index("ix_sandboxes_name", "sandboxes", ["name"], unique=False)
-    op.create_index("ix_sandboxes_template_id", "sandboxes", ["template_id"], unique=False)
-    op.create_index("ix_sandboxes_filesystem_id", "sandboxes", ["filesystem_id"], unique=False)
-    op.create_index("ix_sandboxes_provider_kind", "sandboxes", ["provider_kind"], unique=False)
-    op.create_index("ix_sandboxes_user_id", "sandboxes", ["user_id"], unique=False)
-    op.create_index("ix_sandboxes_status", "sandboxes", ["status"], unique=False)
-
-    # ------------------------------------------------------------------ #
-    # sandbox_snapshots
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "sandbox_snapshots",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("filesystem_id", sa.Uuid(), nullable=False),
-        sa.Column("storage_kind", sa.String(length=32), nullable=False),
-        sa.Column("generation", sa.String(length=255), nullable=False),
-        sa.Column("snapshot_artifact", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("source_sandbox_id", sa.Uuid(), nullable=True),
-        sa.Column(
-            "status", sa.String(length=32), server_default=sa.text("'ready'"), nullable=False
-        ),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["filesystem_id"], ["sandbox_filesystems.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["source_sandbox_id"], ["sandboxes.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "filesystem_id",
-            "generation",
-            "name",
-            name="uq_sandbox_snapshots_filesystem_generation_name",
-        ),
-        comment="Named Fusey filesystem generation snapshots",
-    )
-    op.create_index("ix_sandbox_snapshots_name", "sandbox_snapshots", ["name"], unique=False)
-    op.create_index(
-        "ix_sandbox_snapshots_filesystem_id", "sandbox_snapshots", ["filesystem_id"], unique=False
-    )
-    op.create_index(
-        "ix_sandbox_snapshots_storage_kind", "sandbox_snapshots", ["storage_kind"], unique=False
-    )
-    op.create_index(
-        "ix_sandbox_snapshots_generation", "sandbox_snapshots", ["generation"], unique=False
-    )
-    op.create_index("ix_sandbox_snapshots_user_id", "sandbox_snapshots", ["user_id"], unique=False)
-    op.create_index(
-        "ix_sandbox_snapshots_source_sandbox_id",
-        "sandbox_snapshots",
-        ["source_sandbox_id"],
-        unique=False,
-    )
-    op.create_index("ix_sandbox_snapshots_status", "sandbox_snapshots", ["status"], unique=False)
-
-    # ------------------------------------------------------------------ #
-    # sandbox_computes
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "sandbox_computes",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("provider_kind", sa.String(length=32), nullable=False),
-        sa.Column("status", sa.String(length=32), nullable=False),
-        sa.Column("runtime_state", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("server_state", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("template_id", sa.Uuid(), nullable=True),
-        sa.Column("sandbox_id", sa.Uuid(), nullable=True),
-        sa.Column("mount_lease_id", sa.Uuid(), nullable=True),
-        sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_health_check_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("terminated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(["sandbox_id"], ["sandboxes.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["template_id"], ["sandbox_templates.id"], ondelete="SET NULL"),
-        sa.PrimaryKeyConstraint("id"),
-        comment="Internal replaceable sandbox compute attachments",
-    )
-    op.create_index(
-        "ix_sandbox_computes_provider_kind", "sandbox_computes", ["provider_kind"], unique=False
-    )
-    op.create_index("ix_sandbox_computes_status", "sandbox_computes", ["status"], unique=False)
-    op.create_index(
-        "ix_sandbox_computes_template_id", "sandbox_computes", ["template_id"], unique=False
-    )
-    op.create_index(
-        "ix_sandbox_computes_sandbox_id", "sandbox_computes", ["sandbox_id"], unique=False
-    )
-
-    # ------------------------------------------------------------------ #
     # role_sandbox_template_permissions
     # ------------------------------------------------------------------ #
     op.create_table(
@@ -1276,12 +1019,6 @@ def upgrade() -> None:
             ondelete="CASCADE",
             name="fk_role_sandbox_template_permissions_role_id_roles",
         ),
-        sa.ForeignKeyConstraint(
-            ["sandbox_template_id"],
-            ["sandbox_templates.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_tpl_perm_template_id_sandbox_templates",
-        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "role_id",
@@ -1300,116 +1037,6 @@ def upgrade() -> None:
         "ix_role_sandbox_template_permissions_sandbox_template_id",
         "role_sandbox_template_permissions",
         ["sandbox_template_id"],
-        unique=False,
-    )
-
-    # ------------------------------------------------------------------ #
-    # role_sandbox_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "role_sandbox_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("role_id", sa.Uuid(), nullable=False),
-        sa.Column("sandbox_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["role_id"],
-            ["roles.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_permissions_role_id_roles",
-        ),
-        sa.ForeignKeyConstraint(
-            ["sandbox_id"],
-            ["sandboxes.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_permissions_sandbox_id_sandboxes",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "role_id", "sandbox_id", name="uq_role_sandbox_perm_role_id_sandbox_id"
-        ),
-        comment="Per-role grants of access to sandboxes",
-    )
-    op.create_index(
-        "ix_role_sandbox_permissions_role_id",
-        "role_sandbox_permissions",
-        ["role_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_role_sandbox_permissions_sandbox_id",
-        "role_sandbox_permissions",
-        ["sandbox_id"],
-        unique=False,
-    )
-
-    # ------------------------------------------------------------------ #
-    # role_sandbox_snapshot_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "role_sandbox_snapshot_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("role_id", sa.Uuid(), nullable=False),
-        sa.Column("sandbox_snapshot_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["role_id"],
-            ["roles.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_snapshot_permissions_role_id_roles",
-        ),
-        sa.ForeignKeyConstraint(
-            ["sandbox_snapshot_id"],
-            ["sandbox_snapshots.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_snap_perm_snapshot_id_sandbox_snapshots",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "role_id",
-            "sandbox_snapshot_id",
-            name="uq_role_sandbox_snap_perm_role_sandbox_snap",
-        ),
-        comment="Per-role grants of access to sandbox snapshots",
-    )
-    op.create_index(
-        "ix_role_sandbox_snapshot_permissions_role_id",
-        "role_sandbox_snapshot_permissions",
-        ["role_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_role_sandbox_snapshot_permissions_sandbox_snapshot_id",
-        "role_sandbox_snapshot_permissions",
-        ["sandbox_snapshot_id"],
         unique=False,
     )
 
@@ -1691,18 +1318,6 @@ def downgrade() -> None:
     op.drop_table("llm_usage")
 
     op.drop_index(
-        "ix_role_sandbox_snapshot_permissions_sandbox_snapshot_id",
-        table_name="role_sandbox_snapshot_permissions",
-    )
-    op.drop_index(
-        "ix_role_sandbox_snapshot_permissions_role_id",
-        table_name="role_sandbox_snapshot_permissions",
-    )
-    op.drop_table("role_sandbox_snapshot_permissions")
-    op.drop_index("ix_role_sandbox_permissions_sandbox_id", table_name="role_sandbox_permissions")
-    op.drop_index("ix_role_sandbox_permissions_role_id", table_name="role_sandbox_permissions")
-    op.drop_table("role_sandbox_permissions")
-    op.drop_index(
         "ix_role_sandbox_template_permissions_sandbox_template_id",
         table_name="role_sandbox_template_permissions",
     )
@@ -1711,35 +1326,6 @@ def downgrade() -> None:
         table_name="role_sandbox_template_permissions",
     )
     op.drop_table("role_sandbox_template_permissions")
-
-    op.drop_index("ix_sandbox_computes_sandbox_id", table_name="sandbox_computes")
-    op.drop_index("ix_sandbox_computes_template_id", table_name="sandbox_computes")
-    op.drop_index("ix_sandbox_computes_status", table_name="sandbox_computes")
-    op.drop_index("ix_sandbox_computes_provider_kind", table_name="sandbox_computes")
-    op.drop_table("sandbox_computes")
-    op.drop_index("ix_sandbox_snapshots_status", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_source_sandbox_id", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_user_id", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_generation", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_storage_kind", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_filesystem_id", table_name="sandbox_snapshots")
-    op.drop_index("ix_sandbox_snapshots_name", table_name="sandbox_snapshots")
-    op.drop_table("sandbox_snapshots")
-    op.drop_index("ix_sandboxes_status", table_name="sandboxes")
-    op.drop_index("ix_sandboxes_user_id", table_name="sandboxes")
-    op.drop_index("ix_sandboxes_provider_kind", table_name="sandboxes")
-    op.drop_index("ix_sandboxes_filesystem_id", table_name="sandboxes")
-    op.drop_index("ix_sandboxes_template_id", table_name="sandboxes")
-    op.drop_index("ix_sandboxes_name", table_name="sandboxes")
-    op.drop_table("sandboxes")
-    op.drop_index("ix_sandbox_filesystems_user_id", table_name="sandbox_filesystems")
-    op.drop_index("ix_sandbox_filesystems_status", table_name="sandbox_filesystems")
-    op.drop_index("ix_sandbox_filesystems_storage_kind", table_name="sandbox_filesystems")
-    op.drop_table("sandbox_filesystems")
-    op.drop_index("ix_sandbox_templates_user_id", table_name="sandbox_templates")
-    op.drop_index("ix_sandbox_templates_provider_kind", table_name="sandbox_templates")
-    op.drop_index("ix_sandbox_templates_name", table_name="sandbox_templates")
-    op.drop_table("sandbox_templates")
 
     op.drop_index(
         "ix_feature_flag_user_assignments_user_id", table_name="feature_flag_user_assignments"

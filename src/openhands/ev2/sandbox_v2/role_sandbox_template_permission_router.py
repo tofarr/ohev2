@@ -18,7 +18,9 @@ from openhands.ev2.auth.auth_dependencies import (
     depends_permissions_or_none,
 )
 from openhands.ev2.db import SessionDep
-from openhands.ev2.sandbox.sandbox_models import RoleSandboxTemplatePermission
+from openhands.ev2.sandbox_v2.role_sandbox_template_permission_models import (
+    RoleSandboxTemplatePermission,
+)
 from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchWriteRequest,
     RoleSandboxTemplatePermissionCreate,
