@@ -30,6 +30,8 @@ Tables:
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
 * ``feature_flag_role_assignments``     — per-role overrides of feature flags.
+* ``groups``                 — named groups of users.
+* ``group_users``            — group-to-user memberships.
 """
 
 from __future__ import annotations
@@ -435,6 +437,18 @@ def upgrade() -> None:
             comment="Permission policy for sandbox_snapshot resources; null = deny.",
         ),
         sa.Column(
+            "group_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for group resources; null = deny.",
+        ),
+        sa.Column(
+            "group_user_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for group_user resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("clock_timestamp()"),
@@ -815,6 +829,68 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
+    # groups
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "groups",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("description", sa.String(length=2048), nullable=True),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_groups_creator_id_users"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Named groups of users",
+    )
+    op.create_index("ix_groups_name", "groups", ["name"], unique=False)
+    op.create_index("ix_groups_creator_id", "groups", ["creator_id"], unique=False)
+
+    # ------------------------------------------------------------------ #
+    # group_users
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "group_users",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("group_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["group_id"], ["groups.id"], ondelete="CASCADE", name="fk_group_users_group_id_groups"
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], ondelete="CASCADE", name="fk_group_users_user_id_users"
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_group_users_creator_id_users"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("group_id", "user_id", name="uq_group_users_group_id_user_id"),
+        comment="Group-to-user memberships",
+    )
+    op.create_index("ix_group_users_group_id", "group_users", ["group_id"], unique=False)
+    op.create_index("ix_group_users_user_id", "group_users", ["user_id"], unique=False)
+    op.create_index("ix_group_users_creator_id", "group_users", ["creator_id"], unique=False)
+
+    # ------------------------------------------------------------------ #
     # llm_usage (range-partitioned parent by created_at; partitions are
     # created by the background partition manager at runtime — see README
     # 'LLM usage logging'. A DEFAULT partition is created here so inserts
@@ -1090,6 +1166,14 @@ def downgrade() -> None:
     op.drop_index("ix_llm_usage_provider_connection_id", table_name="llm_usage")
     op.drop_index("ix_llm_usage_user_id", table_name="llm_usage")
     op.drop_table("llm_usage")
+
+    op.drop_index("ix_group_users_creator_id", table_name="group_users")
+    op.drop_index("ix_group_users_user_id", table_name="group_users")
+    op.drop_index("ix_group_users_group_id", table_name="group_users")
+    op.drop_table("group_users")
+    op.drop_index("ix_groups_creator_id", table_name="groups")
+    op.drop_index("ix_groups_name", table_name="groups")
+    op.drop_table("groups")
 
     op.drop_index(
         "ix_feature_flag_user_assignments_user_id", table_name="feature_flag_user_assignments"

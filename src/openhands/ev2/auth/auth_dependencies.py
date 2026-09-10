@@ -560,6 +560,8 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
     FeatureFlagUserAssignment as _FeatureFlagUserAssignment,
 )
+from openhands.ev2.group.group_models import Group as _Group  # noqa: E402
+from openhands.ev2.group.group_models import GroupUser as _GroupUser  # noqa: E402
 from openhands.ev2.llm.llm_models import (  # noqa: E402
     LlmAggregatedUsage as _LlmAggregatedUsage,
 )
@@ -619,6 +621,8 @@ register_resource_policy(_SandboxSandbox, "sandbox_permission")
 # are the successor surface for the same logical resource, and the per-resource
 # grant table already keys on the snapshot id string.
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
+register_resource_policy(_Group, "group_permission")
+register_resource_policy(_GroupUser, "group_user_permission")
 
 
 def depends_permissions(
