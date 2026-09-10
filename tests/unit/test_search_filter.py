@@ -542,3 +542,36 @@ class TestFactoryFunctions:
         assert combined.matches(new_user("alice@x.com")) is True
         assert combined.matches(new_user("bob@x.com")) is True
         assert combined.matches(new_user("carol@x.com")) is False
+
+    def test_and_filter_skips_all_child_inside_nested_and(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="com")
+        nested = AndSearchFilter[User](filters=[f1, ALL, f2])
+        result = and_filter(nested)
+        assert isinstance(result, AndSearchFilter)
+        assert len(result.filters) == 2
+
+    def test_or_filter_skips_none_child_inside_nested_or(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="bob")
+        nested = OrSearchFilter[User](filters=[f1, NONE, f2])
+        result = or_filter(nested)
+        assert isinstance(result, OrSearchFilter)
+        assert len(result.filters) == 2
+
+    def test_or_filter_sql_condition_single_condition(self) -> None:
+        f1 = UserSearchFilter(email__contains="alice")
+        f2 = UserSearchFilter(email__contains="bob")
+        combined = OrSearchFilter[User](filters=[f1, f2])
+        stmt = combined.filter_sql(select(User))
+        rendered = str(stmt)
+        assert "email" in rendered.lower()
+
+
+class TestContainsFallback:
+    """Cover the in-memory contains fallback for non-string attributes."""
+
+    def test_contains_on_non_sequence_returns_false(self) -> None:
+        f = UserSearchFilter(username__contains="x")
+        user = User(email="a@b.com", username=12345)
+        assert f.matches(user) is False
