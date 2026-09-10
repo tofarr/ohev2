@@ -147,7 +147,7 @@ async def _sweep_mcp_aggregate() -> str | None:
 
 
 async def _sweep_acl_prune() -> str | None:
-    """Remove orphaned item ids from ACLPermission policies."""
+    """Remove orphaned item ids from AclPermission policies."""
     from openhands.ev2.security.acl_prune_service import prune_orphaned_acl_ids
 
     factory = get_session_factory()
@@ -212,7 +212,7 @@ async def _mcp_usage_aggregate_loop() -> None:
 
 
 async def _acl_prune_loop() -> None:
-    """Background sweep that prunes orphaned ids from ACLPermission policies."""
+    """Background sweep that prunes orphaned ids from AclPermission policies."""
     cfg = get_config()
     interval = cfg.acl_prune_interval
     if interval <= 0:

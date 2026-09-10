@@ -27,7 +27,13 @@ class _SelfAssignmentAccess(Permission):
     to the user-role link table (``UserRole.user_id == principal``).
     """
 
-    def to_search_filter(self, user_id: uuid.UUID | None, action: Action) -> SearchFilter[Any]:
+    def to_search_filter(
+        self,
+        user_id: uuid.UUID | None,
+        action: Action,
+        groups: frozenset[uuid.UUID] = frozenset(),
+    ) -> SearchFilter[Any]:
+        _ = action, groups
         if user_id is None:
             return NoneSearchFilter[Any]()
         from openhands.ev2.role.role_models import UserRole

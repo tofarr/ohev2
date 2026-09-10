@@ -1,7 +1,7 @@
 """Unit tests for the secret permission policy and its search filter.
 
 With the link tables removed, secret access is governed by the generic
-:class:`ACLPermission` (or :class:`Permitted` / :class:`Denied`) stored in
+:class:`AclPermission` (or :class:`Permitted` / :class:`Denied`) stored in
 the role's ``secret_permission`` JSONB column. These tests verify the
 reduction of those policies to :class:`SearchFilter` instances.
 """
@@ -11,8 +11,7 @@ from __future__ import annotations
 import uuid
 
 from openhands.ev2.security.security_models import (
-    AclFilter,
-    ACLPermission,
+    AclPermission,
     Action,
     Denied,
     Permitted,
@@ -29,26 +28,24 @@ class TestSecretPermissionReduction:
         for action in (Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH, Action.CREATE):
             assert isinstance(Denied().to_search_filter(uuid.uuid4(), action), NoneSearchFilter)
 
-    def test_acl_permission_read_yields_acl_filter(self) -> None:
+    def test_acl_permission_read_admits_listed_secret(self) -> None:
         sid = uuid.uuid4()
-        policy = ACLPermission(permitted_ids={Action.READ: [sid]})
+        policy = AclPermission(item_ids=[sid], on_match=Permitted())
         filt = policy.to_search_filter(uuid.uuid4(), Action.READ)
-        assert isinstance(filt, AclFilter)
-        assert sid in filt.ids
+        assert filt.matches(type("S", (), {"id": sid})())
 
-    def test_acl_permission_empty_ids_yields_none_filter(self) -> None:
-        policy = ACLPermission(permitted_ids={})
+    def test_acl_permission_empty_ids_denies_read_by_default(self) -> None:
+        policy = AclPermission()
         filt = policy.to_search_filter(uuid.uuid4(), Action.READ)
         assert isinstance(filt, NoneSearchFilter)
 
-    def test_acl_permission_missing_action_yields_none_filter(self) -> None:
+    def test_acl_permission_missing_on_match_denies_listed(self) -> None:
         sid = uuid.uuid4()
-        policy = ACLPermission(permitted_ids={Action.READ: [sid]})
-        filt = policy.to_search_filter(uuid.uuid4(), Action.UPDATE)
-        assert isinstance(filt, NoneSearchFilter)
+        policy = AclPermission(item_ids=[sid])  # on_match defaults to Denied
+        filt = policy.to_search_filter(uuid.uuid4(), Action.READ)
+        assert not filt.matches(type("S", (), {"id": sid})())
 
-    def test_acl_permission_create_yields_none_filter(self) -> None:
-        # CREATE requires an explicit id list; an empty one denies.
-        policy = ACLPermission(permitted_ids={})
+    def test_acl_permission_create_denied_by_default(self) -> None:
+        policy = AclPermission(item_ids=[uuid.uuid4()], on_match=Permitted())
         filt = policy.to_search_filter(uuid.uuid4(), Action.CREATE)
         assert isinstance(filt, NoneSearchFilter)

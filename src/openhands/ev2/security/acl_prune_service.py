@@ -1,9 +1,9 @@
-"""Background pruning of orphaned item ids from ACLPermission policies.
+"""Background pruning of orphaned item ids from AclPermission policies.
 
-An :class:`ACLPermission` stores item ids per action as JSONB on a Role column.
-When an entity is deleted, its id remains in every ACL that referenced it —
-there is no FK to cascade. This service scans roles for ACLPermission policies,
-checks which ids still exist in the corresponding entity table, and removes the
+An :class:`AclPermission` stores item ids as JSONB on a Role column. When an
+entity is deleted, its id remains in every ACL that referenced it — there is
+no FK to cascade. This service scans roles for AclPermission policies, checks
+which ids still exist in the corresponding entity table, and removes the
 orphans.
 
 The column-to-entity-model mapping is derived from the ``_RESOURCE_POLICY``
@@ -23,13 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role
-from openhands.ev2.security.security_models import ACLPermission
+from openhands.ev2.security.security_models import AclPermission
 
 
 async def prune_orphaned_acl_ids(session: AsyncSession) -> int:
-    """Remove orphaned item ids from all ACLPermission policies on all roles.
+    """Remove orphaned item ids from all AclPermission policies on all roles.
 
-    Returns the number of roles whose ACLPermission was modified.
+    Returns the number of roles whose AclPermission was modified.
     """
     column_to_model = _build_column_to_model_map()
 
@@ -41,7 +41,7 @@ async def prune_orphaned_acl_ids(session: AsyncSession) -> int:
         changed = False
         for column in ROLE_ENTITY_COLUMNS:
             policy = getattr(role, column, None)
-            if not isinstance(policy, ACLPermission):
+            if not isinstance(policy, AclPermission):
                 continue
             model = column_to_model.get(column)
             if model is None:
@@ -70,29 +70,24 @@ async def _entity_ids_exist(
 
 
 async def _prune_policy(
-    policy: ACLPermission,
+    policy: AclPermission,
     model: type[Any],
     session: AsyncSession,
 ) -> bool:
     """Remove orphaned ids from *policy* in-place. Returns whether it changed.
 
-    Collects all ids across all actions, checks existence in *model*'s table,
-    and removes orphans.
+    Checks every id in ``item_ids`` against *model*'s table and drops the ones
+    that no longer exist.
     """
-    all_ids = {id_ for ids in policy.permitted_ids.values() for id_ in ids}
-    if not all_ids:
+    if not policy.item_ids:
         return False
 
-    existing = await _entity_ids_exist(session, model, list(all_ids))
-    orphaned = all_ids - existing
+    existing = await _entity_ids_exist(session, model, list(policy.item_ids))
+    orphaned = set(policy.item_ids) - existing
     if not orphaned:
         return False
 
-    new_permitted: dict[Any, list[uuid.UUID]] = {}
-    for action, ids in policy.permitted_ids.items():
-        kept = [id_ for id_ in ids if id_ not in orphaned]
-        new_permitted[action] = kept
-    policy.permitted_ids = new_permitted
+    policy.item_ids = [id_ for id_ in policy.item_ids if id_ not in orphaned]
     return True
 
 

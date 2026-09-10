@@ -397,7 +397,7 @@ class AppConfig(BaseModel):
         ge=0,
         description=(
             "Seconds between background sweeps that remove orphaned item ids "
-            "from ACLPermission policies (ids referencing deleted entities). "
+            "from AclPermission policies (ids referencing deleted entities). "
             "When 0 the background loop is disabled and pruning must be driven "
             "by an external scheduler (cron); see README 'ACL pruning'."
         ),

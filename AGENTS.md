@@ -332,7 +332,7 @@ column.**
 > `role_sandbox_template_permissions`) and their grant-permission columns
 > (`secret_grant_permission`, `mcp_server_config_grant_permission`,
 > `sandbox_template_grant_permission`) have been removed. Item-level access
-> control is now expressed via the generic `ACLPermission` policy stored in
+> control is now expressed via the generic `AclPermission` policy stored in
 > the role's per-entity JSONB column (e.g. `secret_permission`), which
 > enumerates permitted item ids per action. See §12 for the typed-secrets
 > projection that still uses `secret_value_permission` for value reveal.

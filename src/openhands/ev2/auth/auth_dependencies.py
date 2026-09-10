@@ -702,13 +702,14 @@ async def resolve_permission_filter(
     Shared by :func:`depends_permissions` (which raises 403 on ``None``) and
     :func:`depends_permissions_or_none` (which returns the ``None``). Returns
     ``None`` when no policy is registered for *model_type* or when every policy
-    reduces to a deny for ``(user_id, action)``.
+    reduces to a deny for ``(user_id, action, groups)``.
     """
     user_id = token.user_id if token is not None else None
     column = _policy_attr_for(model_type)
     if column is None:
         return None
-    return await _resolve_column_filter(column, action, user_id, request, session, token)
+    groups = await _principal_groups(request, session, user_id)
+    return await _resolve_column_filter(column, action, user_id, groups, request, session, token)
 
 
 async def resolve_permission_filter_for_column(
@@ -730,13 +731,15 @@ async def resolve_permission_filter_for_column(
     value-permission is resolved by name only (AGENTS.md §12).
     """
     user_id = token.user_id if token is not None else None
-    return await _resolve_column_filter(column, action, user_id, request, session, token)
+    groups = await _principal_groups(request, session, user_id)
+    return await _resolve_column_filter(column, action, user_id, groups, request, session, token)
 
 
 async def _resolve_column_filter(
     column: str,
     action: Action,
     user_id: uuid.UUID | None,
+    groups: frozenset[uuid.UUID],
     request: Request,
     session: AsyncSession,
     token: AuthToken | None,
@@ -747,12 +750,41 @@ async def _resolve_column_filter(
         policy = _role_policy_for(role, column)
         if policy is None:
             continue
-        filters.append(policy.to_search_filter(user_id, action))
+        filters.append(policy.to_search_filter(user_id, action, groups))
 
     effective = _combine(filters)
     if effective is None or isinstance(effective, NoneSearchFilter):
         return None
     return effective
+
+
+_GROUPS_KEY = "_auth_principal_groups"
+_GROUPS_MISSING: Any = object()
+
+
+async def _principal_groups(
+    request: Request,
+    session: AsyncSession,
+    user_id: uuid.UUID | None,
+) -> frozenset[uuid.UUID]:
+    """The set of group ids the current principal is a member of.
+
+    Resolved once per request and cached on ``request.state`` (alongside the
+    role cache) so every policy reduction in the same request reuses it.
+    Anonymous principals (``user_id is None``) have no groups. Used by
+    :class:`GroupPermission` to pick its outcome.
+    """
+    if user_id is None:
+        return frozenset()
+    cached = getattr(request.state, _GROUPS_KEY, _GROUPS_MISSING)
+    if cached is not _GROUPS_MISSING:
+        return cached  # type: ignore[no-any-return]
+    from openhands.ev2.group.group_models import GroupUser
+
+    stmt = select(GroupUser.group_id).where(GroupUser.user_id == user_id)
+    group_ids = frozenset({row[0] for row in (await session.execute(stmt))})
+    setattr(request.state, _GROUPS_KEY, group_ids)
+    return group_ids
 
 
 def depends_secret_value_permission() -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
