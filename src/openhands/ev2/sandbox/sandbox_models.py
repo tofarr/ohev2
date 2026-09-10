@@ -200,9 +200,13 @@ class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
     use to fetch the snapshot artifact. Provider-specific subclasses (e.g.
     :class:`DockerSandboxSnapshot`) carry implementation detail such as the
     backing image id.
+
+    ``id`` defaults to the empty string for the pre-persistence model built by
+    ``_snapshot_from_sandbox`` / ``_snapshot_from_file``; the provider assigns
+    the real id during ``_create_snapshot``.
     """
 
-    id: str
+    id: str = ""
     created_at: datetime = Field(default_factory=utc_now)
     user_id: uuid.UUID | None = Field(
         default=None,

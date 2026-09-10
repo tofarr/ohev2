@@ -34,5 +34,5 @@ class DockerSandboxSnapshot(SandboxSnapshot):
     one; it is ``None`` for snapshots imported from an uploaded tarball.
     """
 
-    image_id: str
+    image_id: str = ""
     sandbox_id: str | None = None

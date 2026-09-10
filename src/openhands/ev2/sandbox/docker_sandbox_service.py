@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -456,12 +457,9 @@ class DockerSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
         sandbox: Sandbox,
     ) -> SandboxSnapshot:
-        # The committed image is not materialized until _create_snapshot; here
-        # we only declare the image id and source sandbox the snapshot will use.
-        image_id = _snapshot_image_tag(payload.id)
+        # Pre-persistence model; the id and image_id are assigned during
+        # _create_snapshot when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
-            id=payload.id,
-            image_id=image_id,
             sandbox_id=sandbox.id,
         )
 
@@ -469,12 +467,9 @@ class DockerSandboxService(SandboxService):
         self,
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
-        # The image is not loaded until _create_snapshot; here we only declare
-        # the image id the imported image will be tagged with.
-        image_id = _snapshot_image_tag(payload.id)
+        # Pre-persistence model; the id and image_id are assigned during
+        # _create_snapshot when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
-            id=payload.id,
-            image_id=image_id,
             sandbox_id=None,
         )
 
@@ -484,12 +479,15 @@ class DockerSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
         docker_snapshot = cast(DockerSandboxSnapshot, snapshot)
+        snapshot_id = _generate_snapshot_id()
+        docker_snapshot.id = snapshot_id
+        docker_snapshot.image_id = _snapshot_image_tag(snapshot_id)
         if payload.sandbox_id is not None:
             await asyncio.to_thread(self._sync_commit_snapshot, docker_snapshot)
         else:
             assert payload.file_data is not None
             await asyncio.to_thread(self._sync_load_snapshot, docker_snapshot, payload.file_data)
-        return await self._get_snapshot(docker_snapshot.id)
+        return await self._get_snapshot(snapshot_id)
 
     async def _delete_snapshot(self, snapshot_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
@@ -982,6 +980,11 @@ def _parse_created(created: object) -> datetime:
 def _iso_utc_now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(UTC).isoformat()
+
+
+def _generate_snapshot_id() -> str:
+    """Generate a unique snapshot id (used as the Docker image tag)."""
+    return uuid.uuid4().hex
 
 
 def _snapshot_image_tag(snapshot_id: str) -> str:

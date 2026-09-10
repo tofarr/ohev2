@@ -34,6 +34,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
 from openhands.ev2.sandbox.sandbox_models import Sandbox, SandboxSnapshot
@@ -119,7 +120,6 @@ async def count_sandbox_snapshots(
 @router.post("", response_model=SandboxSnapshotRead, status_code=status.HTTP_201_CREATED)
 async def create_sandbox_snapshot(
     request: Request,
-    snapshot_id_form: Annotated[str, Form(alias="id", min_length=1, max_length=255)],
     perm_filter: Annotated[
         SearchFilter[SandboxSnapshot],
         Depends(depends_permissions(SandboxSnapshot, Action.CREATE)),
@@ -133,12 +133,17 @@ async def create_sandbox_snapshot(
     file: Annotated[UploadFile | None, File()] = None,
 ) -> SandboxSnapshotRead:
     file_data = await file.read() if file is not None else None
-    payload = SandboxSnapshotCreate(
-        id=snapshot_id_form,
-        sandbox_id=sandbox_id,
-        schema_type=schema_type,
-        file_data=file_data,
-    )
+    try:
+        payload = SandboxSnapshotCreate(
+            sandbox_id=sandbox_id,
+            schema_type=schema_type,
+            file_data=file_data,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     service = await get_sandbox_service(request)
     try:
         snapshot = await service.create_snapshot(
