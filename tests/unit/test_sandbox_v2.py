@@ -356,12 +356,12 @@ def test_sync_list_templates_filters_by_image_name_patterns() -> None:
     )
     service._client = _FakeDockerClient(
         [
-            _FakeImage(_image_attrs("ghcr.io/openhands/agent-canvas:latest")),
+            _FakeImage(_image_attrs("ghcr.io/openhands/agent-server:latest")),
             _FakeImage(_image_attrs("ghcr.io/other/agent:latest")),
         ]
     )
     templates = service._sync_list_templates()
-    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-canvas:latest"]
+    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-server:latest"]
 
 
 def test_sync_get_template_returns_matching_image() -> None:
@@ -369,10 +369,10 @@ def test_sync_get_template_returns_matching_image() -> None:
         image_name_patterns=["ghcr.io/openhands/*"],
     )
     service._client = _FakeDockerClient(
-        [_FakeImage(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
+        [_FakeImage(_image_attrs("ghcr.io/openhands/agent-server:latest"))]
     )
-    template = service._sync_get_template("ghcr.io/openhands/agent-canvas:latest")
-    assert template.id == "ghcr.io/openhands/agent-canvas:latest"
+    template = service._sync_get_template("ghcr.io/openhands/agent-server:latest")
+    assert template.id == "ghcr.io/openhands/agent-server:latest"
 
 
 def test_sync_get_template_rejects_non_matching_image() -> None:
@@ -445,25 +445,25 @@ def test_sandbox_service_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_wildcard_match() -> None:
-    assert _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/openhands/agent-canvas")
-    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-canvas")
-    assert not _wildcard_match("ghcr.io/openhands/agent-canvas", "ghcr.io/other/agent-canvas")
+    assert _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server")
+    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-server")
+    assert not _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/other/agent-canvas")
     # A bare pattern (no wildcard) requires an exact match, so a tagged
     # image is *not* matched by it — use ``:*`` to opt into tagged variants.
     assert not _wildcard_match(
-        "ghcr.io/openhands/agent-canvas", "ghcr.io/openhands/agent-canvas:1.16.0"
+        "ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server:1.16.0"
     )
     assert _wildcard_match(
-        "ghcr.io/openhands/agent-canvas:*", "ghcr.io/openhands/agent-canvas:1.16.0"
+        "ghcr.io/openhands/agent-server:*", "ghcr.io/openhands/agent-server:1.16.0"
     )
 
 
 def test_docker_service_image_name_matching() -> None:
     service = DockerSandboxService()
     # The default pattern is ``:*`` so tagged images match…
-    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas:1.16.0")
+    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-server:1.16.0")
     # …but a bare (tagless) image does not.
-    assert not service._matches_image_name_patterns("ghcr.io/openhands/agent-canvas")
+    assert not service._matches_image_name_patterns("ghcr.io/openhands/agent-server")
     assert not service._matches_image_name_patterns("ghcr.io/other/agent-canvas")
 
 
