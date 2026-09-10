@@ -100,6 +100,7 @@ def upgrade() -> None:
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("role_id", sa.Uuid(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -114,10 +115,14 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
+        # roles is created later in this migration; defer the FK so it is
+        # emitted as a separate ALTER TABLE after roles exists.
+        sa.ForeignKeyConstraint(["role_id"], ["roles.id"], ondelete="SET NULL", use_alter=True),
         sa.UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
     )
     op.create_index("ix_api_keys_key_hash", "api_keys", ["key_hash"], unique=True)
     op.create_index("ix_api_keys_creator_id", "api_keys", ["creator_id"])
+    op.create_index("ix_api_keys_role_id", "api_keys", ["role_id"], unique=False)
 
     # ------------------------------------------------------------------ #
     # refresh_tokens

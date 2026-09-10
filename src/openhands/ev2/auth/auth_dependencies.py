@@ -45,6 +45,7 @@ from openhands.ev2.util.search_filter import (
     NoneSearchFilter,
     OrSearchFilter,
     SearchFilter,
+    and_filter,
 )
 
 # Security schemes double as OpenAPI documentation. Declared via `Security(...)`
@@ -71,6 +72,8 @@ _bearer_scheme = HTTPBearer(
 # role fetch without a shared global.
 _ACCESS_TOKEN_KEY = "_auth_access_token"
 _ROLES_KEY = "_auth_roles"
+# Cache key for the API-key restricting role (loaded once per request).
+_RESTRICTING_ROLE_KEY = "_auth_restricting_role"
 
 # When a principal has fewer than this many roles, the full list is materialized
 # and cached on the request so ``depends_roles`` can iterate without re-querying.
@@ -633,9 +636,12 @@ def depends_permissions(
 
     Reduces every :class:`Permission` policy on the principal's roles for the
     resource governing *model_type* to a :class:`SearchFilter` for
-    ``(user_id, action)``, combining them with ``Or``. Returns the effective
-    filter so services can scope search/update/delete SQL and validate creates.
-    Raises 403 Forbidden when no grant applies (the combined filter is a deny).
+    ``(user_id, action)``, combining them with ``Or``. When the principal
+    authenticates via an API key with a restricting ``role_id``, that role's
+    policy is ANDed (intersected) with the OR of the user's roles, so the key
+    can only narrow access. Returns the effective filter so services can scope
+    search/update/delete SQL and validate creates. Raises 403 Forbidden when no
+    grant applies (the combined filter is a deny).
 
     Usage::
 
@@ -752,7 +758,63 @@ async def _resolve_column_filter(
     effective = _combine(filters)
     if effective is None or isinstance(effective, NoneSearchFilter):
         return None
-    return effective
+    return await _narrow_with_api_key_role(
+        effective, column, action, user_id, request, session, token
+    )
+
+
+async def _narrow_with_api_key_role(
+    effective: SearchFilter[Any],
+    column: str,
+    action: Action,
+    user_id: uuid.UUID | None,
+    request: Request,
+    session: AsyncSession,
+    token: AuthToken | None,
+) -> SearchFilter[Any] | None:
+    """AND the API key's restricting role filter with the user-roles filter.
+
+    The key can only narrow — never widen — access. A NULL/deny policy on the
+    restricting role (or a missing role row) yields ``None`` (deny/fail-closed).
+    """
+    if token is None or token.role_id is None:
+        return effective
+    restricting = await _restricting_role(request, session, token.role_id)
+    if restricting is None:
+        return None
+    policy = _role_policy_for(restricting, column)
+    if policy is None:
+        return None
+    key_filter = policy.to_search_filter(user_id, action)
+    if isinstance(key_filter, NoneSearchFilter):
+        return None
+    narrowed = and_filter(effective, key_filter)
+    return None if isinstance(narrowed, NoneSearchFilter) else narrowed
+
+
+_RESTRICTING_ROLE_MISSING: Any = object()
+
+
+async def _restricting_role(
+    request: Request,
+    session: AsyncSession,
+    role_id: uuid.UUID,
+) -> Role | None:
+    """Load the API key's restricting role, cached per request.
+
+    Returns ``None`` when the role no longer exists. The FK is SET NULL on
+    delete so a deleted role widens the key back to baseline (``role_id``
+    becomes ``None`` at authenticate time); a ``None`` here is therefore a rare
+    race between authenticate and this read. The caller fails closed (deny) in
+    that case rather than silently widening.
+    """
+    cached = getattr(request.state, _RESTRICTING_ROLE_KEY, _RESTRICTING_ROLE_MISSING)
+    if cached is not _RESTRICTING_ROLE_MISSING:
+        return cached if isinstance(cached, Role) else None
+    result = await session.execute(select(Role).where(Role.id == role_id))
+    role = result.scalar_one_or_none()
+    setattr(request.state, _RESTRICTING_ROLE_KEY, role)
+    return role
 
 
 def depends_secret_value_permission() -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:

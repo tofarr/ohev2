@@ -25,6 +25,7 @@ module api_key {
     prefix: str,  // first 8 chars of the raw key, for identification
     keyHash: str, // bcrypt hash of the raw key
     enabled: bool,
+    roleId: str,  // optional restricting role id; "" means no restriction
     createdAt: int,
     updatedAt: int,
   }
@@ -52,7 +53,9 @@ module api_key {
     k.keyHash == "HASH"
 
   // Create an api key. The raw key is generated and returned once; the stored
-  // key has the hash. Modeled: we store "HASH" as the hash value.
+  // key has the hash. Modeled: we store "HASH" as the hash value. An optional
+  // roleId restricts the key's effective permissions (ANDed with the user's
+  // roles at authz time); "" means no restriction.
   action create(k: ApiKey): bool = all {
     not(apiKeys.exists(x => x.id == k.id)),
     hasOwner(k),
@@ -85,6 +88,18 @@ module api_key {
     true
   }
 
+  // Set the restricting role id on an api key. An empty roleId clears the
+  // restriction (reverts to the principal's baseline roles).
+  action setRoleId(id: str, roleId: str, now: int): bool = all {
+    apiKeys.exists(k => k.id == id),
+    apiKeys' = apiKeys.map(k =>
+      if (k.id == id)
+        { ...k, roleId: roleId, updatedAt: now }
+      else
+        k),
+    true
+  }
+
   // Delete an api key by id.
   action remove(id: str): bool = all {
     apiKeys.exists(k => k.id == id),
@@ -98,9 +113,22 @@ module api_key {
     true
   }
 
+  // When a role is deleted, the FK on api_keys.role_id is SET NULL, widening
+  // the key back to the principal's baseline permissions (modeled: roleId -> "").
+  action removeRole(roleId: str): bool = all {
+    apiKeys' = apiKeys.map(k =>
+      if (k.roleId == roleId)
+        { ...k, roleId: "" }
+      else
+        k),
+    true
+  }
+
   // Authenticate with an api key. Succeeds iff an enabled key exists with
   // a matching hash. Modeled: the presented raw key hashes to "HASH" iff it's
   // non-empty (any non-empty key verifies against "HASH" for simplicity).
+  // The authenticated principal carries the key's roleId so authz can AND it
+  // with the user's roles (see rbac.qnt effectiveFilterWithApiKey).
   action authenticate(keyId: str, rawKey: str): bool = all {
     rawKey != "",
     apiKeys.exists(k => k.id == keyId and k.enabled and k.keyHash == "HASH"),
@@ -139,7 +167,7 @@ module api_key {
   // ------------------------------------------------------------------ #
 
   run createApiKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(all {
         assert(apiKeys.exists(k => k.id == "k1" and k.creatorId == "u1")),
         apiKeys' = apiKeys,
@@ -147,28 +175,28 @@ module api_key {
   }
 
   run cannotReuseId = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k1", creatorId: "u2", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k1", creatorId: "u2", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithoutOwner = {
-    init.then(create({ id: "k1", creatorId: "", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithoutName = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run cannotCreateWithPlaintextKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "oh_abc123456789", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "oh_abc123456789", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .fail()
   }
 
   run canDisableApiKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(all {
         assert(apiKeys.exists(k => k.id == "k1" and not(k.enabled))),
@@ -177,7 +205,7 @@ module api_key {
   }
 
   run canReenableApiKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(setEnabled("k1", true, 2))
       .then(all {
@@ -187,7 +215,7 @@ module api_key {
   }
 
   run authenticateSucceeds = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k1", "oh_abc123456789"))
       .then(all {
         apiKeys' = apiKeys,
@@ -195,26 +223,26 @@ module api_key {
   }
 
   run authenticateFailsForDisabledKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(setEnabled("k1", false, 1))
       .then(authenticate("k1", "oh_abc123456789"))
       .fail()
   }
 
   run authenticateFailsForEmptyKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k1", ""))
       .fail()
   }
 
   run authenticateFailsForNonexistentKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(authenticate("k2", "oh_abc123456789"))
       .fail()
   }
 
   run canDeleteApiKey = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(remove("k1"))
       .then(all {
         assert(not(apiKeys.exists(k => k.id == "k1"))),
@@ -224,9 +252,9 @@ module api_key {
   }
 
   run cascadeDeleteByUser = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k3", creatorId: "u2", name: "key3", prefix: "oh_ghi56", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k3", creatorId: "u2", name: "key3", prefix: "oh_ghi56", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(removeByUser("u1"))
       .then(all {
         assert(not(apiKeys.exists(k => k.creatorId == "u1"))),
@@ -237,7 +265,7 @@ module api_key {
   }
 
   run canUpdateName = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "old-name", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "old-name", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(updateName("k1", "new-name", 1))
       .then(all {
         assert(apiKeys.exists(k => k.id == "k1" and k.name == "new-name")),
@@ -246,10 +274,48 @@ module api_key {
   }
 
   run sameUserMultipleKeys = {
-    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
-      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, createdAt: 0, updatedAt: 0 }))
+    init.then(create({ id: "k1", creatorId: "u1", name: "key1", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k2", creatorId: "u1", name: "key2", prefix: "oh_def34", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
       .then(all {
         assert(apiKeys.filter(k => k.creatorId == "u1").size() == 2),
+        apiKeys' = apiKeys,
+      })
+  }
+
+  run canSetRoleId = {
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(setRoleId("k1", "r1", 1))
+      .then(all {
+        assert(apiKeys.exists(k => k.id == "k1" and k.roleId == "r1")),
+        apiKeys' = apiKeys,
+      })
+  }
+
+  run canClearRoleId = {
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "r1", createdAt: 0, updatedAt: 0 }))
+      .then(setRoleId("k1", "", 1))
+      .then(all {
+        assert(apiKeys.exists(k => k.id == "k1" and k.roleId == "")),
+        apiKeys' = apiKeys,
+      })
+  }
+
+  // Deleting a role SET NULLs the roleId on keys that referenced it.
+  run deleteRoleClearsKeyId = {
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "r1", createdAt: 0, updatedAt: 0 }))
+      .then(create({ id: "k2", creatorId: "u1", name: "other", prefix: "oh_def34", keyHash: "HASH", enabled: true, roleId: "", createdAt: 0, updatedAt: 0 }))
+      .then(removeRole("r1"))
+      .then(all {
+        assert(apiKeys.exists(k => k.id == "k1" and k.roleId == "")),
+        assert(apiKeys.exists(k => k.id == "k2" and k.roleId == "")),
+        apiKeys' = apiKeys,
+      })
+  }
+
+  run canCreateWithRoleId = {
+    init.then(create({ id: "k1", creatorId: "u1", name: "my-key", prefix: "oh_abc12", keyHash: "HASH", enabled: true, roleId: "r1", createdAt: 0, updatedAt: 0 }))
+      .then(all {
+        assert(apiKeys.exists(k => k.id == "k1" and k.roleId == "r1")),
         apiKeys' = apiKeys,
       })
   }

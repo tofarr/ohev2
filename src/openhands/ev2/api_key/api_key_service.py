@@ -80,6 +80,7 @@ class ApiKeyService:
             name=payload.name,
             enabled=payload.enabled,
             expires_at=payload.expires_at,
+            role_id=payload.role_id,
         )
         if not self._perm_filter.matches(prospective):
             raise ApiKeyPermissionScopeError(str(creator_id))
@@ -90,6 +91,7 @@ class ApiKeyService:
             name=payload.name,
             enabled=payload.enabled,
             expires_at=payload.expires_at,
+            role_id=payload.role_id,
         )
         # Re-validate the persisted row against the scope in case the filter
         # depends on server-side defaults (id/created_at) — matches() on the
@@ -165,6 +167,8 @@ class ApiKeyService:
             api_key.enabled = payload.enabled
         if payload.expires_at is not None:
             api_key.expires_at = payload.expires_at
+        if payload.role_id is not None:
+            api_key.role_id = payload.role_id
         await self._session.flush()
         await self._session.refresh(api_key)
         return api_key

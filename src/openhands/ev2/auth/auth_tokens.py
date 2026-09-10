@@ -203,6 +203,7 @@ class TokenService:
         name: str | None = None,
         enabled: bool = True,
         expires_at: datetime | None = None,
+        role_id: uuid.UUID | None = None,
     ) -> tuple[str, ApiKey]:
         """Mint a long-lived API key and persist its backing row.
 
@@ -211,7 +212,8 @@ class TokenService:
         stored. The row persists only a SHA-256 ``key_hash`` of the raw value
         (for auth-time lookup) and a non-secret ``prefix`` for display. API keys
         are the one credential whose lifetime is *not* IdP-synced: they are
-        user-managed service credentials.
+        user-managed service credentials. An optional ``role_id`` restricts the
+        key's effective permissions (ANDed with the user's roles at authz time).
         """
         raw_key = _generate_api_key_value()
         row = ApiKey(
@@ -221,6 +223,7 @@ class TokenService:
             name=name,
             enabled=enabled,
             expires_at=expires_at,
+            role_id=role_id,
         )
         self._session.add(row)
         await self._session.flush()
@@ -314,6 +317,7 @@ class TokenService:
             enabled=row.enabled and user.enabled,
             expires_at=exp,
             token_type=TokenType.API_KEY,
+            role_id=row.role_id,
         )
 
     # ------------------------------------------------------------------ #
