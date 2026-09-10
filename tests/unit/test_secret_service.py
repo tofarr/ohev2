@@ -14,7 +14,6 @@ from openhands.ev2.secret.secret_models import (
     Secret,
     SecretType,
     StaticSecretDetail,
-    UserSecretPermission,
 )
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
@@ -79,17 +78,7 @@ class TestCreate:
         assert detail is not None
         assert detail.value != "hunter2"
         assert enc.decrypt_value(detail.value) == "hunter2"
-        grant = (
-            await session.execute(
-                select(UserSecretPermission).where(
-                    UserSecretPermission.user_id == user.id,
-                    UserSecretPermission.secret_id == secret.id,
-                )
-            )
-        ).scalar_one()
-        assert grant.read_enabled is True
-        assert grant.update_enabled is True
-        assert grant.delete_enabled is True
+        assert secret.user_id == user.id
 
     async def test_create_duplicate_code_conflicts(
         self, service: SecretService, session: AsyncSession
@@ -176,15 +165,8 @@ class TestUpdate:
     async def test_update_value_on_oauth_raises_type_error(
         self, service: SecretService, session: AsyncSession
     ) -> None:
-        user = await _seed_user(session)
         secret = Secret(code="OAUTH_SECRET", type="oauth")  # type: ignore[arg-type]
         session.add(secret)
-        await session.flush()
-        session.add(
-            UserSecretPermission(
-                user_id=user.id, secret_id=secret.id, read_enabled=True, update_enabled=True
-            )
-        )
         await session.flush()
         with pytest.raises(SecretValueTypeError):
             await service.update(secret.id, SecretUpdate(value=SecretStr("v")))

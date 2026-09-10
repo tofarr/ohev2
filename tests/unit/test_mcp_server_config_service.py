@@ -1,4 +1,4 @@
-"""Unit tests for MCP server config services and permissions."""
+"""Unit tests for MCP server config services."""
 
 from __future__ import annotations
 
@@ -6,28 +6,19 @@ import uuid
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from tests.unit._auth_helpers import assign_role, make_principal
+from tests.unit._auth_helpers import make_principal
 
 from openhands.ev2.mcp_server_config.mcp_server_config_models import MCPServerConfig
 from openhands.ev2.mcp_server_config.mcp_server_config_schemas import (
     MCPServerConfigCreate,
     MCPServerConfigUpdate,
 )
-from openhands.ev2.mcp_server_config.mcp_server_config_security import MCPServerConfigAccess
 from openhands.ev2.mcp_server_config.mcp_server_config_service import (
     MCPServerConfigNotFoundError,
     MCPServerConfigService,
     MCPServerConfigValidationError,
 )
-from openhands.ev2.mcp_server_config.role_mcp_server_config_permission_service import (
-    RoleMCPServerConfigPermissionConflictError,
-    RoleMCPServerConfigPermissionOrphanError,
-    RoleMCPServerConfigPermissionService,
-    _classify_integrity_error,
-)
-from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import AllSearchFilter
 
 
@@ -126,71 +117,3 @@ class TestMCPServerConfigService:
 
         with pytest.raises(MCPServerConfigNotFoundError):
             await service.get(config.id)
-
-
-class TestMCPServerConfigAccess:
-    async def test_read_filter_uses_role_grants(self, session: AsyncSession) -> None:
-        owner_id = await _seed_user(session)
-        granted_user = await _seed_user(
-            session,
-            email="reader@example.com",
-            username="reader",
-        )
-        service = MCPServerConfigService(session, AllSearchFilter[MCPServerConfig]())
-        visible = await service.create(_stdio_payload(display_name="visible"), user_id=owner_id)
-        hidden = await service.create(_stdio_payload(display_name="hidden"), user_id=owner_id)
-        role = await assign_role(
-            session,
-            granted_user,
-            {"mcp_server_config_permission": MCPServerConfigAccess()},
-            role_name="mcp-reader",
-        )
-        await RoleMCPServerConfigPermissionService(session).create(
-            role_id=role.id,
-            mcp_server_config_id=visible.id,
-            read_enabled=True,
-        )
-        await session.flush()
-
-        read_filter = MCPServerConfigAccess().to_search_filter(granted_user, Action.READ)
-        scoped = MCPServerConfigService(session, read_filter)
-        rows, _next = await scoped.search(limit=10)
-
-        assert [row.id for row in rows] == [visible.id]
-        with pytest.raises(MCPServerConfigNotFoundError):
-            await scoped.get(hidden.id)
-
-
-class TestRoleMCPServerConfigPermissionErrors:
-    def test_classifies_unique_constraint(self) -> None:
-        role_id = uuid.uuid4()
-        config_id = uuid.uuid4()
-        exc = IntegrityError(
-            "stmt",
-            {},
-            Exception("unique constraint role_mcp_server_config_permissions"),
-        )
-
-        result = _classify_integrity_error(exc, role_id, config_id)
-
-        assert isinstance(result, RoleMCPServerConfigPermissionConflictError)
-
-    def test_classifies_missing_mcp_config_foreign_key(self) -> None:
-        role_id = uuid.uuid4()
-        config_id = uuid.uuid4()
-        exc = IntegrityError("stmt", {}, Exception("foreign key mcp_server_config_id"))
-
-        result = _classify_integrity_error(exc, role_id, config_id)
-
-        assert isinstance(result, RoleMCPServerConfigPermissionOrphanError)
-        assert str(config_id) in str(result)
-
-    def test_classifies_missing_role_foreign_key(self) -> None:
-        role_id = uuid.uuid4()
-        config_id = uuid.uuid4()
-        exc = IntegrityError("stmt", {}, Exception("foreign key role_id"))
-
-        result = _classify_integrity_error(exc, role_id, config_id)
-
-        assert isinstance(result, RoleMCPServerConfigPermissionOrphanError)
-        assert str(role_id) in str(result)

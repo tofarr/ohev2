@@ -1,10 +1,8 @@
-// Secret specification: secrets are permissioned resources without singular ownership.
+// Secret specification: secrets are permissioned resources with optional ownership.
 //
-// A Secret has no user_id owner. Access is granted by either a direct
-// user_secret_permissions row or a role_secret_permissions row whose role is held
-// by the principal. Creating a secret also creates a full direct user grant for
-// the creator so they can manage the secret without making the secret row owned
-// by that user.
+// A Secret carries an optional user_id owner (the creating principal). Access
+// is governed by the generic ACLPermission policy stored in the role's
+// secret_permission JSONB column — the per-secret link tables have been removed.
 //
 // Typed secrets: a Secret carries a secretType discriminator ("static" | "oauth").
 // The sensitive payload lives in a type-specific detail table (not modelled here

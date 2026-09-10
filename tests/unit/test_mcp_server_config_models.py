@@ -14,10 +14,7 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (
     decrypt_json_blob,
     encrypt_json_blob,
 )
-from openhands.ev2.mcp_server_config.mcp_server_config_security import MCPServerConfigAccess
 from openhands.ev2.mcp_server_config.mcp_server_config_service import mcp_proxy_url_for
-from openhands.ev2.security.security_models import Action
-from openhands.ev2.util.search_filter import AllSearchFilter, NoneSearchFilter
 
 _TEST_SECRET = "test-secret-key-at-least-32-bytes-long"
 
@@ -71,21 +68,6 @@ def test_to_mcp_server_decrypts_secret_fields(enc: EncryptionService) -> None:
     dumped = server.model_dump(mode="json")
     assert dumped["env"] == {"TOKEN": "**********"}
     assert dumped["auth"] == {"strategy": "bearer", "value": "**********"}
-
-
-def test_mcp_access_filter_branches() -> None:
-    access = MCPServerConfigAccess()
-
-    create_filter = access.to_search_filter(None, Action.CREATE)
-    assert isinstance(create_filter, AllSearchFilter)
-
-    denied_filter = access.to_search_filter(None, Action.READ)
-    assert isinstance(denied_filter, NoneSearchFilter)
-
-    user_id = uuid.uuid4()
-    update_filter = access.to_search_filter(user_id, Action.UPDATE)
-    assert update_filter.matches(object()) is True
-    assert update_filter.sql_condition() is not None
 
 
 def test_mcp_proxy_url_for(app_config: AppConfig) -> None:

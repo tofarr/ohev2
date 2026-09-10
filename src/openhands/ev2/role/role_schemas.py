@@ -62,17 +62,9 @@ class RoleCreate(BaseModel):
             "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
         ),
     )
-    secret_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-secret grant resources; null = deny.",
-    )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
         description="Permission policy for mcp_server_config resources; null = deny.",
-    )
-    mcp_server_config_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-MCP-config grant resources; null = deny.",
     )
     provider_connection_permission: Permission | None = Field(
         default=None,
@@ -113,10 +105,6 @@ class RoleCreate(BaseModel):
     sandbox_snapshot_permission: Permission | None = Field(
         default=None,
         description="Permission policy for sandbox_snapshot resources; null = deny.",
-    )
-    sandbox_template_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-sandbox-template grant resources; null = deny.",
     )
 
     @field_validator("name")
@@ -170,17 +158,9 @@ class RoleUpdate(BaseModel):
             "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
         ),
     )
-    secret_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-secret grant resources; null = deny.",
-    )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
         description="Permission policy for mcp_server_config resources; null = deny.",
-    )
-    mcp_server_config_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-MCP-config grant resources; null = deny.",
     )
     provider_connection_permission: Permission | None = Field(
         default=None,
@@ -222,10 +202,6 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for sandbox_snapshot resources; null = deny.",
     )
-    sandbox_template_grant_permission: Permission | None = Field(
-        default=None,
-        description="Permission policy for role-sandbox-template grant resources; null = deny.",
-    )
 
     @field_validator("name")
     @classmethod
@@ -253,9 +229,7 @@ class RoleRead(BaseModel):
     cors_origin_permission: Permission | None
     secret_permission: Permission | None
     secret_value_permission: Permission | None
-    secret_grant_permission: Permission | None
     mcp_server_config_permission: Permission | None
-    mcp_server_config_grant_permission: Permission | None
     provider_connection_permission: Permission | None
     llm_permission: Permission | None
     llm_aggregated_usage_permission: Permission | None
@@ -266,7 +240,6 @@ class RoleRead(BaseModel):
     sandbox_template_permission: Permission | None
     sandbox_permission: Permission | None
     sandbox_snapshot_permission: Permission | None
-    sandbox_template_grant_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 

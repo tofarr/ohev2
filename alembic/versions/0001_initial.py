@@ -22,18 +22,14 @@ Tables:
 * ``allowed_origins``        — CORS allow-list.
 * ``roles``                  — named role bundling per-entity Permission policies.
 * ``user_roles``             — role-to-user assignments.
-* ``secrets``                — named secrets with encrypted values.
-* ``role_secret_permissions``           — per-role grants of access to secrets.
-* ``user_secret_permissions``           — per-user grants of access to secrets.
+* ``secrets``                — named secrets with encrypted values (optional ``user_id`` owner).
 * ``mcp_server_configs``    — stored MCP server configurations.
-* ``role_mcp_server_config_permissions`` — per-role grants for MCP configs.
 * ``mcp_usage``             — raw proxied MCP tool-invocation records (daily-partitioned).
 * ``mcp_aggregated_usage``  — per-minute, per-user rollup of mcp_usage.
 * ``provider_connections``   — shared LLM provider credential bundles (encrypted api_key).
 * ``llms``                   — stored LLM profiles referencing a provider connection.
 * ``feature_flags``          — named feature flags keyed by a string id.
 * ``feature_flag_role_assignments``     — per-role overrides of feature flags.
-* ``role_sandbox_template_permissions`` — per-role grants of access to sandbox templates.
 """
 
 from __future__ import annotations
@@ -373,22 +369,10 @@ def upgrade() -> None:
             ),
         ),
         sa.Column(
-            "secret_grant_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for role-secret grant resources; null = deny.",
-        ),
-        sa.Column(
             "mcp_server_config_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for mcp_server_config resources; null = deny.",
-        ),
-        sa.Column(
-            "mcp_server_config_grant_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for role-MCP-config grant resources; null = deny.",
         ),
         sa.Column(
             "provider_connection_permission",
@@ -451,12 +435,6 @@ def upgrade() -> None:
             comment="Permission policy for sandbox_snapshot resources; null = deny.",
         ),
         sa.Column(
-            "sandbox_template_grant_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for role-sandbox-template grant resources; null = deny.",
-        ),
-        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("clock_timestamp()"),
@@ -515,6 +493,7 @@ def upgrade() -> None:
             comment="Secret type discriminator (static | oauth).",
         ),
         sa.Column("description", sa.Text(), nullable=True),
+        sa.Column("user_id", sa.Uuid(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -527,10 +506,17 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            ondelete="SET NULL",
+            name="fk_secrets_user_id_users",
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("code"),
     )
     op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
+    op.create_index("ix_secrets_user_id", "secrets", ["user_id"])
 
     # ------------------------------------------------------------------ #
     # static_secret_details
@@ -569,51 +555,6 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_static_secret_details_secret_id", "static_secret_details", ["secret_id"], unique=True
-    )
-
-    # ------------------------------------------------------------------ #
-    # role_secret_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "role_secret_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("role_id", sa.Uuid(), nullable=False),
-        sa.Column("secret_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["role_id"],
-            ["roles.id"],
-            ondelete="CASCADE",
-            name="fk_role_secret_permissions_role_id_roles",
-        ),
-        sa.ForeignKeyConstraint(
-            ["secret_id"],
-            ["secrets.id"],
-            ondelete="CASCADE",
-            name="fk_role_secret_permissions_secret_id_secrets",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "role_id", "secret_id", name="uq_role_secret_permissions_role_id_secret_id"
-        ),
-        comment="Per-role grants of access to secrets",
-    )
-    op.create_index(
-        "ix_role_secret_permissions_role_id", "role_secret_permissions", ["role_id"], unique=False
     )
 
     # ------------------------------------------------------------------ #
@@ -671,123 +612,6 @@ def upgrade() -> None:
         comment="Stored MCP server configurations",
     )
     op.create_index("ix_mcp_server_configs_user_id", "mcp_server_configs", ["user_id"])
-
-    # ------------------------------------------------------------------ #
-    # role_mcp_server_config_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "role_mcp_server_config_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("role_id", sa.Uuid(), nullable=False),
-        sa.Column("mcp_server_config_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["role_id"],
-            ["roles.id"],
-            ondelete="CASCADE",
-            name="fk_role_mcp_server_config_permissions_role_id_roles",
-        ),
-        sa.ForeignKeyConstraint(
-            ["mcp_server_config_id"],
-            ["mcp_server_configs.id"],
-            ondelete="CASCADE",
-            name="fk_role_mcp_server_config_permissions_config_id_configs",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "role_id",
-            "mcp_server_config_id",
-            name="uq_role_mcp_server_config_permissions_role_id_config_id",
-        ),
-        comment="Per-role grants of access to MCP server configs",
-    )
-    op.create_index(
-        "ix_role_mcp_server_config_permissions_role_id",
-        "role_mcp_server_config_permissions",
-        ["role_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_role_mcp_server_config_permissions_mcp_server_config_id",
-        "role_mcp_server_config_permissions",
-        ["mcp_server_config_id"],
-        unique=False,
-    )
-
-    op.create_index(
-        "ix_role_secret_permissions_secret_id",
-        "role_secret_permissions",
-        ["secret_id"],
-        unique=False,
-    )
-
-    # ------------------------------------------------------------------ #
-    # user_secret_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "user_secret_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column("secret_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["user_id"],
-            ["users.id"],
-            ondelete="CASCADE",
-            name="fk_user_secret_permissions_user_id_users",
-        ),
-        sa.ForeignKeyConstraint(
-            ["secret_id"],
-            ["secrets.id"],
-            ondelete="CASCADE",
-            name="fk_user_secret_permissions_secret_id_secrets",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "user_id", "secret_id", name="uq_user_secret_permissions_user_id_secret_id"
-        ),
-        comment="Per-user grants of access to secrets",
-    )
-    op.create_index(
-        "ix_user_secret_permissions_user_id",
-        "user_secret_permissions",
-        ["user_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_user_secret_permissions_secret_id",
-        "user_secret_permissions",
-        ["secret_id"],
-        unique=False,
-    )
 
     # ------------------------------------------------------------------ #
     # provider_connections
@@ -987,56 +811,6 @@ def upgrade() -> None:
         "ix_feature_flag_user_assignments_user_id",
         "feature_flag_user_assignments",
         ["user_id"],
-        unique=False,
-    )
-
-    # ------------------------------------------------------------------ #
-    # role_sandbox_template_permissions
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "role_sandbox_template_permissions",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("role_id", sa.Uuid(), nullable=False),
-        sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
-        sa.Column("read_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("update_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("delete_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["role_id"],
-            ["roles.id"],
-            ondelete="CASCADE",
-            name="fk_role_sandbox_template_permissions_role_id_roles",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "role_id",
-            "sandbox_template_id",
-            name="uq_role_sandbox_tpl_perm_role_sandbox_tpl",
-        ),
-        comment="Per-role grants of access to sandbox templates",
-    )
-    op.create_index(
-        "ix_role_sandbox_template_permissions_role_id",
-        "role_sandbox_template_permissions",
-        ["role_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_role_sandbox_template_permissions_sandbox_template_id",
-        "role_sandbox_template_permissions",
-        ["sandbox_template_id"],
         unique=False,
     )
 
@@ -1318,16 +1092,6 @@ def downgrade() -> None:
     op.drop_table("llm_usage")
 
     op.drop_index(
-        "ix_role_sandbox_template_permissions_sandbox_template_id",
-        table_name="role_sandbox_template_permissions",
-    )
-    op.drop_index(
-        "ix_role_sandbox_template_permissions_role_id",
-        table_name="role_sandbox_template_permissions",
-    )
-    op.drop_table("role_sandbox_template_permissions")
-
-    op.drop_index(
         "ix_feature_flag_user_assignments_user_id", table_name="feature_flag_user_assignments"
     )
     op.drop_index(
@@ -1349,26 +1113,12 @@ def downgrade() -> None:
     op.drop_table("llms")
     op.drop_index("ix_provider_connections_user_id", table_name="provider_connections")
     op.drop_table("provider_connections")
-    op.drop_index("ix_user_secret_permissions_user_id", table_name="user_secret_permissions")
-    op.drop_index("ix_user_secret_permissions_secret_id", table_name="user_secret_permissions")
-    op.drop_table("user_secret_permissions")
-    op.drop_index(
-        "ix_role_mcp_server_config_permissions_mcp_server_config_id",
-        table_name="role_mcp_server_config_permissions",
-    )
-    op.drop_index(
-        "ix_role_mcp_server_config_permissions_role_id",
-        table_name="role_mcp_server_config_permissions",
-    )
-    op.drop_table("role_mcp_server_config_permissions")
     op.drop_index("ix_mcp_server_configs_user_id", table_name="mcp_server_configs")
     op.drop_table("mcp_server_configs")
-    op.drop_index("ix_role_secret_permissions_secret_id", table_name="role_secret_permissions")
-    op.drop_index("ix_role_secret_permissions_role_id", table_name="role_secret_permissions")
-    op.drop_table("role_secret_permissions")
     op.drop_index("ix_static_secret_details_secret_id", table_name="static_secret_details")
     op.drop_table("static_secret_details")
     op.drop_index("ix_secrets_code", table_name="secrets")
+    op.drop_index("ix_secrets_user_id", table_name="secrets")
     op.drop_table("secrets")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")
     op.drop_index("ix_user_roles_role_id", table_name="user_roles")

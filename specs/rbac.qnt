@@ -21,13 +21,11 @@
 // Link tables are first-class governed entities (AGENTS.md §11):
 //   - `user_roles` is governed by the "user_role" entity permission —
 //     deciding who holds a role is NOT implied by "role" permission update.
-//   - `role_secret_permissions` is governed by "secret_grant"; granting a
-//     role access to a secret is NOT implied by "role" permission update.
-//   - `role_mcp_server_config_permissions` is governed by
-//     "mcp_server_config_grant" likewise.
-// These are the privilege-escalation guards: a role-metadata admin cannot
-// self-assign roles or grant a role access to secrets/MCP configs without
-// the corresponding link-table permission.
+// The per-item ACL link tables (role_secret_permissions,
+// user_secret_permissions, role_mcp_server_config_permissions,
+// role_sandbox_template_permissions) and their grant-permission columns have
+// been removed. Item-level access is now expressed via the generic
+// ACLPermission policy stored in the role's per-entity JSONB column.
 
 module rbac {
   // Simplified permission policies (mirrors role.qnt).

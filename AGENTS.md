@@ -318,12 +318,6 @@ column.**
 * `user_roles` → `user_role_permission`: deciding who *holds* a role is not
   implied by `role_permission` (a role-metadata admin must not be able to
   self-assign an admin role — self-service privilege escalation).
-* `role_secret_permissions` → `secret_grant_permission`: granting a role
-  access to secrets is not implied by `role_permission` (a role admin must
-  not be able to grant roles it doesn't control read access to arbitrary
-  secrets — cross-role secret exfiltration).
-* `role_mcp_server_config_permissions` → `mcp_server_config_grant_permission`
-  (same exfiltration concern for MCP credentials).
 * Routers for link tables guard with `depends_permissions(<LinkModel>,
   Action.*)` and pass the resolved filter to the service; the service scopes
   reads via `perm_filter.filter_sql(...)` and rejects out-of-scope creates
@@ -332,6 +326,16 @@ column.**
   and confirm the guard checks that entity's column. If the guard checks a
   different entity's column, ask whether that coupling lets a principal gain
   access they were not explicitly granted.
+
+> **Note:** The per-item ACL link tables (`role_secret_permissions`,
+> `user_secret_permissions`, `role_mcp_server_config_permissions`,
+> `role_sandbox_template_permissions`) and their grant-permission columns
+> (`secret_grant_permission`, `mcp_server_config_grant_permission`,
+> `sandbox_template_grant_permission`) have been removed. Item-level access
+> control is now expressed via the generic `ACLPermission` policy stored in
+> the role's per-entity JSONB column (e.g. `secret_permission`), which
+> enumerates permitted item ids per action. See §12 for the typed-secrets
+> projection that still uses `secret_value_permission` for value reveal.
 
 ## 10. Review checklist (for agents reviewing PRs)
 

@@ -8,8 +8,8 @@ Two services live here:
   search/get/update/delete SQL to secrets the principal may act on. The
   ``value`` is encrypted at rest via the encryption service (AGENTS.md §9) and
   stored in a type-specific detail row (``static_secret_details``); it is never
-  returned by this service — :meth:`to_read` omits the value. The creating
-  principal receives a direct ``user_secret_permissions`` grant.
+  returned by this service — :meth:`to_read` omits the value. The ``user_id``
+  of the creating principal is recorded on the secret row.
 
 * :class:`SecretValueService` — the read-only reveal projection behind
   ``/secret-values``. It takes two filters (read-access + value-permission) and
@@ -32,7 +32,6 @@ from openhands.ev2.secret.secret_models import (
     Secret,
     SecretType,
     StaticSecretDetail,
-    UserSecretPermission,
 )
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
@@ -108,6 +107,7 @@ class SecretService:
             code=secret.code,
             type=secret.type,
             description=secret.description,
+            user_id=secret.user_id,
             created_at=secret.created_at,
             updated_at=secret.updated_at,
         )
@@ -116,13 +116,14 @@ class SecretService:
         """Create a secret. Raises :class:`SecretCodeConflictError` on a duplicate code.
 
         For ``type='static'`` the value is encrypted at rest and stored in a
-        :class:`StaticSecretDetail` row. The creating principal receives a
-        direct read/update/delete grant.
+        :class:`StaticSecretDetail` row. The ``user_id`` of the creating
+        principal is recorded on the secret for ownership-based access control.
         """
         secret = Secret(
             code=payload.code,
             type=payload.type,
             description=payload.description,
+            user_id=user_id,
         )
         if not self._perm_filter.matches(secret):
             raise SecretPermissionScopeError(str(payload.code))
@@ -131,7 +132,6 @@ class SecretService:
             await self._session.flush()
             if payload.type == SecretType.STATIC:
                 self._session.add(self._make_static_detail(secret.id, payload))
-            self._session.add(self._make_owner_grant(secret.id, user_id))
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()
@@ -146,15 +146,6 @@ class SecretService:
         return StaticSecretDetail(
             secret_id=secret_id,
             value=self._enc.encrypt_value(value),
-        )
-
-    def _make_owner_grant(self, secret_id: uuid.UUID, user_id: uuid.UUID) -> UserSecretPermission:
-        return UserSecretPermission(
-            user_id=user_id,
-            secret_id=secret_id,
-            read_enabled=True,
-            update_enabled=True,
-            delete_enabled=True,
         )
 
     async def get(self, secret_id: uuid.UUID) -> Secret:

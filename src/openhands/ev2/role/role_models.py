@@ -42,9 +42,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "cors_origin_permission",
     "secret_permission",
     "secret_value_permission",
-    "secret_grant_permission",
     "mcp_server_config_permission",
-    "mcp_server_config_grant_permission",
     "provider_connection_permission",
     "llm_permission",
     "llm_aggregated_usage_permission",
@@ -55,7 +53,6 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "sandbox_template_permission",
     "sandbox_permission",
     "sandbox_snapshot_permission",
-    "sandbox_template_grant_permission",
 )
 
 
@@ -122,20 +119,10 @@ class Role(Base):
             "resolve_permission_filter_for_column (AGENTS.md §12)."
         ),
     )
-    secret_grant_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role-secret grant resources; null = deny.",
-    )
     mcp_server_config_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
         default=None,
         comment="Permission policy for mcp_server_config resources; null = deny.",
-    )
-    mcp_server_config_grant_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role-MCP-config grant resources; null = deny.",
     )
     provider_connection_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
@@ -186,11 +173,6 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for sandbox_snapshot resources; null = deny.",
-    )
-    sandbox_template_grant_permission: Mapped[Permission | None] = mapped_column(
-        PermissionType,
-        default=None,
-        comment="Permission policy for role-sandbox-template grant resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,

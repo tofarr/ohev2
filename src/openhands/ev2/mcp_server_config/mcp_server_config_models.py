@@ -5,10 +5,6 @@
 ``auth``) are stored as encrypted JSON blobs and decrypted only when an SDK
 object or masked API response is materialized.
 
-``RoleMCPServerConfigPermission`` mirrors ``role_secret_permissions``: a role
-gets per-config read/update/delete grants through this link table, while create
-is governed by the role's ``mcp_server_config_permission`` policy.
-
 An ``enable_proxy`` flag selects whether the config's effective ``url`` points
 at this service's MCP proxy endpoint (built from :attr:`AppConfig.base_url`) or
 at the stored ``url``.
@@ -21,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -182,45 +178,3 @@ class MCPServerConfig(Base):
                 proxy_credential=proxy_credential,
             )
         )
-
-
-class RoleMCPServerConfigPermission(Base):
-    """A per-role grant of access to an :class:`MCPServerConfig`."""
-
-    __tablename__ = "role_mcp_server_config_permissions"
-    __table_args__ = (
-        UniqueConstraint(
-            "role_id",
-            "mcp_server_config_id",
-            name="uq_role_mcp_server_config_permissions_role_id_config_id",
-        ),
-        {"comment": "Per-role grants of access to MCP server configs"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        init=False,
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"),
-        index=True,
-    )
-    mcp_server_config_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("mcp_server_configs.id", ondelete="CASCADE"),
-        index=True,
-    )
-    read_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    update_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    delete_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    created_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.clock_timestamp(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        _TZ,
-        init=False,
-        server_default=func.clock_timestamp(),
-        onupdate=func.now(),
-    )

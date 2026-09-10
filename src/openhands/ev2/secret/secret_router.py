@@ -9,10 +9,9 @@ surface. Decrypted plaintext is revealed solely through the
 ``/secret-values`` projection (AGENTS.md §12), which requires both read access
 to the secret and the separate ``secret_value_permission``. Every endpoint here
 is guarded by the centralized permission checker (AGENTS.md §9) over the
-``secret`` resource; for the :class:`SecretAccess` policy the
-read/update/delete filter is a :class:`SecretAccessFilter` keyed on the
-matching grant flag, so a principal sees only secrets granted directly or
-through one of their roles.
+``secret`` resource; item-level access is controlled by the role's
+``secret_permission`` column (e.g. :class:`ACLPermission` or
+:class:`Permitted`).
 """
 
 from __future__ import annotations
