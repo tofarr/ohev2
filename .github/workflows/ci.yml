@@ -41,7 +41,7 @@ jobs:
       - name: McCabe complexity check
         run: uv run pylint src/openhands/ev2
       - name: Unit tests with coverage
-        run: uv run pytest -q
+        run: uv run pytest -q -n 0 --cov=openhands.ev2 --cov-fail-under=94 --cov-report=term-missing --cov-report=xml
 
   specs:
     runs-on: ubuntu-latest

@@ -36,8 +36,15 @@ locally and ensure they are green *before* opening (or updating) a pull request:
    uv run ruff format --check .
    uv run mypy
    uv run pylint src/openhands/ev2
-   uv run pytest -q
+   make test
    ```
+   `make test` runs the full suite with coverage and the 94% gate (xdist
+   disabled for deterministic coverage attribution). For fast iteration
+   *before* this gate, use `make test-fast ARGS=<path>` (no coverage,
+   testmon-scoped, stops on first failure) or `make test-affected` (only
+   tests touched by the current diff). A bare `uv run pytest` also runs
+   coverage-free and parallelized via xdist, but does not stop early or
+   scope to the diff.
    `pylint` runs the McCabe cyclomatic complexity check (threshold 5);
    it must pass — overly complex functions must be refactored.
 2. **e2e** (mirrors the `e2e` CI job; requires Docker for the service stack):
