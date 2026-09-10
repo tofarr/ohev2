@@ -139,15 +139,17 @@ class SandboxTemplateBatchWriteRequest(BaseModel):
 class SandboxCreate(BaseModel):
     """Payload to create a sandbox.
 
-    The sandbox is created from a template (``sandbox_spec_id`` names the
-    template id) and starts in the ``inactive`` desired state. Only
-    ``desired_status`` is mutable after creation (via :class:`SandboxUpdate`).
+    The sandbox is created from a template (``sandbox_template_id`` names the
+    template id) and starts in the ``inactive`` desired state. The sandbox
+    ``id`` is assigned by the sandbox service (the provider generates it —
+    e.g. Docker mints a humorous container name), never supplied by the
+    caller. Only ``desired_status`` is mutable after creation (via
+    :class:`SandboxUpdate`).
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: str = Field(min_length=1, max_length=255, description="Caller-chosen sandbox id.")
-    sandbox_spec_id: str = Field(
+    sandbox_template_id: str = Field(
         min_length=1, max_length=1024, description="Template id to instantiate."
     )
 
@@ -170,7 +172,7 @@ class SandboxRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    sandbox_spec_id: str
+    sandbox_template_id: str
     status: SandboxStatus
     desired_status: SandboxStatus
     snapshot_mode: SnapshotMode
@@ -186,7 +188,9 @@ class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
 
     id__contains: str | None = Field(default=None, description="Case-insensitive id substring.")
     id__eq: str | None = Field(default=None, description="Exact id match.")
-    sandbox_spec_id__eq: str | None = Field(default=None, description="Exact template id match.")
+    sandbox_template_id__eq: str | None = Field(
+        default=None, description="Exact template id match."
+    )
     status__eq: SandboxStatus | None = Field(default=None)
     desired_status__eq: SandboxStatus | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)

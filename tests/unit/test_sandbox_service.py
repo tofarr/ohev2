@@ -9,6 +9,7 @@ implementation's provider hooks are covered separately in
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
@@ -35,7 +36,6 @@ from openhands.ev2.sandbox.sandbox_schemas import (
 )
 from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
-    SandboxConflictError,
     SandboxNotFoundError,
     SandboxPermissionScopeError,
     SandboxService,
@@ -105,17 +105,17 @@ class _MemorySandboxService(SandboxService):
 
     def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
         return DockerSandbox(
-            id=payload.id,
-            sandbox_spec_id=payload.sandbox_spec_id,
+            sandbox_template_id=payload.sandbox_template_id,
             status=SandboxStatus.INACTIVE,
             desired_status=SandboxStatus.INACTIVE,
         )
 
     async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
-        if sandbox.id in self._sandboxes:
-            raise SandboxConflictError(sandbox.id)
-        self._sandboxes[sandbox.id] = sandbox
-        return sandbox
+        # Assign a generated id (mimics the provider generating one).
+        generated_id = f"sb-{uuid.uuid4().hex[:8]}"
+        created = sandbox.model_copy(update={"id": generated_id})
+        self._sandboxes[generated_id] = created
+        return created
 
     async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
         sandbox = self._sandboxes[sandbox_id]
@@ -518,8 +518,8 @@ def _deny_snapshot_id_filter(denied_id: str) -> SearchFilter[SandboxSnapshot]:
     )
 
 
-def _sandbox_payload(sandbox_id: str = "sb-a", spec: str = "img-a") -> SandboxCreate:
-    return SandboxCreate.model_validate({"id": sandbox_id, "sandbox_spec_id": spec})
+def _sandbox_payload(spec: str = "img-a") -> SandboxCreate:
+    return SandboxCreate.model_validate({"sandbox_template_id": spec})
 
 
 # --------------------------------------------------------------------------- #
@@ -529,17 +529,17 @@ def _sandbox_payload(sandbox_id: str = "sb-a", spec: str = "img-a") -> SandboxCr
 
 async def test_list_sandboxes_filters_by_perm_filter() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    await service.create_sandbox(_sandbox_payload("sb-b"))
-    visible = await service.list_sandboxes(perm_filter=_deny_sandbox_id_filter("sb-b"))
-    assert [sb.id for sb in visible] == ["sb-a"]
+    sb_a = await service.create_sandbox(_sandbox_payload())
+    sb_b = await service.create_sandbox(_sandbox_payload())
+    visible = await service.list_sandboxes(perm_filter=_deny_sandbox_id_filter(sb_b.id))
+    assert [sb.id for sb in visible] == [sb_a.id]
 
 
 async def test_get_sandbox_returns_sandbox() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    sandbox = await service.get_sandbox("sb-a")
-    assert sandbox.id == "sb-a"
+    created = await service.create_sandbox(_sandbox_payload())
+    sandbox = await service.get_sandbox(created.id)
+    assert sandbox.id == created.id
 
 
 async def test_get_sandbox_missing_raises_not_found() -> None:
@@ -550,36 +550,29 @@ async def test_get_sandbox_missing_raises_not_found() -> None:
 
 async def test_get_sandbox_out_of_scope_raises_not_found() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    created = await service.create_sandbox(_sandbox_payload())
     with pytest.raises(SandboxNotFoundError):
-        await service.get_sandbox("sb-a", perm_filter=NONE)
+        await service.get_sandbox(created.id, perm_filter=NONE)
 
 
 async def test_create_sandbox_persists() -> None:
     service = _MemorySandboxService()
-    sandbox = await service.create_sandbox(_sandbox_payload("sb-a"))
-    assert sandbox.id == "sb-a"
-    assert (await service.get_sandbox("sb-a")).id == "sb-a"
+    sandbox = await service.create_sandbox(_sandbox_payload())
+    assert sandbox.id != ""
+    assert (await service.get_sandbox(sandbox.id)).id == sandbox.id
 
 
 async def test_create_sandbox_out_of_scope_raises_scope_error() -> None:
     service = _MemorySandboxService()
     with pytest.raises(SandboxPermissionScopeError):
-        await service.create_sandbox(_sandbox_payload("sb-a"), perm_filter=NONE)
-
-
-async def test_create_sandbox_conflict_propagates() -> None:
-    service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    with pytest.raises(SandboxConflictError):
-        await service.create_sandbox(_sandbox_payload("sb-a"))
+        await service.create_sandbox(_sandbox_payload(), perm_filter=NONE)
 
 
 async def test_update_sandbox_changes_desired_status() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    created = await service.create_sandbox(_sandbox_payload())
     updated = await service.update_sandbox(
-        "sb-a", SandboxUpdate.model_validate({"desired_status": "active"})
+        created.id, SandboxUpdate.model_validate({"desired_status": "active"})
     )
     assert updated.desired_status is SandboxStatus.ACTIVE
     assert updated.status is SandboxStatus.ACTIVE
@@ -595,19 +588,19 @@ async def test_update_sandbox_missing_raises_not_found() -> None:
 
 async def test_update_sandbox_out_of_scope_raises_not_found() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    created = await service.create_sandbox(_sandbox_payload())
     with pytest.raises(SandboxNotFoundError):
         await service.update_sandbox(
-            "sb-a", SandboxUpdate.model_validate({"desired_status": "active"}), perm_filter=NONE
+            created.id, SandboxUpdate.model_validate({"desired_status": "active"}), perm_filter=NONE
         )
 
 
 async def test_delete_sandbox_removes() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    await service.delete_sandbox("sb-a")
+    created = await service.create_sandbox(_sandbox_payload())
+    await service.delete_sandbox(created.id)
     with pytest.raises(SandboxNotFoundError):
-        await service.get_sandbox("sb-a")
+        await service.get_sandbox(created.id)
 
 
 async def test_delete_sandbox_missing_raises_not_found() -> None:
@@ -618,63 +611,63 @@ async def test_delete_sandbox_missing_raises_not_found() -> None:
 
 async def test_delete_sandbox_out_of_scope_raises_not_found() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    created = await service.create_sandbox(_sandbox_payload())
     with pytest.raises(SandboxNotFoundError):
-        await service.delete_sandbox("sb-a", perm_filter=NONE)
+        await service.delete_sandbox(created.id, perm_filter=NONE)
 
 
 async def test_get_sandboxes_aligned_with_none() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    await service.create_sandbox(_sandbox_payload("sb-b"))
-    results = await service.get_sandboxes(["sb-a", "missing", "sb-b"])
-    assert results[0] is not None and results[0].id == "sb-a"
+    sb_a = await service.create_sandbox(_sandbox_payload())
+    sb_b = await service.create_sandbox(_sandbox_payload())
+    results = await service.get_sandboxes([sb_a.id, "missing", sb_b.id])
+    assert results[0] is not None and results[0].id == sb_a.id
     assert results[1] is None
-    assert results[2] is not None and results[2].id == "sb-b"
+    assert results[2] is not None and results[2].id == sb_b.id
 
 
 async def test_get_sandboxes_respects_perm_filter() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
-    await service.create_sandbox(_sandbox_payload("sb-b"))
+    sb_a = await service.create_sandbox(_sandbox_payload())
+    sb_b = await service.create_sandbox(_sandbox_payload())
     results = await service.get_sandboxes(
-        ["sb-a", "sb-b"], perm_filter=_deny_sandbox_id_filter("sb-a")
+        [sb_a.id, sb_b.id], perm_filter=_deny_sandbox_id_filter(sb_a.id)
     )
     assert results[0] is None
-    assert results[1] is not None and results[1].id == "sb-b"
+    assert results[1] is not None and results[1].id == sb_b.id
 
 
 async def test_apply_sandbox_batch_create_and_delete() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    sb_a = await service.create_sandbox(_sandbox_payload())
     results = await service.apply_sandbox_batch(
         [
-            SandboxBatchCreate(data=_sandbox_payload("sb-b")),
-            SandboxBatchDelete(id="sb-a"),
+            SandboxBatchCreate(data=_sandbox_payload()),
+            SandboxBatchDelete(id=sb_a.id),
         ],
         {Action.CREATE: ALL, Action.DELETE: ALL},
     )
-    assert results[0] is not None and results[0].id == "sb-b"
+    assert results[0] is not None and results[0].id != ""
     assert results[1] is None
     with pytest.raises(SandboxNotFoundError):
-        await service.get_sandbox("sb-a")
+        await service.get_sandbox(sb_a.id)
 
 
 async def test_apply_sandbox_batch_create_denied_raises() -> None:
     service = _MemorySandboxService()
     with pytest.raises(BatchPermissionDeniedError):
         await service.apply_sandbox_batch(
-            [SandboxBatchCreate(data=_sandbox_payload("sb-a"))],
+            [SandboxBatchCreate(data=_sandbox_payload())],
             {Action.CREATE: None, Action.DELETE: ALL},
         )
 
 
 async def test_apply_sandbox_batch_delete_denied_raises() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload("sb-a"))
+    sb_a = await service.create_sandbox(_sandbox_payload())
     with pytest.raises(BatchPermissionDeniedError):
         await service.apply_sandbox_batch(
-            [SandboxBatchDelete(id="sb-a")],
+            [SandboxBatchDelete(id=sb_a.id)],
             {Action.CREATE: ALL, Action.DELETE: None},
         )
 
@@ -712,16 +705,16 @@ def _snapshot_from_file_payload(snapshot_id: str = "snap-b") -> SandboxSnapshotC
 
 async def test_create_snapshot_from_sandbox_persists() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
 
     snapshot = await service.create_snapshot(
-        _snapshot_from_sandbox_payload(),
+        _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
 
     assert snapshot.id == "snap-a"
-    assert snapshot.sandbox_id == "sb-a"
+    assert snapshot.sandbox_id == sandbox.id
     assert snapshot.download_url is not None
     listed = await service.list_snapshots(perm_filter=ALL)
     assert [s.id for s in listed] == ["snap-a"]
@@ -738,10 +731,10 @@ async def test_create_snapshot_from_file_persists() -> None:
 
 async def test_create_snapshot_out_of_scope_raises_scope_error() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     with pytest.raises(SandboxSnapshotPermissionScopeError):
         await service.create_snapshot(
-            _snapshot_from_sandbox_payload(),
+            _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
             perm_filter=NONE,
             sandbox_perm_filter=ALL,
         )
@@ -759,8 +752,8 @@ async def test_create_snapshot_from_missing_sandbox_raises_not_found() -> None:
 
 async def test_create_snapshot_conflict_raises() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
-    payload = _snapshot_from_sandbox_payload()
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    payload = _snapshot_from_sandbox_payload(sandbox_id=sandbox.id)
     await service.create_snapshot(payload, perm_filter=ALL, sandbox_perm_filter=ALL)
     with pytest.raises(SandboxSnapshotConflictError):
         await service.create_snapshot(payload, perm_filter=ALL, sandbox_perm_filter=ALL)
@@ -768,9 +761,11 @@ async def test_create_snapshot_conflict_raises() -> None:
 
 async def test_get_snapshot_returns_snapshot() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload(), perm_filter=ALL, sandbox_perm_filter=ALL
+        _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
+        perm_filter=ALL,
+        sandbox_perm_filter=ALL,
     )
     snapshot = await service.get_snapshot("snap-a", perm_filter=ALL)
     assert snapshot.id == "snap-a"
@@ -784,9 +779,11 @@ async def test_get_snapshot_missing_raises_not_found() -> None:
 
 async def test_get_snapshot_out_of_scope_raises_not_found() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload(), perm_filter=ALL, sandbox_perm_filter=ALL
+        _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
+        perm_filter=ALL,
+        sandbox_perm_filter=ALL,
     )
     with pytest.raises(SandboxSnapshotNotFoundError):
         await service.get_snapshot("snap-a", perm_filter=NONE)
@@ -794,14 +791,14 @@ async def test_get_snapshot_out_of_scope_raises_not_found() -> None:
 
 async def test_list_snapshots_filters_by_perm_filter() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-a", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-a", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-b", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-b", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
@@ -811,9 +808,11 @@ async def test_list_snapshots_filters_by_perm_filter() -> None:
 
 async def test_delete_snapshot_removes() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload(), perm_filter=ALL, sandbox_perm_filter=ALL
+        _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
+        perm_filter=ALL,
+        sandbox_perm_filter=ALL,
     )
     await service.delete_snapshot("snap-a", perm_filter=ALL)
     with pytest.raises(SandboxSnapshotNotFoundError):
@@ -828,9 +827,11 @@ async def test_delete_snapshot_missing_raises_not_found() -> None:
 
 async def test_delete_snapshot_out_of_scope_raises_not_found() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload(), perm_filter=ALL, sandbox_perm_filter=ALL
+        _snapshot_from_sandbox_payload(sandbox_id=sandbox.id),
+        perm_filter=ALL,
+        sandbox_perm_filter=ALL,
     )
     with pytest.raises(SandboxSnapshotNotFoundError):
         await service.delete_snapshot("snap-a", perm_filter=NONE)
@@ -838,9 +839,9 @@ async def test_delete_snapshot_out_of_scope_raises_not_found() -> None:
 
 async def test_get_snapshots_aligned_with_none() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-a", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-a", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
@@ -851,10 +852,10 @@ async def test_get_snapshots_aligned_with_none() -> None:
 
 async def test_search_snapshots_paginates_with_cursor() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     for i in range(5):
         await service.create_snapshot(
-            _snapshot_from_sandbox_payload(f"snap-{i}", "sb-a"),
+            _snapshot_from_sandbox_payload(f"snap-{i}", sandbox.id),
             perm_filter=ALL,
             sandbox_perm_filter=ALL,
         )
@@ -871,14 +872,14 @@ async def test_search_snapshots_paginates_with_cursor() -> None:
 
 async def test_count_snapshots_respects_perm_filter() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-a", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-a", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-b", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-b", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
@@ -888,9 +889,9 @@ async def test_count_snapshots_respects_perm_filter() -> None:
 
 async def test_apply_snapshot_batch_delete_succeeds() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-a", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-a", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )
@@ -905,9 +906,9 @@ async def test_apply_snapshot_batch_delete_succeeds() -> None:
 
 async def test_apply_snapshot_batch_delete_denied_raises() -> None:
     service = _MemorySandboxService()
-    await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
+    sandbox = await service.create_sandbox(_sandbox_payload(), perm_filter=ALL)
     await service.create_snapshot(
-        _snapshot_from_sandbox_payload("snap-a", "sb-a"),
+        _snapshot_from_sandbox_payload("snap-a", sandbox.id),
         perm_filter=ALL,
         sandbox_perm_filter=ALL,
     )

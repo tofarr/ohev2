@@ -84,7 +84,7 @@ def test_docker_template_carries_exposed_ports() -> None:
 def test_sandbox_model_round_trip() -> None:
     sandbox = DockerSandbox(
         id="sb-1",
-        sandbox_spec_id="img:latest",
+        sandbox_template_id="img:latest",
         status=SandboxStatus.ACTIVE,
         desired_status=SandboxStatus.ACTIVE,
         session_api_key="key",
@@ -94,7 +94,7 @@ def test_sandbox_model_round_trip() -> None:
     restored = Sandbox.model_validate(sandbox.model_dump(mode="json"))
     assert isinstance(restored, DockerSandbox)
     assert restored.id == "sb-1"
-    assert restored.sandbox_spec_id == "img:latest"
+    assert restored.sandbox_template_id == "img:latest"
     assert restored.status is SandboxStatus.ACTIVE
     assert restored.session_api_key == "key"
     assert restored.exposed_urls[0].name == "agent_server"
@@ -103,11 +103,11 @@ def test_sandbox_model_round_trip() -> None:
 
 def test_sandbox_defaults() -> None:
     sandbox = DockerSandbox(
-        id="sb",
-        sandbox_spec_id="img",
+        sandbox_template_id="img",
         status=SandboxStatus.INACTIVE,
         desired_status=SandboxStatus.INACTIVE,
     )
+    assert sandbox.id == ""
     assert sandbox.session_api_key is None
     assert sandbox.exposed_urls == []
     assert sandbox.volume_mounts == []
@@ -127,8 +127,8 @@ def test_default_exposed_ports_include_agent_server_and_vscode() -> None:
 
 
 def test_sandbox_create_and_update_payloads() -> None:
-    create = SandboxCreate.model_validate({"id": "sb", "sandbox_spec_id": "img"})
-    assert create.id == "sb"
+    create = SandboxCreate.model_validate({"sandbox_template_id": "img"})
+    assert create.sandbox_template_id == "img"
     update = SandboxUpdate.model_validate({"desired_status": "active"})
     assert update.desired_status is SandboxStatus.ACTIVE
 
@@ -562,7 +562,7 @@ def _container_attrs(name: str, *, image: str = "img", status: str = "running") 
             "Image": image,
             "Labels": {
                 "io.openhands.sandbox.sandbox_id": name,
-                "io.openhands.sandbox.sandbox_spec_id": image,
+                "io.openhands.sandbox.sandbox_template_id": image,
             },
         },
         "HostConfig": {"Binds": ["/host:/container:rw"]},
@@ -575,7 +575,7 @@ def test_sandbox_from_container_attrs_running() -> None:
     sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
     assert isinstance(sandbox, DockerSandbox)
     assert sandbox.id == "sb-1"
-    assert sandbox.sandbox_spec_id == "img"
+    assert sandbox.sandbox_template_id == "img"
     assert sandbox.status is SandboxStatus.ACTIVE
     assert sandbox.desired_status is SandboxStatus.ACTIVE
     assert [u.name for u in (sandbox.exposed_urls or [])] == ["agent_server"]
@@ -661,7 +661,7 @@ def test_sandbox_from_create_carries_snapshot_mode() -> None:
     from openhands.ev2.sandbox.sandbox_schemas import SandboxCreate
 
     service = DockerSandboxService(snapshot_mode=SnapshotMode.AUTOMATIC)
-    sandbox = service._sandbox_from_create(SandboxCreate(id="sb-a", sandbox_spec_id="img-a"))
+    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
     assert sandbox.snapshot_mode == SnapshotMode.AUTOMATIC
 
 
@@ -888,6 +888,10 @@ class _FakeContainerWithCommit:
         self._unpaused = False
         self._removed = False
 
+    @property
+    def name(self) -> str:
+        return self.attrs["Name"].lstrip("/")
+
     def reload(self) -> None:
         return None
 
@@ -946,10 +950,12 @@ class _FakeContainersWithCommit:
 
             raise NotFound(name) from None
 
+    _generated_name_counter = 0
+
     def run(
         self,
         image: str,
-        name: str,
+        name: str | None = None,
         detach: bool = False,
         ports: dict[str, Any] | None = None,
         labels: dict[str, str] | None = None,
@@ -958,6 +964,11 @@ class _FakeContainersWithCommit:
         devices: list[str] | None = None,
         environment: dict[str, str] | None = None,
     ) -> _FakeContainerWithCommit:
+        # When ``name`` is not supplied (the production path), generate a
+        # humorous two-word name mimicking Docker's name generator.
+        if name is None:
+            type(self)._generated_name_counter += 1
+            name = f"fakename-{type(self)._generated_name_counter}"
         attrs = _container_attrs(name, image=image)
         attrs["State"]["Status"] = "running"
         attrs["Config"]["Labels"] = labels or {}
@@ -1164,7 +1175,7 @@ async def test_snapshot_from_sandbox_builds_model() -> None:
     service = DockerSandboxService()
     sandbox = DockerSandbox(
         id="sb-1",
-        sandbox_spec_id="img-a",
+        sandbox_template_id="img-a",
         status=SandboxStatus.ACTIVE,
         desired_status=SandboxStatus.ACTIVE,
         snapshot_mode=SnapshotMode.MANUAL,
@@ -1197,7 +1208,7 @@ async def test_create_snapshot_from_sandbox_commits() -> None:
     service, client = _make_snapshot_service([], [("sb-1", "img-a")])
     sandbox = DockerSandbox(
         id="sb-1",
-        sandbox_spec_id="img-a",
+        sandbox_template_id="img-a",
         status=SandboxStatus.ACTIVE,
         desired_status=SandboxStatus.ACTIVE,
         snapshot_mode=SnapshotMode.MANUAL,
@@ -1397,20 +1408,12 @@ async def test_async_get_sandbox_not_found_raises() -> None:
 @pytest.mark.asyncio
 async def test_async_create_sandbox_creates_container() -> None:
     service, client = _make_snapshot_service([], [])
-    sandbox = service._sandbox_from_create(SandboxCreate(id="sb-1", sandbox_spec_id="img-a"))
+    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
     result = await service._create_sandbox(sandbox)
-    assert result.id == "sb-1"
-    assert "sb-1" in client.containers._containers
-
-
-@pytest.mark.asyncio
-async def test_async_create_sandbox_conflict_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxConflictError
-
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    sandbox = service._sandbox_from_create(SandboxCreate(id="sb-1", sandbox_spec_id="img-a"))
-    with pytest.raises(SandboxConflictError):
-        await service._create_sandbox(sandbox)
+    # The id is generated by the service (Docker container name), not caller-supplied.
+    assert result.id != ""
+    assert result.sandbox_template_id == "img-a"
+    assert result.id in client.containers._containers
 
 
 @pytest.mark.asyncio
