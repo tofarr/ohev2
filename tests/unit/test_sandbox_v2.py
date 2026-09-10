@@ -19,10 +19,13 @@ from openhands.ev2.sandbox_v2.docker_sandbox_service import (
     DockerSandboxService,
     _docker_template_from_payload,
     _exposed_urls_from_ports,
+    _is_snapshot_image,
     _label_int,
     _parse_created,
     _parse_env,
     _sandbox_from_container_attrs,
+    _snapshot_from_image_attrs,
+    _snapshot_image_tag,
     _template_from_image_attrs,
     _volume_mounts_from_binds,
     _wildcard_match,
@@ -34,6 +37,7 @@ from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     Sandbox,
     SandboxStatus,
     SandboxTemplate,
+    SnapshotMode,
     VolumeMount,
 )
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
@@ -635,3 +639,131 @@ def test_sync_get_sandbox_unlabeled_raises_not_found() -> None:
     service._client = _FakeContainerClient([_FakeContainer(attrs)])
     with pytest.raises(SandboxNotFoundError):
         service._sync_get_sandbox("anon")
+
+
+# --------------------------------------------------------------------------- #
+# Snapshots.
+# --------------------------------------------------------------------------- #
+
+
+def test_snapshot_mode_default_is_manual() -> None:
+    service = DockerSandboxService()
+    assert service.snapshot_mode == SnapshotMode.MANUAL
+
+
+def test_snapshot_mode_can_be_configured() -> None:
+    service = DockerSandboxService(snapshot_mode=SnapshotMode.UNSUPPORTED)
+    assert service.snapshot_mode == SnapshotMode.UNSUPPORTED
+
+
+def test_sandbox_from_create_carries_snapshot_mode() -> None:
+    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxCreate
+
+    service = DockerSandboxService(snapshot_mode=SnapshotMode.AUTOMATIC)
+    sandbox = service._sandbox_from_create(SandboxCreate(id="sb-a", sandbox_spec_id="img-a"))
+    assert sandbox.snapshot_mode == SnapshotMode.AUTOMATIC
+
+
+def test_snapshot_image_tag_builds_reference() -> None:
+    assert _snapshot_image_tag("snap-1") == "openhands-sandbox-snapshot:snap-1"
+
+
+def test_is_snapshot_image_detects_label() -> None:
+    attrs = {"Config": {"Labels": {"io.openhands.sandbox_v2.snapshot_id": "snap-a"}}}
+    assert _is_snapshot_image(attrs) is True
+
+
+def test_is_snapshot_image_false_without_label() -> None:
+    attrs = {"Config": {"Labels": {}}}
+    assert _is_snapshot_image(attrs) is False
+
+
+def test_snapshot_from_image_attrs_basic() -> None:
+    attrs = {
+        "RepoTags": ["openhands-sandbox-snapshot:snap-a"],
+        "Created": "2024-01-02T03:04:05.000000000Z",
+        "Config": {
+            "Labels": {
+                "io.openhands.sandbox_v2.snapshot_id": "snap-a",
+                "io.openhands.sandbox_v2.snapshot_sandbox_id": "sb-1",
+                "io.openhands.sandbox_v2.snapshot_created_at": "2024-01-02T03:04:05Z",
+            }
+        },
+    }
+    snapshot = _snapshot_from_image_attrs(attrs)
+    assert snapshot is not None
+    assert snapshot.id == "snap-a"
+    assert snapshot.sandbox_id == "sb-1"
+    assert snapshot.image_id == "openhands-sandbox-snapshot:snap-a"
+    assert snapshot.created_at is not None
+    assert snapshot.download_url is None
+
+
+def test_snapshot_from_image_attrs_returns_none_without_label() -> None:
+    attrs = {"Config": {"Labels": {}}}
+    assert _snapshot_from_image_attrs(attrs) is None
+
+
+def test_template_from_image_attrs_carries_snapshot_mode() -> None:
+    attrs = {
+        "RepoTags": ["img-a:latest"],
+        "Config": {"Labels": {}, "WorkingDir": "/w"},
+    }
+    template = _template_from_image_attrs(attrs, _PORTS, SnapshotMode.AUTOMATIC)
+    assert template.snapshot_mode == SnapshotMode.AUTOMATIC
+
+
+def test_sync_list_templates_excludes_snapshot_images() -> None:
+    service = DockerSandboxService()
+
+    class _FakeImage:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    snapshot_attrs = {
+        "RepoTags": ["openhands-sandbox-snapshot:snap-x"],
+        "Config": {"Labels": {"io.openhands.sandbox_v2.snapshot_id": "snap-x"}},
+    }
+    template_attrs = {
+        "RepoTags": ["ghcr.io/openhands/agent-canvas:latest"],
+        "Config": {"Labels": {}, "WorkingDir": "/w"},
+    }
+    service._client = _FakeContainerClient([])  # type: ignore[assignment]
+    service._client.images = type(  # type: ignore[attr-defined]
+        "Images",
+        (),
+        {"list": lambda self: [_FakeImage(snapshot_attrs), _FakeImage(template_attrs)]},
+    )()
+    templates = service._sync_list_templates()
+    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-canvas:latest"]
+
+
+def test_sync_list_snapshots_returns_only_snapshot_images() -> None:
+    service = DockerSandboxService()
+
+    class _FakeImage:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    snapshot_attrs = {
+        "RepoTags": ["openhands-sandbox-snapshot:snap-1"],
+        "Config": {
+            "Labels": {
+                "io.openhands.sandbox_v2.snapshot_id": "snap-1",
+                "io.openhands.sandbox_v2.snapshot_sandbox_id": "sb-1",
+                "io.openhands.sandbox_v2.snapshot_created_at": "2024-01-02T03:04:05Z",
+            }
+        },
+    }
+    plain_attrs = {
+        "RepoTags": ["img-a:latest"],
+        "Config": {"Labels": {}},
+    }
+    service._client = _FakeContainerClient([])  # type: ignore[assignment]
+    service._client.images = type(  # type: ignore[attr-defined]
+        "Images",
+        (),
+        {"list": lambda self: [_FakeImage(snapshot_attrs), _FakeImage(plain_attrs)]},
+    )()
+    snapshots = service._sync_list_snapshots()
+    assert [s.id for s in snapshots] == ["snap-1"]

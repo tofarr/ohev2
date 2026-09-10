@@ -24,12 +24,16 @@ from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxTemplate
+from openhands.ev2.sandbox_v2.sandbox_v2_models import Sandbox, SandboxSnapshot, SandboxTemplate
 from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
     SandboxBatchCreate,
     SandboxBatchDelete,
     SandboxBatchOp,
     SandboxCreate,
+    SandboxSnapshotBatchDelete,
+    SandboxSnapshotBatchOp,
+    SandboxSnapshotCreate,
+    SandboxSnapshotSearchFilter,
     SandboxTemplateBatchCreate,
     SandboxTemplateBatchDelete,
     SandboxTemplateBatchOp,
@@ -63,6 +67,22 @@ class SandboxConflictError(Exception):
 
 class SandboxPermissionScopeError(Exception):
     """Raised when a sandbox create payload falls outside the principal's scope."""
+
+
+class SandboxSnapshotNotFoundError(Exception):
+    """Raised when a sandbox snapshot does not exist or is out of scope."""
+
+
+class SandboxSnapshotConflictError(Exception):
+    """Raised when a snapshot create collides with an existing id."""
+
+
+class SandboxSnapshotPermissionScopeError(Exception):
+    """Raised when a snapshot create payload falls outside the principal's scope."""
+
+
+class SandboxSnapshotUnsupportedError(Exception):
+    """Raised when the provider does not support snapshots for a sandbox."""
 
 
 class BatchPermissionDeniedError(Exception):
@@ -329,6 +349,135 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
             return None
         raise TypeError(f"Unknown sandbox batch op: {type(op).__name__}")
 
+    # ------------------------------------------------------------------ #
+    # Generic public snapshot CRUD (built on the provider hooks below).
+    # Snapshots support create, read, and delete only (no update).
+    # ------------------------------------------------------------------ #
+    async def list_snapshots(
+        self,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> list[SandboxSnapshot]:
+        """List every snapshot the principal may see."""
+        snapshots = await self._list_snapshots()
+        return [snapshot for snapshot in snapshots if perm_filter.matches(snapshot)]
+
+    async def get_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> SandboxSnapshot:
+        """Retrieve a snapshot, scoped by ``perm_filter``.
+
+        Raises :class:`SandboxSnapshotNotFoundError` when missing or out of
+        scope so callers return 404 without leaking existence.
+        """
+        snapshot = await self._get_snapshot(snapshot_id)
+        if not perm_filter.matches(snapshot):
+            raise SandboxSnapshotNotFoundError(snapshot_id)
+        return snapshot
+
+    async def create_snapshot(
+        self,
+        payload: SandboxSnapshotCreate,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+        sandbox_perm_filter: SearchFilter[Sandbox] = ALL,
+    ) -> SandboxSnapshot:
+        """Create a snapshot from a sandbox or an uploaded file.
+
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider does
+        not support snapshots, :class:`SandboxSnapshotPermissionScopeError`
+        when the resulting snapshot is out of scope, or
+        :class:`SandboxNotFoundError` when ``sandbox_id`` names a sandbox the
+        principal cannot use.
+        """
+        if payload.sandbox_id is not None:
+            sandbox = await self.get_sandbox(payload.sandbox_id, perm_filter=sandbox_perm_filter)
+            snapshot = await self._snapshot_from_sandbox(payload, sandbox)
+        else:
+            snapshot = await self._snapshot_from_file(payload)
+        if not perm_filter.matches(snapshot):
+            raise SandboxSnapshotPermissionScopeError(payload.id)
+        return await self._create_snapshot(snapshot, payload)
+
+    async def delete_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> None:
+        """Delete a snapshot. Raises when missing or out of scope."""
+        await self.get_snapshot(snapshot_id, perm_filter=perm_filter)
+        await self._delete_snapshot(snapshot_id)
+
+    async def get_snapshots(
+        self,
+        snapshot_ids: list[str],
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> list[SandboxSnapshot | None]:
+        """Batch retrieve snapshots, positionally aligned with the ids."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
+        by_id = {snapshot.id: snapshot for snapshot in snapshots}
+        return [by_id.get(snapshot_id) for snapshot_id in snapshot_ids]
+
+    async def search_snapshots(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        search_filter: SandboxSnapshotSearchFilter | None = None,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> tuple[list[SandboxSnapshot], str | None]:
+        """Search snapshots ordered by id, key-paginated via an opaque id cursor."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
+        if search_filter is not None:
+            snapshots = [s for s in snapshots if search_filter.matches(s)]
+        snapshots.sort(key=lambda snapshot: snapshot.id)
+        if cursor is not None:
+            snapshots = [s for s in snapshots if s.id > cursor]
+        page = snapshots[:limit]
+        next_cursor = page[-1].id if len(snapshots) > limit else None
+        return page, next_cursor
+
+    async def count_snapshots(
+        self,
+        search_filter: SandboxSnapshotSearchFilter | None = None,
+        *,
+        perm_filter: SearchFilter[SandboxSnapshot] = ALL,
+    ) -> int:
+        """Count snapshots in scope, optionally narrowed by ``search_filter``."""
+        snapshots = await self.list_snapshots(perm_filter=perm_filter)
+        if search_filter is not None:
+            snapshots = [s for s in snapshots if search_filter.matches(s)]
+        return len(snapshots)
+
+    async def apply_snapshot_batch(
+        self,
+        operations: list[SandboxSnapshotBatchOp],
+        perm_filters: dict[Action, SearchFilter[SandboxSnapshot] | None],
+    ) -> list[SandboxSnapshot | None]:
+        """Apply a batch of delete snapshot operations.
+
+        Each operation is authorized against its own action via *perm_filters*;
+        an action with a ``None`` filter denies that operation. Returns results
+        aligned with *operations* (``None`` for deletes).
+        """
+        return [await self._apply_snapshot_batch_op(op, perm_filters) for op in operations]
+
+    async def _apply_snapshot_batch_op(
+        self,
+        op: SandboxSnapshotBatchOp,
+        perm_filters: dict[Action, SearchFilter[SandboxSnapshot] | None],
+    ) -> SandboxSnapshot | None:
+        if isinstance(op, SandboxSnapshotBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_snapshot(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown sandbox-snapshot batch op: {type(op).__name__}")
+
     @staticmethod
     def _require_action(
         perm_filters: dict[Action, SearchFilter[Any] | None],
@@ -390,6 +539,55 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
     async def _delete_sandbox(self, sandbox_id: str) -> None:
         """Remove a sandbox (and its backing compute) from the provider."""
 
+    # ------------------------------------------------------------------ #
+    # Provider hooks - snapshots (overridden by implementations).
+    # A provider that does not support snapshots raises
+    # ``SandboxSnapshotUnsupportedError`` from each hook.
+    # ------------------------------------------------------------------ #
+    async def _list_snapshots(self) -> list[SandboxSnapshot]:
+        """Return all snapshots known to the provider (unfiltered)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _get_snapshot(self, snapshot_id: str) -> SandboxSnapshot:
+        """Return a snapshot, raising ``SandboxSnapshotNotFoundError`` if absent."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _snapshot_from_sandbox(
+        self,
+        payload: SandboxSnapshotCreate,
+        sandbox: Sandbox,
+    ) -> SandboxSnapshot:
+        """Build a snapshot model from a sandbox (no persistence)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _snapshot_from_file(
+        self,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        """Build a snapshot model from an uploaded file (no persistence)."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _create_snapshot(
+        self,
+        snapshot: SandboxSnapshot,
+        payload: SandboxSnapshotCreate,
+    ) -> SandboxSnapshot:
+        """Persist a freshly-built snapshot."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def _delete_snapshot(self, snapshot_id: str) -> None:
+        """Remove a snapshot from the provider."""
+        raise SandboxSnapshotUnsupportedError("snapshots are not supported")
+
+    async def stream_snapshot(self, snapshot_id: str) -> Any:
+        """Return an iterable of bytes for downloading a snapshot artifact.
+
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider cannot
+        stream snapshots. The base implementation is unsupported; providers that
+        back snapshots with a downloadable artifact override this.
+        """
+        raise SandboxSnapshotUnsupportedError("snapshot download is not supported")
+
 
 def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
     """Resolve a fully qualified class name to a ``SandboxService`` subclass."""
@@ -412,6 +610,10 @@ __all__ = [
     "SandboxNotFoundError",
     "SandboxPermissionScopeError",
     "SandboxService",
+    "SandboxSnapshotConflictError",
+    "SandboxSnapshotNotFoundError",
+    "SandboxSnapshotPermissionScopeError",
+    "SandboxSnapshotUnsupportedError",
     "SandboxTemplateConflictError",
     "SandboxTemplateNotFoundError",
     "SandboxTemplatePermissionScopeError",
