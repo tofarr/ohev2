@@ -699,10 +699,12 @@ class DockerSandboxService(SandboxService):
         container.commit(
             repository=_SNAPSHOT_IMAGE_PREFIX,
             tag=snapshot.id,
-            labels={
-                _TAG_SNAPSHOT_ID: snapshot.id,
-                _TAG_SNAPSHOT_SANDBOX_ID: snapshot.sandbox_id or "",
-                _TAG_SNAPSHOT_CREATED_AT: created_at,
+            conf={
+                "Labels": {
+                    _TAG_SNAPSHOT_ID: snapshot.id,
+                    _TAG_SNAPSHOT_SANDBOX_ID: snapshot.sandbox_id or "",
+                    _TAG_SNAPSHOT_CREATED_AT: created_at,
+                }
             },
         )
 

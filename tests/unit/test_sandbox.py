@@ -904,16 +904,17 @@ class _FakeContainerWithCommit:
 
     def commit(
         self,
-        repository: str,
-        tag: str,
-        labels: dict[str, str] | None = None,
+        repository: str | None = None,
+        tag: str | None = None,
+        conf: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        record = {"repository": repository, "tag": tag, "labels": labels or {}}
+        labels = (conf or {}).get("Labels", {}) if conf else {}
+        record = {"repository": repository, "tag": tag, "conf": conf or {}}
         self._committed.append(record)
         image_tag = f"{repository}:{tag}"
         all_labels = dict(self.attrs.get("Config", {}).get("Labels", {}))
-        all_labels.update(labels or {})
+        all_labels.update(labels)
         self._images._register(
             image_tag,
             {
