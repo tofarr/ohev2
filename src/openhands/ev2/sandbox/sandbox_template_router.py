@@ -201,6 +201,3 @@ async def delete_sandbox_template(
         await service.delete_template(template_id, perm_filter=perm_filter)
     except SandboxTemplateNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
-
-
-__all__ = ["get_sandbox_service", "router"]

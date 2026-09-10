@@ -155,10 +155,3 @@ class FeatureFlagUserAssignment(Base):
 
     feature_flag: Mapped[FeatureFlag] = relationship(init=False, back_populates="user_overrides")
     user: Mapped[User] = relationship(init=False, lazy="selectin")
-
-
-__all__ = [
-    "FeatureFlag",
-    "FeatureFlagRoleAssignment",
-    "FeatureFlagUserAssignment",
-]

@@ -256,8 +256,3 @@ class McpUsageService:
         now = now or datetime.now(UTC)
         target = now - timedelta(minutes=lag_minutes)
         return await self.aggregate_minute(target)
-
-
-__all__ = [
-    "McpUsageService",
-]

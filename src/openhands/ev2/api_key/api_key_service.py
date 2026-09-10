@@ -256,12 +256,3 @@ class ApiKeyService:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
-
-
-__all__ = [
-    "ApiKey",
-    "ApiKeyNotFoundError",
-    "ApiKeyPermissionScopeError",
-    "ApiKeyService",
-    "BatchPermissionDeniedError",
-]

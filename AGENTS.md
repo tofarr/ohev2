@@ -149,6 +149,15 @@ endpoints, reject the change unless the resource is documented as non-CRUD.
 * Docstrings: one-line summary for trivial functions; summary + args/returns only when
   types don't make it obvious.
 
+### 6.1 No `__all__` exports lists
+
+Do not add `__all__` to modules. The codebase uses no wildcard imports
+(`from x import *`), so an explicit exports list is pure repetition of the
+names already defined at module scope. Keep the public API implicit: every
+non-underscore-prefixed name is importable, and consumers import the names
+they need directly. A `__all__` that merely re-lists the module's public
+symbols adds maintenance burden (easy to drift out of sync) without value.
+
 ## 7. Formal specs (Quint)
 
 * Every resource/state machine has a `.qnt` spec in `specs/`.

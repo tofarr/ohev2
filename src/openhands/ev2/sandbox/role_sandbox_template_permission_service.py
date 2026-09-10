@@ -262,14 +262,3 @@ def _classify_integrity_error(
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted to the principal."""
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "RoleSandboxTemplatePermission",
-    "RoleSandboxTemplatePermissionConflictError",
-    "RoleSandboxTemplatePermissionNotFoundError",
-    "RoleSandboxTemplatePermissionOrphanError",
-    "RoleSandboxTemplatePermissionScopeError",
-    "RoleSandboxTemplatePermissionService",
-]

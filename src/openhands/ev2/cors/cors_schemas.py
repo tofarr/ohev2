@@ -74,11 +74,3 @@ class AllowedOriginBatchWriteRequest(BaseModel):
         max_length=100,
         description="Operations to apply atomically; create/delete mixed (no update).",
     )
-
-
-__all__ = [
-    "AllowedOriginBatchWriteRequest",
-    "AllowedOriginCreate",
-    "AllowedOriginRead",
-    "AllowedOriginSearchResult",
-]

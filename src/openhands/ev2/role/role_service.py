@@ -243,13 +243,3 @@ def _classify_integrity_error(
     """
     _ = str(getattr(exc, "orig", exc)).lower()
     return RoleNameConflictError(getattr(payload, "name", None) or "")
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "Role",
-    "RoleNameConflictError",
-    "RoleNotFoundError",
-    "RolePermissionScopeError",
-    "RoleService",
-]

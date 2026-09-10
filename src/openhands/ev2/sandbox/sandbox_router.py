@@ -214,6 +214,3 @@ async def delete_sandbox(
         await service.delete_sandbox(sandbox_id, perm_filter=perm_filter)
     except SandboxNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
-
-
-__all__ = ["router"]

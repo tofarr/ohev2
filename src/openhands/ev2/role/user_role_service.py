@@ -216,14 +216,3 @@ def _classify_integrity_error(
         return UserRoleOrphanError(f"role {role_id} does not exist")
     # Default to conflict for any unrecognized integrity error on this table.
     return UserRoleConflictError(f"{role_id}/{user_id}")
-
-
-__all__ = [
-    "BatchPermissionDeniedError",
-    "UserRole",
-    "UserRoleConflictError",
-    "UserRoleNotFoundError",
-    "UserRoleOrphanError",
-    "UserRolePermissionScopeError",
-    "UserRoleService",
-]
