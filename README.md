@@ -87,10 +87,19 @@ than inventing one.
 
 ## Sandbox model
 
-Sandboxes are first-class resources. A `SandboxProvider` interface is implemented by
-Docker, Kubernetes, and E2B backends (initially Docker; others stubbed). Sandboxes
-are either **ephemeral** (terminated with the request) or **persistent** (lifecycle
-managed independently and addressable by id).
+Sandboxes are first-class resources. A `SandboxService` interface is implemented by
+Docker, Kubernetes, and E2B backends (Docker and Kubernetes available; E2B stubbed).
+Sandboxes are either **ephemeral** (terminated with the request) or **persistent**
+(lifecycle managed independently and addressable by id).
+
+The active backend is selected via `sandbox_service_class` (env
+`OHE_SANDBOX_SERVICE_CLASS`):
+
+* `openhands.ev2.sandbox.docker_sandbox_service.DockerSandboxService` (default) —
+  templates are Docker images; sandboxes are containers.
+* `openhands.ev2.sandbox.k8s_sandbox_service.K8sSandboxService` — templates are
+  ConfigMaps carrying the image reference; sandboxes are Deployments (one pod, one
+  container) backed by a PVC and a ClusterIP Service. Snapshots are unsupported.
 
 ## Quality gates
 
