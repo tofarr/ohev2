@@ -407,7 +407,7 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         else:
             snapshot = await self._snapshot_from_file(payload)
         if not perm_filter.matches(snapshot):
-            raise SandboxSnapshotPermissionScopeError(payload.id)
+            raise SandboxSnapshotPermissionScopeError(payload.sandbox_id or "file import")
         return await self._create_snapshot(snapshot, payload)
 
     async def delete_snapshot(

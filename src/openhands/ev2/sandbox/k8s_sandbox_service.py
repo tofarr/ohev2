@@ -37,6 +37,7 @@ import logging
 import re
 import secrets
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -371,20 +372,18 @@ class K8sSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
         sandbox: Sandbox,
     ) -> SandboxSnapshot:
+        # Pre-persistence model; id assigned in _create_snapshot.
         return K8sSandboxSnapshot(
-            id=payload.id,
             sandbox_id=sandbox.id,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
         )
 
     async def _snapshot_from_file(
         self,
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
+        # Pre-persistence model; id assigned in _create_snapshot.
         return K8sSandboxSnapshot(
-            id=payload.id,
             sandbox_id=None,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
         )
 
     async def _create_snapshot(
@@ -393,12 +392,17 @@ class K8sSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
         k8s_snapshot = cast(K8sSandboxSnapshot, snapshot)
+        snapshot_id = uuid.uuid4().hex
+        k8s_snapshot.id = snapshot_id
+        k8s_snapshot.archive_path = str(
+            snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
+        )
         if payload.sandbox_id is not None:
             await asyncio.to_thread(self._sync_capture_snapshot, k8s_snapshot, payload.sandbox_id)
         else:
             assert payload.file_data is not None
             await asyncio.to_thread(self._sync_import_snapshot, k8s_snapshot, payload.file_data)
-        return await self._get_snapshot(k8s_snapshot.id)
+        return await self._get_snapshot(snapshot_id)
 
     async def _delete_snapshot(self, snapshot_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)

@@ -21,6 +21,7 @@ import contextlib
 import logging
 import re
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -500,22 +501,22 @@ class DockerSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
         sandbox: Sandbox,
     ) -> SandboxSnapshot:
-        # The tarball is not materialized until _create_snapshot; here we only
-        # declare the snapshot id and source sandbox.
+        # Pre-persistence model; the id is assigned during _create_snapshot
+        # when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
-            id=payload.id,
             sandbox_id=sandbox.id,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
         )
 
     async def _snapshot_from_file(
         self,
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
+        # Pre-persistence model; the id is assigned during _create_snapshot
+        # when the provider generates the snapshot id.
         return DockerSandboxSnapshot(
-            id=payload.id,
             sandbox_id=None,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, payload.id)),
+            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
         )
 
     async def _create_snapshot(
@@ -524,12 +525,17 @@ class DockerSandboxService(SandboxService):
         payload: SandboxSnapshotCreate,
     ) -> SandboxSnapshot:
         docker_snapshot = cast(DockerSandboxSnapshot, snapshot)
+        snapshot_id = _generate_snapshot_id()
+        docker_snapshot.id = snapshot_id
+        docker_snapshot.archive_path = str(
+            snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
+        )
         if payload.sandbox_id is not None:
             await asyncio.to_thread(self._sync_tar_snapshot, docker_snapshot, payload.sandbox_id)
         else:
             assert payload.file_data is not None
             await asyncio.to_thread(self._sync_import_snapshot, docker_snapshot, payload.file_data)
-        return await self._get_snapshot(docker_snapshot.id)
+        return await self._get_snapshot(snapshot_id)
 
     async def _delete_snapshot(self, snapshot_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
@@ -1015,6 +1021,11 @@ def _parse_created(created: object) -> datetime:
 def _iso_utc_now() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(UTC).isoformat()
+
+
+def _generate_snapshot_id() -> str:
+    """Generate a unique snapshot id (used as the tarball filename stem)."""
+    return uuid.uuid4().hex
 
 
 def _generate_sandbox_id() -> str:

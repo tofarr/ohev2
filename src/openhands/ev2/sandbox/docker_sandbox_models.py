@@ -36,3 +36,4 @@ class DockerSandboxSnapshot(SandboxSnapshot):
     """
 
     archive_path: str | None = None
+    sandbox_id: str | None = None

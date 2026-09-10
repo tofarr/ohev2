@@ -206,9 +206,13 @@ class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
     Each snapshot carries an id, the time it was created, the size of the
     stored tarball, and a download URL the caller can use to fetch the
     artifact. Provider-specific subclasses may carry implementation detail.
+
+    ``id`` defaults to the empty string for the pre-persistence model built by
+    ``_snapshot_from_sandbox`` / ``_snapshot_from_file``; the provider assigns
+    the real id during ``_create_snapshot``.
     """
 
-    id: str
+    id: str = ""
     created_at: datetime = Field(default_factory=utc_now)
     user_id: uuid.UUID | None = Field(
         default=None,

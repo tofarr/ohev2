@@ -1279,7 +1279,7 @@ async def test_k8s_snapshot_from_sandbox_and_file(tmp_path: Path) -> None:
 
     service = _make_service()
     service.snapshot_dir = str(tmp_path / "snapshots")
-    payload_sb = SandboxSnapshotCreate(id="snap-new", sandbox_id="sb-1")
+    payload_sb = SandboxSnapshotCreate(sandbox_id="sb-1")
     sandbox = K8sSandbox(
         id="sb-1",
         sandbox_template_id="img:1",
@@ -1287,11 +1287,12 @@ async def test_k8s_snapshot_from_sandbox_and_file(tmp_path: Path) -> None:
         desired_status=SandboxStatus.ACTIVE,
     )
     result = await service._snapshot_from_sandbox(payload_sb, sandbox)
-    assert result.id == "snap-new"
-    assert result.archive_path.endswith("snap-new.tar.gz")
-    payload_file = SandboxSnapshotCreate.model_construct(id="snap-file")
+    # Pre-persistence model: id is empty until _create_snapshot.
+    assert result.id == ""
+    assert result.sandbox_id == "sb-1"
+    payload_file = SandboxSnapshotCreate.model_construct(file_data=b"tar", schema_type="tar")
     result2 = await service._snapshot_from_file(payload_file)
-    assert result2.id == "snap-file"
+    assert result2.id == ""
     assert result2.sandbox_id is None
 
 
@@ -1306,19 +1307,28 @@ async def test_k8s_create_and_delete_snapshot_through_service(tmp_path: Path) ->
     fake.apps.deployments["sb-1"] = _deployment("sb-1", image="img:1")
     service = _make_service(fake)
     service.snapshot_dir = str(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(id="snap-svc", sandbox_id="sb-1")
-    snap = K8sSandboxSnapshot(
-        id="snap-svc",
-        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, "snap-svc")),
+    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
+    sandbox = K8sSandbox(
+        id="sb-1",
+        sandbox_template_id="img:1",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
     )
-    await service._create_snapshot(snap, payload)
+    pre = await service._snapshot_from_sandbox(payload, sandbox)
+    snap = K8sSandboxSnapshot(
+        id=pre.id,
+        sandbox_id="sb-1",
+        archive_path=str(snapshot_store.snapshot_path(service.snapshot_dir, pre.id)),
+    )
+    result = await service._create_snapshot(snap, payload)
+    assert result.id
     # The snapshot pod ran and was cleaned up.
     assert "sb-1-snapshot" not in fake.core.pods
-    await service.delete_snapshot("snap-svc")
+    await service.delete_snapshot(result.id)
     from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.get_snapshot("snap-svc")
+        await service.get_snapshot(result.id)
 
 
 # --------------------------------------------------------------------------- #

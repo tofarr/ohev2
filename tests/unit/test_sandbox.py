@@ -858,22 +858,19 @@ async def test_snapshot_from_sandbox_builds_model(tmp_path: Path) -> None:
         status_detail=None,
         volume_mounts=[],
     )
-    payload = SandboxSnapshotCreate(id="snap-1", sandbox_id="sb-1")
+    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
     snapshot = await service._snapshot_from_sandbox(payload, sandbox)
-    assert snapshot.id == "snap-1"
+    assert snapshot.id == ""
     assert snapshot.sandbox_id == "sb-1"
-    assert snapshot.archive_path is not None
-    assert snapshot.archive_path.endswith("snap-1.tar.gz")
 
 
 @pytest.mark.asyncio
 async def test_snapshot_from_file_builds_model(tmp_path: Path) -> None:
     service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(id="snap-1", file_data=b"tar", schema_type="docker-image-tar")
+    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
     snapshot = await service._snapshot_from_file(payload)
-    assert snapshot.id == "snap-1"
+    assert snapshot.id == ""
     assert snapshot.sandbox_id is None
-    assert snapshot.archive_path is not None
 
 
 @pytest.mark.asyncio
@@ -892,21 +889,21 @@ async def test_create_snapshot_from_sandbox_creates_tarball(tmp_path: Path) -> N
         status_detail=None,
         volume_mounts=[],
     )
-    payload = SandboxSnapshotCreate(id="snap-1", sandbox_id="sb-1")
+    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
     snapshot_model = await service._snapshot_from_sandbox(payload, sandbox)
     result = await service._create_snapshot(snapshot_model, payload)
-    assert result.id == "snap-1"
-    assert (tmp_path / "snapshots" / "snap-1.tar.gz").is_file()
+    assert result.id
+    assert (tmp_path / "snapshots" / f"{result.id}.tar.gz").is_file()
 
 
 @pytest.mark.asyncio
 async def test_create_snapshot_from_file_writes_tarball(tmp_path: Path) -> None:
     service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(id="snap-1", file_data=b"tar", schema_type="docker-image-tar")
+    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
     snapshot_model = await service._snapshot_from_file(payload)
     result = await service._create_snapshot(snapshot_model, payload)
-    assert result.id == "snap-1"
-    assert (tmp_path / "snapshots" / "snap-1.tar.gz").read_bytes() == b"tar"
+    assert result.id
+    assert (tmp_path / "snapshots" / f"{result.id}.tar.gz").read_bytes() == b"tar"
 
 
 @pytest.mark.asyncio
@@ -966,19 +963,19 @@ async def test_service_create_snapshot_from_sandbox(tmp_path: Path) -> None:
         volume_mounts=[],
     )
     # Bypass the sandbox lookup by calling the lower-level hook directly.
-    payload = SandboxSnapshotCreate(id="snap-1", sandbox_id="sb-1")
+    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
     snapshot_model = await service._snapshot_from_sandbox(payload, sandbox)
-    await service._create_snapshot(snapshot_model, payload)
-    snapshot = await service.get_snapshot("snap-1")
-    assert snapshot.id == "snap-1"
+    result = await service._create_snapshot(snapshot_model, payload)
+    snapshot = await service.get_snapshot(result.id)
+    assert snapshot.id == result.id
 
 
 @pytest.mark.asyncio
 async def test_service_create_snapshot_from_file(tmp_path: Path) -> None:
     service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(id="snap-1", file_data=b"tar", schema_type="docker-image-tar")
+    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
     snapshot = await service.create_snapshot(payload)
-    assert snapshot.id == "snap-1"
+    assert snapshot.id
     assert snapshot.sandbox_id is None
 
 
@@ -1513,13 +1510,11 @@ async def test_base_service_snapshot_hooks_raise_unsupported() -> None:
         await service._get_snapshot("x")
     with pytest.raises(SandboxSnapshotUnsupportedError):
         await service._snapshot_from_sandbox(
-            SandboxSnapshotCreate(id="x", sandbox_id="sb"),
+            SandboxSnapshotCreate(sandbox_id="sb"),
             None,  # type: ignore[arg-type]
         )
     with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._snapshot_from_file(
-            SandboxSnapshotCreate(id="x", file_data=b"", schema_type="t")
-        )
+        await service._snapshot_from_file(SandboxSnapshotCreate(file_data=b"", schema_type="t"))
     with pytest.raises(SandboxSnapshotUnsupportedError):
         await service._create_snapshot(None, None)  # type: ignore[arg-type]
     with pytest.raises(SandboxSnapshotUnsupportedError):
@@ -1636,13 +1631,13 @@ def test_container_state_handles_reload_exception() -> None:
 
 def test_snapshot_create_validation_errors() -> None:
     with pytest.raises(ValidationError, match="mutually exclusive"):
-        SandboxSnapshotCreate(id="x", sandbox_id="sb", file_data=b"tar", schema_type="t")
+        SandboxSnapshotCreate(sandbox_id="sb", file_data=b"tar", schema_type="t")
 
     with pytest.raises(ValidationError, match="Either sandbox_id or a file"):
-        SandboxSnapshotCreate(id="x")
+        SandboxSnapshotCreate()
 
     with pytest.raises(ValidationError, match="schema_type is required"):
-        SandboxSnapshotCreate(id="x", file_data=b"tar")
+        SandboxSnapshotCreate(file_data=b"tar")
 
 
 def test_template_from_image_returns_none_for_untagged() -> None:
