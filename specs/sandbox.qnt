@@ -1,6 +1,6 @@
 // Sandbox lifecycle specification.
 //
-// Models the v2 sandbox split:
+// Models the sandbox split:
 //   - Sandbox is durable user-facing state with provider-neutral public states.
 //   - Compute is an internal replaceable attachment that may come from a warm pool.
 //   - Snapshots are named pins of Fusey filesystem generations.

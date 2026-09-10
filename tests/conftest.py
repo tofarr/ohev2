@@ -55,7 +55,7 @@ from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: F401
     McpUsage,
 )
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_models import (  # noqa: F401
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (  # noqa: F401
     RoleSandboxTemplatePermission,
 )
 from openhands.ev2.secret.secret_models import (  # noqa: F401

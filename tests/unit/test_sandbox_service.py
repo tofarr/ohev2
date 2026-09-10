@@ -4,7 +4,7 @@ These exercise the shared base-class logic (search, count, batch, permission
 scoping, error mapping, lifecycle) using a minimal in-memory implementation of
 the provider hooks — no Docker daemon or database required. The Docker
 implementation's provider hooks are covered separately in
-``test_sandbox_v2.py``.
+``test_sandbox.py``.
 """
 
 from __future__ import annotations
@@ -13,15 +13,15 @@ from typing import Any
 
 import pytest
 
-from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
-from openhands.ev2.sandbox_v2.sandbox_v2_models import (
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.sandbox_models import (
     DockerSandboxTemplate,
     Sandbox,
     SandboxSnapshot,
     SandboxStatus,
     SandboxTemplate,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchCreate,
     SandboxBatchDelete,
     SandboxCreate,
@@ -33,7 +33,7 @@ from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
     SandboxTemplateSearchFilter,
     SandboxUpdate,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
     SandboxConflictError,
     SandboxNotFoundError,
@@ -151,7 +151,7 @@ class _MemorySandboxService(SandboxService):
             id=payload.id,
             image_id=f"img-{payload.id}",
             sandbox_id=sandbox.id,
-            download_url=f"/sandbox_v2/sandbox-snapshots/{payload.id}/download",
+            download_url=f"/sandbox/sandbox-snapshots/{payload.id}/download",
         )
 
     async def _snapshot_from_file(
@@ -162,7 +162,7 @@ class _MemorySandboxService(SandboxService):
             id=payload.id,
             image_id=f"img-{payload.id}",
             sandbox_id=None,
-            download_url=f"/sandbox_v2/sandbox-snapshots/{payload.id}/download",
+            download_url=f"/sandbox/sandbox-snapshots/{payload.id}/download",
         )
 
     async def _create_snapshot(
@@ -483,7 +483,7 @@ async def test_resolve_rejects_empty_class_name() -> None:
 
 async def test_resolve_rejects_nonexistent_attribute() -> None:
     with pytest.raises(TypeError):
-        resolve_sandbox_service_class("openhands.ev2.sandbox_v2.sandbox_v2_service.NotARealService")
+        resolve_sandbox_service_class("openhands.ev2.sandbox.sandbox_service.NotARealService")
 
 
 # --------------------------------------------------------------------------- #

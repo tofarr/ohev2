@@ -1,6 +1,6 @@
-"""Docker implementation of the sandbox_v2 control plane.
+"""Docker implementation of the sandbox control plane.
 
-This module is intentionally isolated from :mod:`sandbox_v2_service` so the
+This module is intentionally isolated from :mod:`sandbox_service` so the
 Docker SDK is only imported when a Docker-backed service is actually selected
 (other implementations will live in their own modules). ``DockerSandboxService``
 backs template CRUD with the Docker *Image* API and sandbox CRUD with the
@@ -26,8 +26,8 @@ import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 from docker.errors import ImageNotFound, NotFound  # type: ignore[import-untyped]
 from pydantic import Field
 
-from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
-from openhands.ev2.sandbox_v2.sandbox_v2_models import (
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.sandbox_models import (
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,
@@ -38,13 +38,13 @@ from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     SnapshotMode,
     VolumeMount,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
     SandboxSnapshotCreate,
     SandboxTemplateCreate,
     SandboxUpdate,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     SandboxConflictError,
     SandboxNotFoundError,
     SandboxService,
@@ -55,9 +55,9 @@ from openhands.ev2.sandbox_v2.sandbox_v2_service import (
 )
 
 # Docker image labels carrying the lifespan metadata.
-_TAG_IDLE_PAUSE_SECONDS = "io.openhands.sandbox_v2.idle_pause_seconds"
-_TAG_PAUSED_DELETE_SECONDS = "io.openhands.sandbox_v2.paused_delete_seconds"
-_TAG_MAX_AGE_SECONDS = "io.openhands.sandbox_v2.max_age_seconds"
+_TAG_IDLE_PAUSE_SECONDS = "io.openhands.sandbox.idle_pause_seconds"
+_TAG_PAUSED_DELETE_SECONDS = "io.openhands.sandbox.paused_delete_seconds"
+_TAG_MAX_AGE_SECONDS = "io.openhands.sandbox.max_age_seconds"
 
 # Names of the default exposed ports surfaced on every Docker sandbox.
 AGENT_SERVER = "agent_server"
@@ -81,15 +81,15 @@ DEFAULT_EXPOSED_PORTS: tuple[ExposedPort, ...] = (
 # Docker image label recording the sandbox id a container belongs to. Set on
 # container creation so a container can be matched back to its sandbox even
 # after a restart.
-_TAG_SANDBOX_ID = "io.openhands.sandbox_v2.sandbox_id"
+_TAG_SANDBOX_ID = "io.openhands.sandbox.sandbox_id"
 # Label recording the template id (image name) the container was built from.
-_TAG_SANDBOX_SPEC_ID = "io.openhands.sandbox_v2.sandbox_spec_id"
+_TAG_SANDBOX_SPEC_ID = "io.openhands.sandbox.sandbox_spec_id"
 # Label recording that an image is a sandbox snapshot (rather than a template).
-_TAG_SNAPSHOT_ID = "io.openhands.sandbox_v2.snapshot_id"
+_TAG_SNAPSHOT_ID = "io.openhands.sandbox.snapshot_id"
 # Label recording the source sandbox a snapshot image was committed from.
-_TAG_SNAPSHOT_SANDBOX_ID = "io.openhands.sandbox_v2.snapshot_sandbox_id"
+_TAG_SNAPSHOT_SANDBOX_ID = "io.openhands.sandbox.snapshot_sandbox_id"
 # Label recording the created-at timestamp for a snapshot image.
-_TAG_SNAPSHOT_CREATED_AT = "io.openhands.sandbox_v2.snapshot_created_at"
+_TAG_SNAPSHOT_CREATED_AT = "io.openhands.sandbox.snapshot_created_at"
 # Docker image tag prefix for committed sandbox snapshot images.
 _SNAPSHOT_IMAGE_PREFIX = "openhands-sandbox-snapshot"
 

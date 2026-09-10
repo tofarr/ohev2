@@ -18,10 +18,10 @@ from openhands.ev2.auth.auth_dependencies import (
     depends_permissions_or_none,
 )
 from openhands.ev2.db import SessionDep
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_models import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_models import (
     RoleSandboxTemplatePermission,
 )
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionBatchWriteRequest,
     RoleSandboxTemplatePermissionCreate,
     RoleSandboxTemplatePermissionRead,
@@ -29,7 +29,7 @@ from openhands.ev2.sandbox_v2.role_sandbox_template_permission_schemas import (
     RoleSandboxTemplatePermissionSearchResult,
     RoleSandboxTemplatePermissionUpdate,
 )
-from openhands.ev2.sandbox_v2.role_sandbox_template_permission_service import (
+from openhands.ev2.sandbox.role_sandbox_template_permission_service import (
     BatchPermissionDeniedError,
     RoleSandboxTemplatePermissionConflictError,
     RoleSandboxTemplatePermissionNotFoundError,
@@ -42,9 +42,9 @@ from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountR
 from openhands.ev2.util.search_filter import AllSearchFilter, SearchFilter
 
 router = APIRouter(
-    prefix="/sandbox_v2/role-sandbox-template-permissions",
-    # Grouped under the sandbox_v2 templates these grants relate to.
-    tags=["sandbox-v2-templates"],
+    prefix="/sandbox/role-sandbox-template-permissions",
+    # Grouped under the sandbox templates these grants relate to.
+    tags=["sandbox-templates"],
 )
 
 

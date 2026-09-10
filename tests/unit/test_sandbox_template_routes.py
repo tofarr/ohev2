@@ -1,4 +1,4 @@
-"""Route tests for the ``/sandbox_v2/sandbox-templates`` REST surface.
+"""Route tests for the ``/sandbox/sandbox-templates`` REST surface.
 
 These exercise the FastAPI router end-to-end via the ASGI client with a fake
 in-memory :class:`SandboxService` injected onto ``app.state`` (the same place
@@ -17,9 +17,9 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from openhands.ev2.config import get_config
-from openhands.ev2.sandbox_v2.sandbox_v2_models import DockerSandboxTemplate, SandboxTemplate
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxTemplateCreate
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_models import DockerSandboxTemplate, SandboxTemplate
+from openhands.ev2.sandbox.sandbox_schemas import SandboxTemplateCreate
+from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
@@ -140,7 +140,7 @@ async def test_get_sandbox_service_unavailable_when_unset(
         base_url="http://test",
         headers={"Authorization": f"Bearer {token}"},
     ) as ac:
-        resp = await ac.get("/sandbox_v2/sandbox-templates")
+        resp = await ac.get("/sandbox/sandbox-templates")
     assert resp.status_code == 503
 
 
@@ -151,7 +151,7 @@ async def test_get_sandbox_service_unavailable_when_unset(
 
 class TestSearchAndCount:
     async def test_search_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox_v2/sandbox-templates")
+        resp = await client.get("/sandbox/sandbox-templates")
         assert resp.status_code == 200
         body = resp.json()
         assert body["items"] == []
@@ -159,32 +159,32 @@ class TestSearchAndCount:
         assert body["limit"] == 50
 
     async def test_search_returns_created(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.get("/sandbox_v2/sandbox-templates")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.get("/sandbox/sandbox-templates")
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert len(items) == 1
         assert items[0]["id"] == "img-a"
 
     async def test_search_with_filter(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
         await client.post(
-            "/sandbox_v2/sandbox-templates",
+            "/sandbox/sandbox-templates",
             json=_template_payload("img-b", idle_pause_seconds=10),
         )
-        resp = await client.get("/sandbox_v2/sandbox-templates?id__contains=a")
+        resp = await client.get("/sandbox/sandbox-templates?id__contains=a")
         assert resp.status_code == 200
         assert [i["id"] for i in resp.json()["items"]] == ["img-a"]
 
     async def test_count(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.get("/sandbox_v2/sandbox-templates/count")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.get("/sandbox/sandbox-templates/count")
         assert resp.status_code == 200
         assert resp.json()["count"] >= 1
 
     async def test_count_with_filter(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.get("/sandbox_v2/sandbox-templates/count?id__eq=img-a")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.get("/sandbox/sandbox-templates/count?id__eq=img-a")
         assert resp.json()["count"] == 1
 
 
@@ -196,7 +196,7 @@ class TestSearchAndCount:
 class TestCrud:
     async def test_create_returns_201(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/sandbox_v2/sandbox-templates",
+            "/sandbox/sandbox-templates",
             json=_template_payload("img-a", working_dir="/ws"),
         )
         assert resp.status_code == 201, resp.text
@@ -205,36 +205,36 @@ class TestCrud:
         assert body["working_dir"] == "/ws"
 
     async def test_create_conflict_returns_409(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
         assert resp.status_code == 409
 
     async def test_get_template(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.get("/sandbox_v2/sandbox-templates/img-a")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.get("/sandbox/sandbox-templates/img-a")
         assert resp.status_code == 200
         assert resp.json()["id"] == "img-a"
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox_v2/sandbox-templates/nope")
+        resp = await client.get("/sandbox/sandbox-templates/nope")
         assert resp.status_code == 404
 
     async def test_update_template_not_supported(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
         resp = await client.patch(
-            "/sandbox_v2/sandbox-templates/img-a",
+            "/sandbox/sandbox-templates/img-a",
             json={"working_dir": "/new"},
         )
         assert resp.status_code == 405
 
     async def test_delete_template(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.delete("/sandbox_v2/sandbox-templates/img-a")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.delete("/sandbox/sandbox-templates/img-a")
         assert resp.status_code == 204
-        assert (await client.get("/sandbox_v2/sandbox-templates/img-a")).status_code == 404
+        assert (await client.get("/sandbox/sandbox-templates/img-a")).status_code == 404
 
     async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.delete("/sandbox_v2/sandbox-templates/nope")
+        resp = await client.delete("/sandbox/sandbox-templates/nope")
         assert resp.status_code == 404
 
 
@@ -245,27 +245,27 @@ class TestCrud:
 
 class TestBatch:
     async def test_batch_read_aligned_with_none(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
-        resp = await client.get("/sandbox_v2/sandbox-templates/batch?ids=img-a&ids=missing")
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
+        resp = await client.get("/sandbox/sandbox-templates/batch?ids=img-a&ids=missing")
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert items[0]["id"] == "img-a"
         assert items[1] is None
 
     async def test_batch_read_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox_v2/sandbox-templates/batch")
+        resp = await client.get("/sandbox/sandbox-templates/batch")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
     async def test_batch_read_too_many_returns_422(self, client: AsyncClient) -> None:
         ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
-        resp = await client.get(f"/sandbox_v2/sandbox-templates/batch?{ids}")
+        resp = await client.get(f"/sandbox/sandbox-templates/batch?{ids}")
         assert resp.status_code == 422
 
     async def test_batch_write_mixed(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
         resp = await client.post(
-            "/sandbox_v2/sandbox-templates/batch",
+            "/sandbox/sandbox-templates/batch",
             json={
                 "operations": [
                     {"op": "create", "data": _template_payload("img-b")},
@@ -279,13 +279,13 @@ class TestBatch:
         assert items[1] is None
 
     async def test_batch_write_empty_ops_rejected(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox_v2/sandbox-templates/batch", json={"operations": []})
+        resp = await client.post("/sandbox/sandbox-templates/batch", json={"operations": []})
         assert resp.status_code == 422
 
     async def test_batch_write_conflict_maps_to_409(self, client: AsyncClient) -> None:
-        await client.post("/sandbox_v2/sandbox-templates", json=_template_payload("img-a"))
+        await client.post("/sandbox/sandbox-templates", json=_template_payload("img-a"))
         resp = await client.post(
-            "/sandbox_v2/sandbox-templates/batch",
+            "/sandbox/sandbox-templates/batch",
             json={
                 "operations": [
                     {"op": "create", "data": _template_payload("img-a")},
@@ -296,7 +296,7 @@ class TestBatch:
 
     async def test_batch_write_unknown_op_rejected(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/sandbox_v2/sandbox-templates/batch",
+            "/sandbox/sandbox-templates/batch",
             json={
                 "operations": [
                     {"op": "upsert", "data": _template_payload("img-a")},
@@ -313,12 +313,12 @@ class TestBatch:
 
 class TestValidation:
     async def test_create_requires_id(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox_v2/sandbox-templates", json={})
+        resp = await client.post("/sandbox/sandbox-templates", json={})
         assert resp.status_code == 422
 
     async def test_create_rejects_non_positive_timeout(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/sandbox_v2/sandbox-templates",
+            "/sandbox/sandbox-templates",
             json=_template_payload("img-a", idle_pause_seconds=0),
         )
         assert resp.status_code == 422

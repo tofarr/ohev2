@@ -1,4 +1,4 @@
-"""Tests for the pluggable sandbox_v2 control plane.
+"""Tests for the pluggable sandbox control plane.
 
 Covers the pieces that do not require a live Docker daemon or database: the
 template model/schemas, the Docker Image attribute mapping helpers, and the
@@ -13,8 +13,8 @@ import pytest
 from docker.errors import ImageNotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
-from openhands.ev2.sandbox_v2.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
-from openhands.ev2.sandbox_v2.docker_sandbox_service import (
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.docker_sandbox_service import (
     DEFAULT_EXPOSED_PORTS,
     DockerSandboxService,
     _docker_template_from_payload,
@@ -30,7 +30,7 @@ from openhands.ev2.sandbox_v2.docker_sandbox_service import (
     _volume_mounts_from_binds,
     _wildcard_match,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_models import (
+from openhands.ev2.sandbox.sandbox_models import (
     DockerSandboxTemplate,
     ExposedPort,
     ExposedUrl,
@@ -40,14 +40,14 @@ from openhands.ev2.sandbox_v2.sandbox_v2_models import (
     SnapshotMode,
     VolumeMount,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_schemas import (
+from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
     SandboxSnapshotCreate,
     SandboxTemplateCreate,
     SandboxTemplateRead,
     SandboxUpdate,
 )
-from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     resolve_sandbox_service_class,
 )
@@ -205,8 +205,8 @@ def test_template_from_image_attrs_basic() -> None:
             "Env": ["A=1", "B=two"],
             "WorkingDir": "/workspace",
             "Labels": {
-                "io.openhands.sandbox_v2.idle_pause_seconds": "120",
-                "io.openhands.sandbox_v2.max_age_seconds": "3600",
+                "io.openhands.sandbox.idle_pause_seconds": "120",
+                "io.openhands.sandbox.max_age_seconds": "3600",
             },
         },
         "HostConfig": {"Memory": 1073741824},
@@ -225,7 +225,7 @@ def test_template_from_image_attrs_basic() -> None:
 
 
 def test_template_from_image_attrs_untagged_is_not_template() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_service import (
         SandboxTemplateNotFoundError,
     )
 
@@ -381,7 +381,7 @@ def test_sync_get_template_returns_matching_image() -> None:
 
 
 def test_sync_get_template_rejects_non_matching_image() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_service import (
         SandboxTemplateNotFoundError,
     )
 
@@ -400,14 +400,14 @@ def test_sync_get_template_rejects_non_matching_image() -> None:
 
 def test_resolve_docker_service_class() -> None:
     cls = resolve_sandbox_service_class(
-        "openhands.ev2.sandbox_v2.docker_sandbox_service.DockerSandboxService"
+        "openhands.ev2.sandbox.docker_sandbox_service.DockerSandboxService"
     )
     assert cls is DockerSandboxService
 
 
 def test_resolve_rejects_non_service() -> None:
     with pytest.raises(TypeError):
-        resolve_sandbox_service_class("openhands.ev2.sandbox_v2.sandbox_v2_service.SandboxTemplate")
+        resolve_sandbox_service_class("openhands.ev2.sandbox.sandbox_service.SandboxTemplate")
 
 
 def test_resolve_rejects_missing_module() -> None:
@@ -480,13 +480,13 @@ def test_docker_service_image_name_matching() -> None:
 def test_exception_to_status_mapping() -> None:
     from fastapi import status as http_status
 
-    from openhands.ev2.sandbox_v2.sandbox_template_router import _map_exception_to_status
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_service import (
         BatchPermissionDeniedError,
         SandboxTemplateConflictError,
         SandboxTemplateNotFoundError,
         SandboxTemplatePermissionScopeError,
     )
+    from openhands.ev2.sandbox.sandbox_template_router import _map_exception_to_status
 
     assert _map_exception_to_status(SandboxTemplateNotFoundError("x")).status_code == 404
     assert _map_exception_to_status(SandboxTemplateConflictError("x")).status_code == 409
@@ -501,8 +501,8 @@ def test_exception_to_status_mapping() -> None:
 def test_sandbox_router_exception_to_status_mapping() -> None:
     from fastapi import status as http_status
 
-    from openhands.ev2.sandbox_v2.sandbox_router import _map_exception_to_status
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_router import _map_exception_to_status
+    from openhands.ev2.sandbox.sandbox_service import (
         BatchPermissionDeniedError,
         SandboxConflictError,
         SandboxNotFoundError,
@@ -561,8 +561,8 @@ def _container_attrs(name: str, *, image: str = "img", status: str = "running") 
         "Config": {
             "Image": image,
             "Labels": {
-                "io.openhands.sandbox_v2.sandbox_id": name,
-                "io.openhands.sandbox_v2.sandbox_spec_id": image,
+                "io.openhands.sandbox.sandbox_id": name,
+                "io.openhands.sandbox.sandbox_spec_id": image,
             },
         },
         "HostConfig": {"Binds": ["/host:/container:rw"]},
@@ -623,7 +623,7 @@ def test_sync_get_sandbox_returns_container() -> None:
 
 
 def test_sync_get_sandbox_missing_raises_not_found() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service = DockerSandboxService()
     service._client = _FakeContainerClient([])
@@ -632,7 +632,7 @@ def test_sync_get_sandbox_missing_raises_not_found() -> None:
 
 
 def test_sync_get_sandbox_unlabeled_raises_not_found() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service = DockerSandboxService()
     attrs = _container_attrs("anon", status="running")
@@ -658,7 +658,7 @@ def test_snapshot_mode_can_be_configured() -> None:
 
 
 def test_sandbox_from_create_carries_snapshot_mode() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxCreate
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxCreate
 
     service = DockerSandboxService(snapshot_mode=SnapshotMode.AUTOMATIC)
     sandbox = service._sandbox_from_create(SandboxCreate(id="sb-a", sandbox_spec_id="img-a"))
@@ -670,7 +670,7 @@ def test_snapshot_image_tag_builds_reference() -> None:
 
 
 def test_is_snapshot_image_detects_label() -> None:
-    attrs = {"Config": {"Labels": {"io.openhands.sandbox_v2.snapshot_id": "snap-a"}}}
+    attrs = {"Config": {"Labels": {"io.openhands.sandbox.snapshot_id": "snap-a"}}}
     assert _is_snapshot_image(attrs) is True
 
 
@@ -685,9 +685,9 @@ def test_snapshot_from_image_attrs_basic() -> None:
         "Created": "2024-01-02T03:04:05.000000000Z",
         "Config": {
             "Labels": {
-                "io.openhands.sandbox_v2.snapshot_id": "snap-a",
-                "io.openhands.sandbox_v2.snapshot_sandbox_id": "sb-1",
-                "io.openhands.sandbox_v2.snapshot_created_at": "2024-01-02T03:04:05Z",
+                "io.openhands.sandbox.snapshot_id": "snap-a",
+                "io.openhands.sandbox.snapshot_sandbox_id": "sb-1",
+                "io.openhands.sandbox.snapshot_created_at": "2024-01-02T03:04:05Z",
             }
         },
     }
@@ -722,11 +722,11 @@ def _snapshot_image_attrs(
 ) -> dict[str, Any]:
     """Build realistic Docker image attrs for a snapshot image."""
     labels: dict[str, str] = {
-        "io.openhands.sandbox_v2.snapshot_id": snapshot_id,
-        "io.openhands.sandbox_v2.snapshot_created_at": created_at,
+        "io.openhands.sandbox.snapshot_id": snapshot_id,
+        "io.openhands.sandbox.snapshot_created_at": created_at,
     }
     if sandbox_id:
-        labels["io.openhands.sandbox_v2.snapshot_sandbox_id"] = sandbox_id
+        labels["io.openhands.sandbox.snapshot_sandbox_id"] = sandbox_id
     return {
         "RepoTags": [f"openhands-sandbox-snapshot:{snapshot_id}"],
         "Created": created_at,
@@ -766,7 +766,7 @@ def test_snapshot_from_image_attrs_falls_back_to_tag_without_repotags() -> None:
         "RepoTags": None,
         "Created": "2024-01-02T03:04:05Z",
         "Config": {
-            "Labels": {"io.openhands.sandbox_v2.snapshot_id": "snap-a"},
+            "Labels": {"io.openhands.sandbox.snapshot_id": "snap-a"},
         },
     }
     snapshot = _snapshot_from_image_attrs(attrs)
@@ -780,7 +780,7 @@ def test_snapshot_from_image_attrs_uses_attrs_created_when_no_label() -> None:
         "RepoTags": ["openhands-sandbox-snapshot:snap-a"],
         "Created": "2024-06-01T12:00:00Z",
         "Config": {
-            "Labels": {"io.openhands.sandbox_v2.snapshot_id": "snap-a"},
+            "Labels": {"io.openhands.sandbox.snapshot_id": "snap-a"},
         },
     }
     snapshot = _snapshot_from_image_attrs(attrs)
@@ -1039,7 +1039,7 @@ def test_sync_get_snapshot_returns_snapshot() -> None:
 
 
 def test_sync_get_snapshot_missing_raises_not_found() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxSnapshotNotFoundError):
@@ -1047,7 +1047,7 @@ def test_sync_get_snapshot_missing_raises_not_found() -> None:
 
 
 def test_sync_get_snapshot_raises_when_image_not_labeled() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     service, _ = _make_snapshot_service(
         [_FakeImageWithOps(_image_attrs("openhands-sandbox-snapshot:snap-x"))]
@@ -1068,11 +1068,11 @@ def test_sync_commit_snapshot_creates_image() -> None:
     assert container._committed[0]["tag"] == "snap-1"
     # The committed image is registered so _get_snapshot can find it.
     image = client.images.get("openhands-sandbox-snapshot:snap-1")
-    assert image.attrs["Config"]["Labels"]["io.openhands.sandbox_v2.snapshot_id"] == "snap-1"
+    assert image.attrs["Config"]["Labels"]["io.openhands.sandbox.snapshot_id"] == "snap-1"
 
 
 def test_sync_commit_snapshot_conflict_when_image_exists() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotConflictError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
 
     service, _ = _make_snapshot_service(
         [_FakeImageWithOps(_snapshot_image_attrs("snap-1"))],
@@ -1086,7 +1086,7 @@ def test_sync_commit_snapshot_conflict_when_image_exists() -> None:
 
 
 def test_sync_commit_snapshot_raises_when_sandbox_missing() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service, _ = _make_snapshot_service([])
     snapshot = DockerSandboxSnapshot(
@@ -1108,11 +1108,11 @@ def test_sync_load_snapshot_imports_file() -> None:
     assert client.api._commits[0]["tag"] == "snap-1"
     # The re-committed image is registered with snapshot labels.
     image = client.images.get("openhands-sandbox-snapshot:snap-1")
-    assert image.attrs["Config"]["Labels"]["io.openhands.sandbox_v2.snapshot_id"] == "snap-1"
+    assert image.attrs["Config"]["Labels"]["io.openhands.sandbox.snapshot_id"] == "snap-1"
 
 
 def test_sync_load_snapshot_conflict_when_image_exists() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotConflictError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
 
     service, _ = _make_snapshot_service([_FakeImageWithOps(_snapshot_image_attrs("snap-1"))])
     snapshot = DockerSandboxSnapshot(
@@ -1130,7 +1130,7 @@ def test_sync_delete_snapshot_removes_image() -> None:
 
 
 def test_sync_delete_snapshot_missing_raises_not_found() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxSnapshotNotFoundError):
@@ -1159,7 +1159,7 @@ async def test_async_get_snapshot_returns_snapshot() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_from_sandbox_builds_model() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxStatus
+    from openhands.ev2.sandbox.sandbox_models import SandboxStatus
 
     service = DockerSandboxService()
     sandbox = DockerSandbox(
@@ -1192,7 +1192,7 @@ async def test_snapshot_from_file_builds_model() -> None:
 
 @pytest.mark.asyncio
 async def test_create_snapshot_from_sandbox_commits() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_models import SandboxStatus
+    from openhands.ev2.sandbox.sandbox_models import SandboxStatus
 
     service, client = _make_snapshot_service([], [("sb-1", "img-a")])
     sandbox = DockerSandbox(
@@ -1243,7 +1243,7 @@ async def test_stream_snapshot_returns_image_save() -> None:
 
 @pytest.mark.asyncio
 async def test_service_list_snapshots_filters_by_perm() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxSnapshotSearchFilter
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotSearchFilter
 
     service, _ = _make_snapshot_service(
         [
@@ -1258,7 +1258,7 @@ async def test_service_list_snapshots_filters_by_perm() -> None:
 
 @pytest.mark.asyncio
 async def test_service_get_snapshot_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxSnapshotNotFoundError):
@@ -1294,7 +1294,7 @@ async def test_service_delete_snapshot() -> None:
 
 @pytest.mark.asyncio
 async def test_service_delete_snapshot_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxSnapshotNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxSnapshotNotFoundError):
@@ -1328,7 +1328,7 @@ async def test_async_get_template_returns_template() -> None:
 
 @pytest.mark.asyncio
 async def test_async_create_template_pulls_image() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxTemplateCreate
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxTemplateCreate
 
     service = DockerSandboxService()
     service._client = _FakeSnapshotDockerClient([])
@@ -1340,8 +1340,8 @@ async def test_async_create_template_pulls_image() -> None:
 
 @pytest.mark.asyncio
 async def test_async_create_template_conflict_when_exists() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxTemplateCreate
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateConflictError
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxTemplateCreate
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateConflictError
 
     service, _ = _make_snapshot_service(
         [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
@@ -1364,7 +1364,7 @@ async def test_async_delete_template_removes_image() -> None:
 
 @pytest.mark.asyncio
 async def test_async_delete_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxTemplateNotFoundError):
@@ -1387,7 +1387,7 @@ async def test_async_get_sandbox_returns_sandbox() -> None:
 
 @pytest.mark.asyncio
 async def test_async_get_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
@@ -1405,7 +1405,7 @@ async def test_async_create_sandbox_creates_container() -> None:
 
 @pytest.mark.asyncio
 async def test_async_create_sandbox_conflict_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxConflictError
+    from openhands.ev2.sandbox.sandbox_service import SandboxConflictError
 
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     sandbox = service._sandbox_from_create(SandboxCreate(id="sb-1", sandbox_spec_id="img-a"))
@@ -1442,7 +1442,7 @@ async def test_async_update_sandbox_pauses_running() -> None:
 
 @pytest.mark.asyncio
 async def test_async_update_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
@@ -1459,7 +1459,7 @@ async def test_async_delete_sandbox_removes_container() -> None:
 
 @pytest.mark.asyncio
 async def test_async_delete_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
@@ -1499,7 +1499,7 @@ async def test_service_search_snapshots_paginates() -> None:
 
 @pytest.mark.asyncio
 async def test_service_search_snapshots_with_search_filter() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxSnapshotSearchFilter
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotSearchFilter
 
     service, _ = _make_snapshot_service(
         [
@@ -1526,7 +1526,7 @@ async def test_service_count_snapshots() -> None:
 
 @pytest.mark.asyncio
 async def test_service_count_snapshots_with_filter() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxSnapshotSearchFilter
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotSearchFilter
 
     service, _ = _make_snapshot_service(
         [
@@ -1557,7 +1557,7 @@ async def test_service_get_snapshots_batch() -> None:
 
 @pytest.mark.asyncio
 async def test_service_apply_snapshot_batch_deletes() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxSnapshotBatchDelete
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotBatchDelete
     from openhands.ev2.security.security_models import Action
     from openhands.ev2.util.search_filter import AllSearchFilter
 
@@ -1579,8 +1579,8 @@ async def test_service_apply_snapshot_batch_deletes() -> None:
 
 @pytest.mark.asyncio
 async def test_service_apply_snapshot_batch_denied_when_filter_none() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_schemas import SandboxSnapshotBatchDelete
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import BatchPermissionDeniedError
+    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotBatchDelete
+    from openhands.ev2.sandbox.sandbox_service import BatchPermissionDeniedError
     from openhands.ev2.security.security_models import Action
 
     service, _ = _make_snapshot_service([_FakeImageWithOps(_snapshot_image_attrs("snap-1"))])
@@ -1592,7 +1592,7 @@ async def test_service_apply_snapshot_batch_denied_when_filter_none() -> None:
 
 @pytest.mark.asyncio
 async def test_base_service_snapshot_hooks_raise_unsupported() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_service import (
         SandboxNotFoundError,
         SandboxService,
         SandboxSnapshotUnsupportedError,
@@ -1658,13 +1658,13 @@ async def test_base_service_snapshot_hooks_raise_unsupported() -> None:
 def test_snapshot_router_exception_to_status_mapping() -> None:
     from fastapi import status as http_status
 
-    from openhands.ev2.sandbox_v2.sandbox_snapshot_router import _map_exception_to_status
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import (
+    from openhands.ev2.sandbox.sandbox_service import (
         SandboxSnapshotConflictError,
         SandboxSnapshotNotFoundError,
         SandboxSnapshotPermissionScopeError,
         SandboxSnapshotUnsupportedError,
     )
+    from openhands.ev2.sandbox.sandbox_snapshot_router import _map_exception_to_status
 
     assert _map_exception_to_status(SandboxSnapshotNotFoundError("x")).status_code == 404
     assert _map_exception_to_status(SandboxSnapshotConflictError("x")).status_code == 409
@@ -1706,7 +1706,7 @@ def test_parse_env_skips_entries_without_equals() -> None:
 
 
 def test_sync_get_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxTemplateNotFoundError):
@@ -1714,7 +1714,7 @@ def test_sync_get_template_not_found_raises() -> None:
 
 
 def test_sync_get_template_raises_for_snapshot_image() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
 
     service, _ = _make_snapshot_service([_FakeImageWithOps(_snapshot_image_attrs("snap-1"))])
     with pytest.raises(SandboxTemplateNotFoundError):
@@ -1722,7 +1722,7 @@ def test_sync_get_template_raises_for_snapshot_image() -> None:
 
 
 def test_sync_get_template_raises_when_pattern_mismatch() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
 
     service, _ = _make_snapshot_service(
         [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
@@ -1739,7 +1739,7 @@ def test_sync_create_template_pulls_new_image() -> None:
 
 
 def test_sync_create_template_conflict_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateConflictError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateConflictError
 
     service, _ = _make_snapshot_service(
         [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
@@ -1749,7 +1749,7 @@ def test_sync_create_template_conflict_raises() -> None:
 
 
 def test_sync_delete_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox_v2.sandbox_v2_service import SandboxTemplateNotFoundError
+    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
 
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxTemplateNotFoundError):
@@ -1757,7 +1757,7 @@ def test_sync_delete_template_not_found_raises() -> None:
 
 
 def test_container_state_handles_reload_exception() -> None:
-    from openhands.ev2.sandbox_v2.docker_sandbox_service import _container_state
+    from openhands.ev2.sandbox.docker_sandbox_service import _container_state
 
     class _BadContainer:
         attrs: ClassVar[dict[str, Any]] = {}
@@ -1797,7 +1797,7 @@ def test_sandbox_from_container_attrs_returns_none_on_exception() -> None:
 
 
 def test_resolve_sandbox_id_uses_name_when_image_matches_pattern() -> None:
-    from openhands.ev2.sandbox_v2.docker_sandbox_service import _resolve_sandbox_id
+    from openhands.ev2.sandbox.docker_sandbox_service import _resolve_sandbox_id
 
     attrs = {"Name": "/my-container", "Config": {"Labels": {}}}
     result = _resolve_sandbox_id(
@@ -1807,7 +1807,7 @@ def test_resolve_sandbox_id_uses_name_when_image_matches_pattern() -> None:
 
 
 def test_resolve_sandbox_id_returns_none_when_name_empty() -> None:
-    from openhands.ev2.sandbox_v2.docker_sandbox_service import _resolve_sandbox_id
+    from openhands.ev2.sandbox.docker_sandbox_service import _resolve_sandbox_id
 
     attrs = {"Name": "", "Config": {"Labels": {}}}
     result = _resolve_sandbox_id(
@@ -1817,7 +1817,7 @@ def test_resolve_sandbox_id_returns_none_when_name_empty() -> None:
 
 
 def test_docker_status_to_sandbox_status_edge_cases() -> None:
-    from openhands.ev2.sandbox_v2.docker_sandbox_service import _docker_status_to_sandbox_status
+    from openhands.ev2.sandbox.docker_sandbox_service import _docker_status_to_sandbox_status
 
     assert _docker_status_to_sandbox_status("created") is SandboxStatus.ACTIVATING
     assert _docker_status_to_sandbox_status("restarting") is SandboxStatus.ACTIVATING
