@@ -44,12 +44,12 @@ ADMIN_USERNAME = os.environ.get("OHE_SEED_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("OHE_SEED_ADMIN_PASSWORD", "changeme")
 COOKIE_NAME = os.environ.get("OHE_AUTH_COOKIE_NAME", "ohesession")
 
-# The agent-server image. Override via env to pin a specific tag. There is no
-# `latest` tag in the GHCR registry; `main-python` is the python-runtime variant
-# built from the agent-server main branch (the closest equivalent to "latest").
+# The agent-server image. Override via env to pin a specific tag. The default
+# is the latest released python-runtime variant; `main-python` tracks the
+# agent-server main branch and may introduce breaking changes.
 AGENT_SERVER_IMAGE = os.environ.get(
     "OHE_E2E_AGENT_SERVER_IMAGE",
-    "ghcr.io/openhands/agent-server:main-python",
+    "ghcr.io/openhands/agent-server:1.45.0-python",
 )
 
 _POLL_INTERVAL = 2.0
