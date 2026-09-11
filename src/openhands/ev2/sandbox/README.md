@@ -48,6 +48,8 @@ carries:
 - `exposed_ports` — JSONB list of `{name, description, container_port}`.
 - `env_vars`, `working_dir` — container environment.
 - `snapshot_dirs`, `snapshot_on_deactivate` — snapshot configuration.
+- `num_warm` — target number of **warm sandboxes** to maintain for this
+  template (default `0` — see [Warm Sandboxes](#warm-sandboxes) below).
 - `meta` — JSONB for provider-specific hints (K8s annotations, Docker labels).
 
 Templates are **mutable** — update the image tag or lifecycle knobs through
@@ -97,6 +99,10 @@ stopped) container/deployment. It is **not** stored in the DB — the
 live surface (list, get, batch read). Mutations (create/update/delete) go
 through `SandboxConfig` — the reconciler brings the live sandbox in line.
 
+Each live sandbox carries a `sandbox_config_id` — the ID of the
+`SandboxConfig` that owns it (or that claimed it from the warm pool). This
+is searchable via `SandboxSearchFilter.sandbox_config_id`.
+
 ## Sandbox Lifecycle States
 
 ```
@@ -132,17 +138,20 @@ class name) and instantiated from `OHE_SANDBOX_*` environment variables.
 | Docker  | `docker_sandbox_service.py`   | Local filesystem (tar)  |
 | K8s     | `k8s_sandbox_service.py`      | S3 bucket (tar)         |
 
-### Reconciler hooks (new)
+### Reconciler hooks
 
-The ABC defines three hooks that DB-backed services delegate to:
+The ABC defines hooks that DB-backed services delegate to:
 
 - `capture_snapshot(sandbox_id, template_id)` — captures a workspace tarball
   from a live sandbox and returns the `download_url`.
 - `import_snapshot_file(template_id, file)` — imports an uploaded tarball as
   a snapshot.
 - `delete_snapshot_artifact(download_url)` — removes the stored tarball.
+- `refresh_warm_sandboxes(targets)` — reconciles per-template warm pool
+  counts (see [Warm Sandboxes](#warm-sandboxes) below).
 
-Base implementations raise `SandboxSnapshotUnsupportedError`.
+Base implementations raise `SandboxSnapshotUnsupportedError` (snapshot hooks)
+or `NotImplementedError` (warm hooks).
 
 ### Legacy CRUD surface
 
@@ -150,6 +159,60 @@ The ABC still carries the legacy template/sandbox CRUD methods (create, list,
 get, update, delete, batch). These are being slimmed down in Phase 3 to a
 pure reconciler that accepts `SandboxConfig` filters directly, removing the
 transitional `cast()` in `sandbox_router.py`.
+
+## Warm Sandboxes
+
+Warm sandboxes are **pre-created, paused sandboxes** maintained per-template.
+When a `create_sandbox` request is received (no `snapshot_id`), the service
+first tries to **claim** a warm sandbox from the template's pool rather than
+cold-starting a new one. If none is available, a new sandbox is created the
+normal way. This trades background resource cost for reduced first-request
+latency.
+
+### How it works
+
+1. A background loop (`sandbox_warm_refresh_interval`, `= 0` disables — see
+   [Configuration](#configuration)) queries all templates where
+   `num_warm > 0` and calls `refresh_warm_sandboxes({template_id: num_warm})`.
+2. `refresh_warm_sandboxes` creates warm resources until the count reaches
+   `num_warm`, or deletes excess ones down to `num_warm` — idempotent.
+3. On `create_sandbox`, if no `snapshot_id` is supplied, the service calls
+   `_claim_warm_sandbox(template_id, config_id)` which atomically transitions
+   a warm resource into a claimed one and stamps the `sandbox_config_id`.
+
+### `snapshot_id` bypass
+
+When a `snapshot_id` is supplied, the warm pool is **bypassed** — the sandbox
+must be created via the special snapshot-restore path. Fuse-based mounts to
+allow warm sandboxes to serve snapshot restores are **future work**.
+
+### Docker backend
+
+Warm containers are named `OHE_<sandbox_id>` (no config segment). At claim
+time, `container.rename()` transitions the name to
+`OHE_<sandbox_id>_<config_id>` — this is a Docker daemon-level
+compare-and-swap (CAS): if another process renamed it first, the `409
+Conflict` / `404 NotFound` is caught and the next candidate is tried. Warm
+containers are created paused (`docker pause`) and unpaused on claim.
+
+The `OHE_` prefix distinguishes OpenHands-managed containers from foreign
+ones on the same Docker host. `_warm_containers()` filters by the
+`io.openhands.sandbox.template-id` label and sorts oldest-first so the
+oldest warm container is claimed before newer ones.
+
+### K8s backend
+
+Warm Deployments carry the label `io.openhands.sandbox/warm=true` and **no**
+`sandbox-config-id` label. At claim time, a strategic-merge PATCH removes
+the `warm` label and adds `io.openhands.sandbox/sandbox-config-id=<config_id>`.
+The PATCH is guarded by `resourceVersion` — on `409 Conflict` (lost the race)
+the service retries with the next candidate.
+
+### Multi-process safety
+
+Both backends use the provider's native CAS mechanism (Docker rename, K8s
+`resourceVersion`-conditional PATCH) so multiple processes / replicas can
+safely claim from the same warm pool without double-claiming.
 
 ## Deactivation Modes (Docker)
 
@@ -201,6 +264,7 @@ payload lacks `idle_time`.
 | `OHE_SANDBOX_WORKSPACE_DIR`       | Bind-mount root for persistent workspaces | `None`   |
 | `OHE_SANDBOX_SNAPSHOT_DIR`        | Tarball snapshot storage directory   | `~/.openhands/enterprise/snapshots` |
 | `OHE_SANDBOX_LIFECYCLE_INTERVAL`  | Sweep loop interval (0 = disabled)   | —             |
+| `OHE_SANDBOX_WARM_REFRESH_INTERVAL` | Warm pool refresh loop interval (0 = disabled) | `60` |
 
 All `OHE_SANDBOX_*` env vars are parsed onto the selected `SandboxService`
 subclass via `from_env(service_class, "OHE_SANDBOX")`.
