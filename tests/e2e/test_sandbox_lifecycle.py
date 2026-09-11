@@ -24,13 +24,52 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from openhands.ev2.scripts.seed_db import seed_db
+
+
+def _docker_available() -> bool:
+    """Return True if the Docker daemon is reachable and can run containers."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _in_docker_container() -> bool:
+    """Return True if the current process is running inside a Docker container."""
+    return Path("/.dockerenv").exists()
+
+
+# Skip in CI (GitHub Actions sets CI=true), when Docker is not reachable, or
+# when the test process itself is inside a container (nested containers are
+# unreliable — the app's Docker socket mount can create sandbox containers
+# that are not actually accessible from the host).
+_skip_reason = None
+if os.environ.get("CI") == "true":
+    _skip_reason = "sandbox lifecycle e2e requires direct Docker access (skipped in CI)"
+elif _in_docker_container():
+    _skip_reason = "sandbox lifecycle e2e must run on the host, not inside a container"
+elif not _docker_available():
+    _skip_reason = "sandbox lifecycle e2e requires a reachable Docker daemon"
+
+_skip = pytest.mark.skipif(_skip_reason is not None, reason=_skip_reason or "")
 
 BASE_URL = os.environ.get("OHE_BASE_URL", "http://localhost:8000")
 
@@ -44,12 +83,12 @@ ADMIN_USERNAME = os.environ.get("OHE_SEED_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("OHE_SEED_ADMIN_PASSWORD", "changeme")
 COOKIE_NAME = os.environ.get("OHE_AUTH_COOKIE_NAME", "ohesession")
 
-# The agent-server image. Override via env to pin a specific tag. The default
-# is the latest released python-runtime variant; `main-python` tracks the
-# agent-server main branch and may introduce breaking changes.
+# The agent-server image. Override via env to pin a specific tag. There is no
+# `latest` tag in the GHCR registry; `main-python` is the python-runtime variant
+# built from the agent-server main branch (the closest equivalent to "latest").
 AGENT_SERVER_IMAGE = os.environ.get(
     "OHE_E2E_AGENT_SERVER_IMAGE",
-    "ghcr.io/openhands/agent-server:1.45.0-python",
+    "ghcr.io/openhands/agent-server:main-python",
 )
 
 _POLL_INTERVAL = 2.0
@@ -61,6 +100,7 @@ _PROBE_RETRIES = 15
 _PROBE_INTERVAL = 2.0
 
 
+@_skip
 async def test_sandbox_snapshot_lifecycle() -> None:
     # 1. Seed the admin so a real enabled user exists to bootstrap with.
     db_url = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
