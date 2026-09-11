@@ -112,5 +112,12 @@ jobs:
           exit 1
       - name: Run Playwright e2e
         run: uv run pytest tests/e2e -q --no-cov
+      - name: Dump sandbox state on failure
+        if: failure()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a || true
+          echo "=== app logs (last 100 lines) ==="
+          docker compose logs --tail=100 app || true
       - if: always()
         run: docker compose down
