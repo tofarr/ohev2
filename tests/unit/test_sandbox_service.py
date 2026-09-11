@@ -88,7 +88,7 @@ class _MemorySandboxService(SandboxService):
 
 
 def _sandbox_payload(spec: str = "img-a") -> SandboxCreate:
-    return SandboxCreate.model_validate({"sandbox_template_id": spec})
+    return SandboxCreate.model_validate({"sandbox_template_id": spec, "sandbox_config_id": "cfg-1"})
 
 
 # --------------------------------------------------------------------------- #

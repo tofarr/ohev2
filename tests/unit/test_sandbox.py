@@ -12,7 +12,6 @@ owned by :class:`DockerSandboxService`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -25,6 +24,7 @@ from pydantic import ValidationError
 
 from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox.docker_sandbox_service import (
+    _TAG_SANDBOX_TEMPLATE_ID,
     DEFAULT_EXPOSED_PORTS,
     DockerSandboxService,
     _docker_status_to_sandbox_status,
@@ -33,11 +33,12 @@ from openhands.ev2.sandbox.docker_sandbox_service import (
     _generate_snapshot_id,
     _label_int,
     _lifespan_knobs_from_image,
+    _ohe_name,
     _parse_created,
-    _resolve_sandbox_id,
+    _parse_ohe_name,
     _sandbox_from_container_attrs,
+    _strip_ohe_prefix,
     _volume_mounts_from_binds,
-    _wildcard_match,
 )
 from openhands.ev2.sandbox.sandbox_models import (
     ExposedUrl,
@@ -109,8 +110,14 @@ def test_default_exposed_ports_include_agent_server_and_vscode() -> None:
 
 
 def test_sandbox_create_and_update_payloads() -> None:
-    create = SandboxCreate.model_validate({"sandbox_template_id": "img"})
+    create = SandboxCreate.model_validate(
+        {
+            "sandbox_template_id": "img",
+            "sandbox_config_id": "cfg-1",
+        }
+    )
     assert create.sandbox_template_id == "img"
+    assert create.sandbox_config_id == "cfg-1"
     update = SandboxUpdate.model_validate({"desired_status": "active"})
     assert update.desired_status is SandboxStatus.ACTIVE
 
@@ -193,18 +200,43 @@ def test_volume_mounts_empty() -> None:
     assert _volume_mounts_from_binds([]) == []
 
 
-def test_wildcard_match() -> None:
-    assert _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server")
-    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-server")
-    assert not _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/other/agent-canvas")
-    # A bare pattern (no wildcard) requires an exact match, so a tagged
-    # image is *not* matched by it — use ``:*`` to opt into tagged variants.
-    assert not _wildcard_match(
-        "ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server:1.16.0"
-    )
-    assert _wildcard_match(
-        "ghcr.io/openhands/agent-server:*", "ghcr.io/openhands/agent-server:1.16.0"
-    )
+def test_ohe_name_warm() -> None:
+    assert _ohe_name("abc") == "OHE_abc"
+
+
+def test_ohe_name_claimed() -> None:
+    assert _ohe_name("abc", "def") == "OHE_abc_def"
+
+
+def test_parse_ohe_name_warm() -> None:
+    assert _parse_ohe_name("OHE_abc") == ("abc", None)
+
+
+def test_parse_ohe_name_claimed() -> None:
+    assert _parse_ohe_name("OHE_abc_def") == ("abc", "def")
+
+
+def test_parse_ohe_name_uuids() -> None:
+    sid = "550e8400-e29b-41d4-a716-446655440000"
+    cid = "660e8400-e29b-41d4-a716-446655440000"
+    name = _ohe_name(sid, cid)
+    assert name == f"OHE_{sid}_{cid}"
+    assert _parse_ohe_name(name) == (sid, cid)
+
+
+def test_parse_ohe_name_foreign_returns_none() -> None:
+    assert _parse_ohe_name("sandbox-abc") is None
+    assert _parse_ohe_name("redis") is None
+    assert _parse_ohe_name("") is None
+
+
+def test_strip_ohe_prefix() -> None:
+    sid = "550e8400-e29b-41d4-a716-446655440000"
+    cid = "660e8400-e29b-41d4-a716-446655440000"
+    assert _strip_ohe_prefix(_ohe_name(sid, cid)) == sid
+    assert _strip_ohe_prefix(_ohe_name(sid)) == sid
+    # Foreign name is returned as-is.
+    assert _strip_ohe_prefix("redis") == "redis"
 
 
 def test_docker_status_to_sandbox_status_edge_cases() -> None:
@@ -219,7 +251,8 @@ def test_docker_status_to_sandbox_status_edge_cases() -> None:
 def test_generate_sandbox_id_is_unique() -> None:
     ids = {_generate_sandbox_id() for _ in range(100)}
     assert len(ids) == 100
-    assert all(s.startswith("sandbox-") for s in ids)
+    # UUIDs contain dashes, not underscores, so OHE_ name splitting is safe.
+    assert all("-" in s and "_" not in s for s in ids)
 
 
 def test_generate_snapshot_id_is_unique() -> None:
@@ -244,21 +277,31 @@ def _container_attrs(
     *,
     status: str = "running",
     sandbox_id: str | None = "sb-1",
+    config_id: str | None = None,
     image: str = "ghcr.io/openhands/agent-server:latest",
-    name: str = "sb-1",
+    name: str | None = None,
     created: str = "2024-01-02T03:04:05Z",
     ports: dict[str, Any] | None = None,
     binds: list[str] | None = None,
     labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    full_labels = {"io.openhands.sandbox.sandbox_id": sandbox_id} if sandbox_id else {}
-    if labels:
-        full_labels.update(labels)
+    # Build the container name following the OHE_ convention.
+    # When sandbox_id is set but config_id is not, it's a warm container.
+    # When both are set, it's a claimed container.
+    if name is not None:
+        container_name = name
+    elif sandbox_id is None:
+        container_name = "foreign-container"
+    elif config_id is not None:
+        container_name = f"OHE_{sandbox_id}_{config_id}"
+    else:
+        container_name = f"OHE_{sandbox_id}"
+    template_label = labels or {"io.openhands.sandbox.sandbox_template_id": image}
     return {
-        "Name": f"/{name}",
+        "Name": f"/{container_name}",
         "Created": created,
         "State": {"Status": status, "Error": None},
-        "Config": {"Image": image, "Labels": full_labels},
+        "Config": {"Image": image, "Labels": template_label},
         "HostConfig": {"Binds": binds or []},
         "NetworkSettings": {"Ports": ports or {}},
     }
@@ -266,11 +309,17 @@ def _container_attrs(
 
 def test_sandbox_from_container_attrs_running() -> None:
     container = _FakeContainer(
-        _container_attrs(status="running", ports={"8000/tcp": [{"HostPort": "32771"}]})
+        _container_attrs(
+            status="running",
+            sandbox_id="sb-1",
+            config_id="cfg-1",
+            ports={"8000/tcp": [{"HostPort": "32771"}]},
+        )
     )
     sandbox = _sandbox_from_container_attrs(container, _PORTS)
     assert sandbox is not None
-    assert sandbox.id == "sb-1"
+    assert sandbox.id == "OHE_sb-1_cfg-1"
+    assert sandbox.sandbox_config_id == "cfg-1"
     assert sandbox.status is SandboxStatus.ACTIVE
     assert sandbox.desired_status is SandboxStatus.ACTIVE
     assert sandbox.exposed_urls is not None
@@ -278,27 +327,36 @@ def test_sandbox_from_container_attrs_running() -> None:
 
 
 def test_sandbox_from_container_attrs_paused_is_inactive() -> None:
-    container = _FakeContainer(_container_attrs(status="paused"))
+    container = _FakeContainer(
+        _container_attrs(status="paused", sandbox_id="sb-1", config_id="cfg-1")
+    )
     sandbox = _sandbox_from_container_attrs(container, _PORTS)
     assert sandbox is not None
     assert sandbox.status is SandboxStatus.INACTIVE
 
 
 def test_sandbox_from_container_attrs_exited_is_inactive() -> None:
-    container = _FakeContainer(_container_attrs(status="exited"))
+    container = _FakeContainer(
+        _container_attrs(status="exited", sandbox_id="sb-1", config_id="cfg-1")
+    )
     sandbox = _sandbox_from_container_attrs(container, _PORTS)
     assert sandbox is not None
     assert sandbox.status is SandboxStatus.INACTIVE
 
 
-def test_sandbox_from_container_attrs_no_label_returns_none_via_pattern() -> None:
-    # No sandbox-id label and an image that does not match the patterns -> None.
+def test_sandbox_from_container_attrs_warm_returns_none() -> None:
+    # A warm container (OHE_<sid>, no config_id) is excluded from the list.
     container = _FakeContainer(
-        _container_attrs(sandbox_id=None, image="ghcr.io/other/agent:latest", name="x")
+        _container_attrs(status="running", sandbox_id="sb-1", config_id=None)
     )
-    sandbox = _sandbox_from_container_attrs(
-        container, _PORTS, image_name_patterns=["ghcr.io/openhands/agent-server:*"]
-    )
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
+    assert sandbox is None
+
+
+def test_sandbox_from_container_attrs_foreign_returns_none() -> None:
+    # A container whose name doesn't start with OHE_ is foreign — ignored.
+    container = _FakeContainer(_container_attrs(sandbox_id=None, name="redis-server"))
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
     assert sandbox is None
 
 
@@ -309,24 +367,6 @@ def test_sandbox_from_container_attrs_returns_none_on_exception() -> None:
             raise RuntimeError("container gone")
 
     assert _sandbox_from_container_attrs(_Broken(), _PORTS) is None
-
-
-def test_resolve_sandbox_id_uses_name_when_image_matches_pattern() -> None:
-    labels: dict[str, Any] = {}
-    attrs = {"Name": "/named-sandbox"}
-    sid = _resolve_sandbox_id(
-        labels, attrs, "ghcr.io/openhands/agent-server:1.0", ["ghcr.io/openhands/*"]
-    )
-    assert sid == "named-sandbox"
-
-
-def test_resolve_sandbox_id_returns_none_when_name_empty() -> None:
-    labels: dict[str, Any] = {}
-    attrs = {"Name": ""}
-    sid = _resolve_sandbox_id(
-        labels, attrs, "ghcr.io/openhands/agent-server:1.0", ["ghcr.io/openhands/*"]
-    )
-    assert sid is None
 
 
 def test_lifespan_knobs_from_image() -> None:
@@ -659,10 +699,19 @@ async def test_list_sandboxes_enriches_last_accessed_at() -> None:
     )
 
     class _FakeContainers:
-        def list(self, all: bool = False) -> list[Any]:  # noqa: A002
+        def list(
+            self,
+            all: bool = False,  # noqa: A002
+            filters: dict[str, Any] | None = None,
+        ) -> list[Any]:
             return [
                 _FakeContainer(
-                    _container_attrs(status="running", ports={"8000/tcp": [{"HostPort": "32771"}]})
+                    _container_attrs(
+                        status="running",
+                        sandbox_id="sb-1",
+                        config_id="cfg-1",
+                        ports={"8000/tcp": [{"HostPort": "32771"}]},
+                    )
                 )
             ]
 
@@ -694,7 +743,7 @@ class _FakeImages:
 
 
 class _FakeContainerCtrl:
-    """A fake Docker container supporting pause/stop/remove + label mutation."""
+    """A fake Docker container supporting pause/stop/remove."""
 
     def __init__(self, attrs: dict[str, Any]) -> None:
         self.attrs = attrs
@@ -708,10 +757,6 @@ class _FakeContainerCtrl:
     def pause(self) -> None:
         self.paused = True
         self.attrs["State"]["Status"] = "paused"
-        with contextlib.suppress(Exception):
-            self.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_at"] = datetime.now(
-                UTC
-            ).isoformat()
 
     def unpause(self) -> None:
         self.paused = False
@@ -733,8 +778,39 @@ class _FakeContainers:
     def __init__(self, containers: list[_FakeContainerCtrl]) -> None:
         self._containers = {c.attrs["Name"].lstrip("/"): c for c in containers}
 
-    def list(self, all: bool = False) -> list[_FakeContainerCtrl]:  # noqa: A002
-        return list(self._containers.values())
+    def list(
+        self,
+        all: bool = False,  # noqa: A002
+        filters: dict[str, Any] | None = None,
+    ) -> list[_FakeContainerCtrl]:
+        result = list(self._containers.values())
+        if filters and "label" in filters:
+            # Support simple label=value filters and negation (!label).
+            label_filter = filters["label"]
+            if isinstance(label_filter, str):
+                label_filter = [label_filter]
+            for lf in label_filter:
+                if lf.startswith("!"):
+                    key = lf[1:]
+                    result = [
+                        c
+                        for c in result
+                        if key not in (c.attrs.get("Config", {}).get("Labels", {}) or {})
+                    ]
+                elif "=" in lf:
+                    key, val = lf.split("=", 1)
+                    result = [
+                        c
+                        for c in result
+                        if (c.attrs.get("Config", {}).get("Labels", {}) or {}).get(key) == val
+                    ]
+                else:
+                    result = [
+                        c
+                        for c in result
+                        if lf in (c.attrs.get("Config", {}).get("Labels", {}) or {})
+                    ]
+        return result
 
     def get(self, sandbox_id: str) -> _FakeContainerCtrl:
         try:
@@ -784,6 +860,8 @@ async def test_sweep_pauses_idle_active_sandbox() -> None:
     sandbox = _FakeContainerCtrl(
         _container_attrs(
             status="running",
+            sandbox_id="sb-1",
+            config_id="cfg-1",
             image="img:latest",
             ports={"8000/tcp": [{"HostPort": "32771"}]},
         )
@@ -801,7 +879,9 @@ async def test_sweep_pauses_idle_active_sandbox() -> None:
 
 async def test_sweep_skips_active_sandbox_under_idle_threshold() -> None:
     service = DockerSandboxService()
-    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    sandbox = _FakeContainerCtrl(
+        _container_attrs(status="running", sandbox_id="sb-1", config_id="cfg-1", image="img:latest")
+    )
     service._client = _FakeDockerClient(
         images=[_FakeImage(_image_attrs_with_knobs("img:latest", idle_pause_seconds=3600))],
         containers=_FakeContainers([sandbox]),
@@ -818,6 +898,8 @@ async def test_sweep_deletes_paused_sandbox_past_paused_delete() -> None:
     sandbox = _FakeContainerCtrl(
         _container_attrs(
             status="paused",
+            sandbox_id="sb-1",
+            config_id="cfg-1",
             image="img:latest",
             labels={"io.openhands.sandbox.paused_at": paused_at},
         )
@@ -833,7 +915,9 @@ async def test_sweep_deletes_paused_sandbox_past_paused_delete() -> None:
 
 async def test_sweep_deletes_sandbox_past_max_age() -> None:
     service = DockerSandboxService()
-    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    sandbox = _FakeContainerCtrl(
+        _container_attrs(status="running", sandbox_id="sb-1", config_id="cfg-1", image="img:latest")
+    )
     sandbox.attrs["Created"] = (datetime.now(UTC) - timedelta(days=10)).isoformat()
     service._client = _FakeDockerClient(
         images=[_FakeImage(_image_attrs_with_knobs("img:latest", max_age_seconds=60))],
@@ -846,7 +930,9 @@ async def test_sweep_deletes_sandbox_past_max_age() -> None:
 
 async def test_sweep_no_op_when_no_thresholds_set() -> None:
     service = DockerSandboxService()
-    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    sandbox = _FakeContainerCtrl(
+        _container_attrs(status="running", sandbox_id="sb-1", config_id="cfg-1", image="img:latest")
+    )
     service._client = _FakeDockerClient(
         images=[_FakeImage(_image_attrs_with_knobs("img:latest"))],
         containers=_FakeContainers([sandbox]),
@@ -919,33 +1005,31 @@ async def test_lifecycle_loop_runs_one_sweep_then_cancels() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_deactivate_container_stamps_paused_at_label() -> None:
+def test_deactivate_container_pauses_in_pause_mode() -> None:
     service = DockerSandboxService(deactivate_mode="pause")
-    container = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    container = _FakeContainerCtrl(
+        _container_attrs(status="running", image="img:latest", sandbox_id="sb-1", config_id="cfg-1")
+    )
     service._deactivate_container(container, "running")
     assert container.paused
-    assert container.attrs["Config"]["Labels"].get("io.openhands.sandbox.paused_at") is not None
 
 
-def test_deactivate_container_stamps_paused_at_label_in_stop_mode() -> None:
+def test_deactivate_container_stops_in_stop_mode() -> None:
     service = DockerSandboxService(deactivate_mode="stop")
-    container = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    container = _FakeContainerCtrl(
+        _container_attrs(status="running", image="img:latest", sandbox_id="sb-1", config_id="cfg-1")
+    )
     service._deactivate_container(container, "running")
     assert container.stopped
-    assert container.attrs["Config"]["Labels"].get("io.openhands.sandbox.paused_at") is not None
 
 
-def test_activate_container_clears_paused_at_label() -> None:
+def test_activate_container_unpauses() -> None:
     service = DockerSandboxService()
     container = _FakeContainerCtrl(
-        _container_attrs(
-            status="paused",
-            image="img:latest",
-            labels={"io.openhands.sandbox.paused_at": "2024-01-02T03:04:05Z"},
-        )
+        _container_attrs(status="paused", image="img:latest", sandbox_id="sb-1", config_id="cfg-1")
     )
     service._activate_container(container, "paused")
-    assert "io.openhands.sandbox.paused_at" not in (container.attrs["Config"]["Labels"])
+    assert not container.paused
 
 
 def test_container_state_handles_reload_exception() -> None:
@@ -1040,6 +1124,9 @@ class _FakeContainerWithOps:
     def remove(self, force: bool = False) -> None:
         self._removed = True
 
+    def rename(self, name: str) -> None:
+        self.attrs["Name"] = f"/{name}"
+
 
 class _FakeContainersWithOps:
     _generated_name_counter = 0
@@ -1049,8 +1136,38 @@ class _FakeContainersWithOps:
             c.attrs["Name"].lstrip("/"): c for c in containers
         }
 
-    def list(self, all: bool = False) -> list[_FakeContainerWithOps]:  # noqa: A002
-        return list(self._containers.values())
+    def list(
+        self,
+        all: bool = False,  # noqa: A002
+        filters: dict[str, Any] | None = None,
+    ) -> list[_FakeContainerWithOps]:
+        result = list(self._containers.values())
+        if filters and "label" in filters:
+            label_filter = filters["label"]
+            if isinstance(label_filter, str):
+                label_filter = [label_filter]
+            for lf in label_filter:
+                if lf.startswith("!"):
+                    key = lf[1:]
+                    result = [
+                        c
+                        for c in result
+                        if key not in (c.attrs.get("Config", {}).get("Labels", {}) or {})
+                    ]
+                elif "=" in lf:
+                    key, val = lf.split("=", 1)
+                    result = [
+                        c
+                        for c in result
+                        if (c.attrs.get("Config", {}).get("Labels", {}) or {}).get(key) == val
+                    ]
+                else:
+                    result = [
+                        c
+                        for c in result
+                        if lf in (c.attrs.get("Config", {}).get("Labels", {}) or {})
+                    ]
+        return result
 
     def get(self, name: str) -> _FakeContainerWithOps:
         try:
@@ -1095,11 +1212,13 @@ class _FakeSnapshotDockerClient:
 
 def _make_snapshot_service(
     images: list[_FakeImageWithOps],
-    containers: list[tuple[str, str]] | None = None,
+    containers: list[tuple[str, str, str]] | None = None,
 ) -> tuple[DockerSandboxService, _FakeSnapshotDockerClient]:
+    # Each container tuple is (sandbox_id, config_id, image).
     client = _FakeSnapshotDockerClient(images)
-    for cname, image in containers or []:
-        attrs = _container_attrs(name=cname, image=image, sandbox_id=cname)
+    for sid, cid, image in containers or []:
+        cname = _ohe_name(sid, cid)
+        attrs = _container_attrs(name=cname, image=image, sandbox_id=sid, config_id=cid)
         attrs["Config"]["Labels"]["io.openhands.sandbox.sandbox_template_id"] = image
         attrs["HostConfig"]["Binds"] = ["/host:/container:rw"]
         attrs["NetworkSettings"]["Ports"] = {"8000/tcp": [{"HostPort": "32771"}]}
@@ -1111,15 +1230,17 @@ def _make_snapshot_service(
 
 
 async def test_async_list_sandboxes_returns_sandboxes() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a"), ("sb-2", "img-a")])
+    service, _ = _make_snapshot_service(
+        [], [("sb-1", "cfg-1", "img-a"), ("sb-2", "cfg-2", "img-a")]
+    )
     sandboxes = await service._list_sandboxes()
-    assert {sb.id for sb in sandboxes} == {"sb-1", "sb-2"}
+    assert {sb.id for sb in sandboxes} == {"OHE_sb-1_cfg-1", "OHE_sb-2_cfg-2"}
 
 
 async def test_async_get_sandbox_returns_sandbox() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    sandbox = await service._get_sandbox("sb-1")
-    assert sandbox.id == "sb-1"
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
+    sandbox = await service._get_sandbox("OHE_sb-1_cfg-1")
+    assert sandbox.id == "OHE_sb-1_cfg-1"
 
 
 async def test_async_get_sandbox_not_found_raises() -> None:
@@ -1130,34 +1251,43 @@ async def test_async_get_sandbox_not_found_raises() -> None:
 
 async def test_async_create_sandbox_creates_container() -> None:
     service, client = _make_snapshot_service([], [])
-    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
+    sandbox = service._sandbox_from_create(
+        SandboxCreate(sandbox_template_id="img-a", sandbox_config_id="cfg-1")
+    )
     result = await service._create_sandbox(sandbox)
     assert result.id != ""
     assert result.sandbox_template_id == "img-a"
+    assert result.sandbox_config_id == "cfg-1"
     assert result.id in client.containers._containers
 
 
 async def test_async_update_sandbox_activates_paused() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    container = service._client.containers.get("sb-1")
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
+    container = service._client.containers.get("OHE_sb-1_cfg-1")
     container.attrs["State"]["Status"] = "paused"
-    await service._update_sandbox("sb-1", SandboxUpdate(desired_status=SandboxStatus.ACTIVE))
+    await service._update_sandbox(
+        "OHE_sb-1_cfg-1", SandboxUpdate(desired_status=SandboxStatus.ACTIVE)
+    )
     assert container._unpaused
 
 
 async def test_async_update_sandbox_starts_exited() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    container = service._client.containers.get("sb-1")
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
+    container = service._client.containers.get("OHE_sb-1_cfg-1")
     container.attrs["State"]["Status"] = "exited"
-    await service._update_sandbox("sb-1", SandboxUpdate(desired_status=SandboxStatus.ACTIVE))
+    await service._update_sandbox(
+        "OHE_sb-1_cfg-1", SandboxUpdate(desired_status=SandboxStatus.ACTIVE)
+    )
     assert container._started
 
 
 async def test_async_update_sandbox_pauses_running() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    container = service._client.containers.get("sb-1")
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
+    container = service._client.containers.get("OHE_sb-1_cfg-1")
     container.attrs["State"]["Status"] = "running"
-    await service._update_sandbox("sb-1", SandboxUpdate(desired_status=SandboxStatus.INACTIVE))
+    await service._update_sandbox(
+        "OHE_sb-1_cfg-1", SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
+    )
     assert container._paused
 
 
@@ -1168,9 +1298,9 @@ async def test_async_update_sandbox_not_found_raises() -> None:
 
 
 async def test_async_delete_sandbox_removes_container() -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
-    container = service._client.containers.get("sb-1")
-    await service._delete_sandbox("sb-1")
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
+    container = service._client.containers.get("OHE_sb-1_cfg-1")
+    await service._delete_sandbox("OHE_sb-1_cfg-1")
     assert container._removed
 
 
@@ -1283,19 +1413,26 @@ async def test_docker_create_sandbox_restores_snapshot_into_workspace(tmp_path: 
     src_ws.mkdir()
     (src_ws / "hello.txt").write_text("world")
     snapshot_store.create_snapshot(service.snapshot_dir, "snap-1", src_ws)
-    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
+    sandbox = service._sandbox_from_create(
+        SandboxCreate(sandbox_template_id="img-a", sandbox_config_id="cfg-1")
+    )
     result = await service._create_sandbox(sandbox, snapshot_id="snap-1")
     assert result.id != ""
-    assert Path(service.workspace_dir, result.id).is_dir()  # type: ignore[arg-type]
-    assert (Path(service.workspace_dir, result.id) / "hello.txt").read_text() == "world"  # type: ignore[arg-type]
+    # The workspace dir is keyed by the bare sandbox id (UUID), not the full
+    # container name with OHE_ prefix + config_id.
+    bare_id = _strip_ohe_prefix(result.id)
+    assert Path(service.workspace_dir, bare_id).is_dir()  # type: ignore[arg-type]
+    assert (Path(service.workspace_dir, bare_id) / "hello.txt").read_text() == "world"  # type: ignore[arg-type]
 
 
 async def test_docker_update_sandbox_stop_mode_stops_container(tmp_path: Path) -> None:
-    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
+    service, _ = _make_snapshot_service([], [("sb-1", "cfg-1", "img-a")])
     service.deactivate_mode = "stop"
-    container = service._client.containers.get("sb-1")
+    container = service._client.containers.get("OHE_sb-1_cfg-1")
     container.attrs["State"]["Status"] = "running"
-    await service._update_sandbox("sb-1", SandboxUpdate(desired_status=SandboxStatus.INACTIVE))
+    await service._update_sandbox(
+        "OHE_sb-1_cfg-1", SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
+    )
     assert container._stopped
 
 
@@ -1304,13 +1441,16 @@ async def test_docker_delete_sandbox_cleans_workspace_dir(tmp_path: Path) -> Non
         workspace_dir=str(tmp_path / "ws"), snapshot_dir=str(tmp_path / "snaps")
     )
     service._client = _FakeSnapshotDockerClient([])
-    sb_dir = Path(service.workspace_dir, "sb-1")  # type: ignore[arg-type]
+    sid = "sb-1"
+    cid = "cfg-1"
+    cname = _ohe_name(sid, cid)
+    sb_dir = Path(service.workspace_dir, sid)  # type: ignore[arg-type]
     sb_dir.mkdir(parents=True)
     # Seed a container so delete finds it.
-    attrs = _container_attrs(name="sb-1", image="img-a", sandbox_id="sb-1")
+    attrs = _container_attrs(name=cname, image="img-a", sandbox_id=sid, config_id=cid)
     attrs["Config"]["Labels"]["io.openhands.sandbox.sandbox_template_id"] = "img-a"
-    service._client.containers._containers["sb-1"] = _FakeContainerWithOps(attrs)
-    await service._delete_sandbox("sb-1")
+    service._client.containers._containers[cname] = _FakeContainerWithOps(attrs)
+    await service._delete_sandbox(cname)
     assert not sb_dir.exists()
 
 
@@ -1428,3 +1568,206 @@ def test_get_sandbox_service_caches_instance(monkeypatch: pytest.MonkeyPatch) ->
     first = config.get_sandbox_service()
     second = config.get_sandbox_service()
     assert first is second
+
+
+# --------------------------------------------------------------------------- #
+# Warm pool (Docker).
+# --------------------------------------------------------------------------- #
+
+
+class _FakeContainerWarm:
+    """Fake container with rename/pause/unpause/remove + attrs."""
+
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+        self._renamed: str | None = None
+        self._paused = False
+        self._unpaused = False
+        self._removed = False
+
+    def reload(self) -> None:
+        pass
+
+    def rename(self, name: str) -> None:
+        self._renamed = name
+        self.attrs["Name"] = f"/{name}"
+
+    def pause(self) -> None:
+        self._paused = True
+        self.attrs["State"]["Status"] = "paused"
+
+    def unpause(self) -> None:
+        self._unpaused = True
+        self.attrs["State"]["Status"] = "running"
+
+    def remove(self, force: bool = False) -> None:
+        self._removed = True
+
+
+class _FakeContainersWarm:
+    def __init__(self, containers: list[_FakeContainerWarm] | None = None) -> None:
+        self._containers: dict[str, _FakeContainerWarm] = {
+            c.attrs["Name"].lstrip("/"): c for c in containers or []
+        }
+        self._created: list[_FakeContainerWarm] = []
+
+    def list(
+        self,
+        all: bool = False,  # noqa: A002
+        filters: dict[str, Any] | None = None,
+    ) -> list[_FakeContainerWarm]:
+        result = list(self._containers.values())
+        if filters and "label" in filters:
+            label_filter = filters["label"]
+            if isinstance(label_filter, str):
+                label_filter = [label_filter]
+            for lf in label_filter:
+                if "=" in lf:
+                    key, val = lf.split("=", 1)
+                    result = [
+                        c
+                        for c in result
+                        if (c.attrs.get("Config", {}).get("Labels", {}) or {}).get(key) == val
+                    ]
+        return result
+
+    def get(self, name: str) -> _FakeContainerWarm:
+        try:
+            return self._containers[name]
+        except KeyError:
+            raise NotFound(name) from None
+
+    def run(
+        self,
+        image: str,
+        name: str | None = None,
+        detach: bool = False,
+        ports: dict[str, Any] | None = None,
+        labels: dict[str, str] | None = None,
+        init: bool = False,
+        volumes: list[str] | None = None,
+        working_dir: str | None = None,
+        extra_hosts: dict[str, str] | None = None,
+        devices: list[str] | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> _FakeContainerWarm:
+        attrs = {
+            "Name": f"/{name}",
+            "Created": datetime.now(UTC).isoformat(),
+            "State": {"Status": "running", "Error": None},
+            "Config": {"Image": image, "Labels": labels or {}},
+            "HostConfig": {"Binds": volumes or []},
+            "NetworkSettings": {"Ports": ports or {}},
+        }
+        container = _FakeContainerWarm(attrs)
+        self._containers[name] = container
+        self._created.append(container)
+        return container
+
+
+class _FakeDockerClientWarm:
+    def __init__(self, containers: _FakeContainersWarm) -> None:
+        self.containers = containers
+        self.images = _FakeImages([])
+
+
+def _make_warm_service(
+    containers: list[_FakeContainerWarm] | None = None,
+) -> tuple[DockerSandboxService, _FakeContainersWarm]:
+    fc = _FakeContainersWarm(containers or [])
+    service = DockerSandboxService()
+    service._client = _FakeDockerClientWarm(fc)
+    return service, fc
+
+
+def _warm_attrs(
+    sid: str, template_id: str = "img:latest", status: str = "paused"
+) -> dict[str, Any]:
+    return {
+        "Name": f"/OHE_{sid}",
+        "Created": "2024-01-02T03:04:05Z",
+        "State": {"Status": status, "Error": None},
+        "Config": {
+            "Image": template_id,
+            "Labels": {_TAG_SANDBOX_TEMPLATE_ID: template_id},
+        },
+        "HostConfig": {"Binds": []},
+        "NetworkSettings": {"Ports": {}},
+    }
+
+
+def test_sync_create_warm_creates_paused_container() -> None:
+    service, fc = _make_warm_service()
+    service._sync_create_warm("img:latest")
+    assert len(fc._created) == 1
+    c = fc._created[0]
+    assert c._paused
+    parsed = _parse_ohe_name(c.attrs["Name"].lstrip("/"))
+    assert parsed is not None and parsed[1] is None
+
+
+def test_sync_count_warm_counts_unclaimed() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    c2 = _FakeContainerWarm(_warm_attrs("sb-2"))
+    c3 = _FakeContainerWarm(_warm_attrs("sb-3", status="running"))
+    c3.attrs["Name"] = "/OHE_sb-3_cfg-1"
+    service, _ = _make_warm_service([c1, c2, c3])
+    assert service._sync_count_warm("img:latest") == 2
+
+
+def test_sync_count_warm_ignores_foreign() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    c2 = _FakeContainerWarm(
+        {
+            "Name": "/redis",
+            "Created": "2024-01-02T03:04:05Z",
+            "State": {"Status": "paused", "Error": None},
+            "Config": {
+                "Image": "redis:latest",
+                "Labels": {_TAG_SANDBOX_TEMPLATE_ID: "img:latest"},
+            },
+            "HostConfig": {"Binds": []},
+            "NetworkSettings": {"Ports": {}},
+        }
+    )
+    service, _ = _make_warm_service([c1, c2])
+    assert service._sync_count_warm("img:latest") == 1
+
+
+def test_sync_claim_warm_renames_and_unpauses() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    service, _ = _make_warm_service([c1])
+    sb = service._sync_claim_warm_sandbox("img:latest", "cfg-1")
+    assert sb is not None
+    assert c1._renamed == "OHE_sb-1_cfg-1"
+    assert c1._unpaused
+    assert sb.id == "OHE_sb-1_cfg-1"
+    assert sb.sandbox_config_id == "cfg-1"
+
+
+def test_sync_claim_warm_returns_none_when_empty() -> None:
+    service, _ = _make_warm_service([])
+    assert service._sync_claim_warm_sandbox("img:latest", "cfg-1") is None
+
+
+def test_sync_claim_warm_skips_already_claimed() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    c1.attrs["Name"] = "/OHE_sb-1_cfg-1"
+    service, _ = _make_warm_service([c1])
+    assert service._sync_claim_warm_sandbox("img:latest", "cfg-2") is None
+
+
+def test_sync_delete_warm_removes_one_unclaimed() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    c2 = _FakeContainerWarm(_warm_attrs("sb-2"))
+    service, _ = _make_warm_service([c1, c2])
+    service._sync_delete_warm("img:latest")
+    assert sum(1 for c in [c1, c2] if c._removed) == 1
+
+
+def test_sync_delete_warm_skips_claimed() -> None:
+    c1 = _FakeContainerWarm(_warm_attrs("sb-1"))
+    c1.attrs["Name"] = "/OHE_sb-1_cfg-1"
+    service, _ = _make_warm_service([c1])
+    service._sync_delete_warm("img:latest")
+    assert not c1._removed

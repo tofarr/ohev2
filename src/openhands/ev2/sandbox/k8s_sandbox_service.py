@@ -81,6 +81,8 @@ logger = logging.getLogger(__name__)
 # (it may contain ``/``, ``:``, and uppercase characters).
 _LABEL_TEMPLATE = "io.openhands.sandbox/template"
 _LABEL_SANDBOX_ID = "io.openhands.sandbox/sandbox-id"
+_LABEL_WARM = "io.openhands.sandbox/warm"
+_LABEL_SANDBOX_CONFIG_ID = "io.openhands.sandbox/sandbox-config-id"
 _ANNOT_TEMPLATE_ID = "io.openhands.sandbox/template-id"
 
 # Annotation carrying the wall-clock time a sandbox was paused by the lifecycle
@@ -299,9 +301,11 @@ class K8sSandboxService(SandboxService):
 
     def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
         # ``id`` is assigned by the provider during ``_create_sandbox``; the
-        # pre-persistence model carries only the template id for scope checks.
+        # pre-persistence model carries only the template id and config id for
+        # scope checks.
         return K8sSandbox(
             sandbox_template_id=payload.sandbox_template_id,
+            sandbox_config_id=payload.sandbox_config_id,
             status=SandboxStatus.INACTIVE,
             desired_status=SandboxStatus.INACTIVE,
             snapshot_mode=self.snapshot_mode,
@@ -325,6 +329,24 @@ class K8sSandboxService(SandboxService):
 
     async def _delete_sandbox(self, sandbox_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_sandbox, sandbox_id)
+
+    # ------------------------------------------------------------------ #
+    # Warm sandbox pool hooks (overridden from the ABC).
+    # ------------------------------------------------------------------ #
+    async def _claim_warm_sandbox(self, template_id: str, *, config_id: str) -> Sandbox | None:
+        return cast(
+            Sandbox | None,
+            await asyncio.to_thread(self._sync_claim_warm_sandbox, template_id, config_id),
+        )
+
+    async def _count_warm(self, template_id: str) -> int:
+        return cast(int, await asyncio.to_thread(self._sync_count_warm, template_id))
+
+    async def _create_warm(self, template_id: str) -> None:
+        await asyncio.to_thread(self._sync_create_warm, template_id)
+
+    async def _delete_warm(self, template_id: str) -> None:
+        await asyncio.to_thread(self._sync_delete_warm, template_id)
 
     # ------------------------------------------------------------------ #
     # Snapshot artifact hooks. A K8s snapshot is a gzip tarball of the sandbox
@@ -556,9 +578,13 @@ class K8sSandboxService(SandboxService):
     # Synchronous Deployment / PVC / Service calls.
     # ------------------------------------------------------------------ #
     def _sync_list_sandboxes(self) -> list[K8sSandbox]:
+        # List Deployments with the sandbox-id label, excluding warm ones
+        # (warm Deployments carry the `_LABEL_WARM` label and are not claimed
+        # sandboxes). A label selector with the sandbox-id label but without
+        # the warm label filters them out server-side.
         dep_list = self._apps_api.list_namespaced_deployment(
             namespace=self.namespace,
-            label_selector=f"{_LABEL_SANDBOX_ID}",
+            label_selector=f"{_LABEL_SANDBOX_ID},!{_LABEL_WARM}",
         )
         return [
             sandbox
@@ -598,6 +624,7 @@ class K8sSandboxService(SandboxService):
             image_pull_policy=self.image_pull_policy,
             exposed_ports=self.exposed_ports,
             replicas=1,
+            config_id=sandbox.sandbox_config_id,
         )
         return sandbox_id
 
@@ -748,6 +775,7 @@ class K8sSandboxService(SandboxService):
         image_pull_policy: str,
         exposed_ports: list[ExposedPort],
         replicas: int,
+        config_id: str | None = None,
     ) -> None:
         container = self._build_container(template, image_pull_policy, exposed_ports)
         pod_template = k8s_client.V1PodTemplateSpec(
@@ -765,7 +793,7 @@ class K8sSandboxService(SandboxService):
             ),
         )
         deployment = k8s_client.V1Deployment(
-            metadata=self._deployment_meta(sandbox_id, namespace, template.id, replicas),
+            metadata=self._deployment_meta(sandbox_id, namespace, template.id, replicas, config_id),
             spec=k8s_client.V1DeploymentSpec(
                 replicas=replicas,
                 selector=k8s_client.V1LabelSelector(match_labels={_LABEL_SANDBOX_ID: sandbox_id}),
@@ -823,15 +851,22 @@ class K8sSandboxService(SandboxService):
 
     @staticmethod
     def _deployment_meta(
-        sandbox_id: str, namespace: str, template_id: str, replicas: int
+        sandbox_id: str,
+        namespace: str,
+        template_id: str,
+        replicas: int,
+        config_id: str | None = None,
     ) -> k8s_client.V1ObjectMeta:
         annotations: dict[str, str] = {_ANNOT_TEMPLATE_ID: template_id}
         if replicas == 0:
             annotations[_ANNOT_PAUSED_AT] = _iso_utc_now()
+        labels: dict[str, str] = {_LABEL_SANDBOX_ID: sandbox_id}
+        if config_id is not None:
+            labels[_LABEL_SANDBOX_CONFIG_ID] = config_id
         return k8s_client.V1ObjectMeta(
             name=sandbox_id,
             namespace=namespace,
-            labels={_LABEL_SANDBOX_ID: sandbox_id},
+            labels=labels,
             annotations=annotations,
         )
 
@@ -898,6 +933,153 @@ class K8sSandboxService(SandboxService):
             self._core_api.delete_namespaced_persistent_volume_claim(
                 name=pvc_name, namespace=self.namespace
             )
+
+    # ------------------------------------------------------------------ #
+    # Synchronous warm-pool operations (offloaded from the event loop).
+    # K8s labels are mutable and ``resourceVersion`` gives a true CAS for the
+    # claim, so no in-process lock is needed (multi-process safe).
+    # ------------------------------------------------------------------ #
+    def _sync_create_warm(self, template_id: str) -> None:
+        """Create a warm Deployment (running, replicas=1, marked warm)."""
+        template = self._sync_get_template(template_id)
+        sandbox_id = _generate_sandbox_name()
+        pvc_name = f"{sandbox_id}-data"
+        self._create_pvc(pvc_name, self.namespace)
+        self._create_service(sandbox_id, self.namespace, self.exposed_ports, self.service_type)
+        self._create_warm_deployment(
+            sandbox_id=sandbox_id,
+            template=template,
+            pvc_name=pvc_name,
+            namespace=self.namespace,
+            image_pull_policy=self.image_pull_policy,
+            exposed_ports=self.exposed_ports,
+        )
+
+    def _create_warm_deployment(
+        self,
+        *,
+        sandbox_id: str,
+        template: _K8sTemplateSpec,
+        pvc_name: str,
+        namespace: str,
+        image_pull_policy: str,
+        exposed_ports: list[ExposedPort],
+    ) -> None:
+        """Create a Deployment marked warm (no config_id label)."""
+        container = self._build_container(template, image_pull_policy, exposed_ports)
+        pod_template = k8s_client.V1PodTemplateSpec(
+            metadata=k8s_client.V1ObjectMeta(
+                labels={_LABEL_SANDBOX_ID: sandbox_id, _LABEL_WARM: "true"}
+            ),
+            spec=k8s_client.V1PodSpec(
+                containers=[container],
+                volumes=[
+                    k8s_client.V1Volume(
+                        name="workspace",
+                        persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=pvc_name
+                        ),
+                    )
+                ],
+            ),
+        )
+        annotations: dict[str, str] = {_ANNOT_TEMPLATE_ID: template.id}
+        deployment = k8s_client.V1Deployment(
+            metadata=k8s_client.V1ObjectMeta(
+                name=sandbox_id,
+                namespace=namespace,
+                labels={_LABEL_SANDBOX_ID: sandbox_id, _LABEL_WARM: "true"},
+                annotations=annotations,
+            ),
+            spec=k8s_client.V1DeploymentSpec(
+                replicas=1,
+                selector=k8s_client.V1LabelSelector(match_labels={_LABEL_SANDBOX_ID: sandbox_id}),
+                template=pod_template,
+            ),
+        )
+        try:
+            self._apps_api.create_namespaced_deployment(namespace=namespace, body=deployment)
+        except k8s_exc.ApiException as exc:
+            if exc.status == 409:
+                raise SandboxConflictError(sandbox_id) from None
+            raise
+
+    def _sync_claim_warm_sandbox(self, template_id: str, config_id: str) -> K8sSandbox | None:
+        """Claim a warm Deployment via ``resourceVersion``-conditional PATCH.
+
+        Lists warm Deployments for the template, reads the oldest to capture its
+        ``resourceVersion``, then PATCHes (strategic-merge) to remove ``warm``
+        and add ``sandbox-config-id``. On 409 Conflict (lost the race) retries
+        with the next candidate. Returns the claimed sandbox or ``None``.
+        """
+        candidates = self._list_warm_deployments(template_id)
+        for dep in candidates:
+            sandbox_id = (dep.metadata.labels or {}).get(_LABEL_SANDBOX_ID)
+            if not sandbox_id:
+                continue
+            resource_version = dep.metadata.resource_version
+            # Strategic-merge patch: remove warm label, add config_id label.
+            patch_body = {
+                "metadata": {
+                    "resourceVersion": resource_version,
+                    "labels": {
+                        _LABEL_WARM: None,
+                        _LABEL_SANDBOX_CONFIG_ID: config_id,
+                    },
+                }
+            }
+            try:
+                self._apps_api.patch_namespaced_deployment(
+                    name=sandbox_id,
+                    namespace=self.namespace,
+                    body=patch_body,
+                )
+            except k8s_exc.ApiException as exc:
+                if exc.status == 409:
+                    continue  # lost the race — try the next candidate
+                raise
+            return self._sync_get_sandbox(sandbox_id)
+        return None
+
+    def _sync_count_warm(self, template_id: str) -> int:
+        """Count warm Deployments for *template_id*."""
+        return len(self._list_warm_deployments(template_id))
+
+    def _sync_delete_warm(self, template_id: str) -> None:
+        """Delete one warm Deployment + its PVC + Service."""
+        candidates = self._list_warm_deployments(template_id)
+        if not candidates:
+            return
+        dep = candidates[0]
+        sandbox_id = (dep.metadata.labels or {}).get(_LABEL_SANDBOX_ID)
+        if not sandbox_id:
+            return
+        with contextlib.suppress(k8s_exc.ApiException):
+            self._apps_api.delete_namespaced_deployment(name=sandbox_id, namespace=self.namespace)
+        with contextlib.suppress(k8s_exc.ApiException):
+            self._core_api.delete_namespaced_service(name=sandbox_id, namespace=self.namespace)
+        pvc_name = f"{sandbox_id}-data"
+        with contextlib.suppress(k8s_exc.ApiException):
+            self._core_api.delete_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+
+    def _list_warm_deployments(self, template_id: str) -> list[Any]:
+        """List warm Deployments for *template_id*, oldest first."""
+        # The template_id is stored as an annotation, not a label (image refs
+        # are not valid label values), so we filter by the warm label and then
+        # match the annotation client-side.
+        dep_list = self._apps_api.list_namespaced_deployment(
+            namespace=self.namespace,
+            label_selector=f"{_LABEL_WARM}=true",
+        )
+        matched = [dep for dep in dep_list.items if _deployment_template_id(dep) == template_id]
+        matched.sort(
+            key=lambda d: _parse_created(
+                (d.metadata.creation_timestamp or "") if d.metadata else ""
+            )
+        )
+        return matched
 
     # ------------------------------------------------------------------ #
     # Synchronous snapshot store calls (offloaded from the event loop).
@@ -1044,12 +1226,17 @@ def _sandbox_from_deployment(
 ) -> K8sSandbox | None:
     """Build a :class:`K8sSandbox` from a Deployment, or ``None``.
 
-    Returns ``None`` when the Deployment does not carry the sandbox-id label.
+    Returns ``None`` when the Deployment does not carry the sandbox-id label or
+    carries the warm label (warm Deployments are excluded from the public
+    surface).
     """
     labels = (deployment.metadata.labels or {}) if deployment.metadata else {}
     sandbox_id = labels.get(_LABEL_SANDBOX_ID)
     if not sandbox_id:
         return None
+    if labels.get(_LABEL_WARM) == "true":
+        return None  # warm — not a claimed sandbox
+    config_id = labels.get(_LABEL_SANDBOX_CONFIG_ID)
     annotations = (deployment.metadata.annotations or {}) if deployment.metadata else {}
     template_id_raw = annotations.get(_ANNOT_TEMPLATE_ID) or ""
     spec = deployment.spec or {}
@@ -1058,6 +1245,7 @@ def _sandbox_from_deployment(
     return K8sSandbox(
         id=str(sandbox_id),
         sandbox_template_id=template_id_raw,
+        sandbox_config_id=config_id,
         status=_deployment_status_to_sandbox_status(status, replicas),
         desired_status=_desired_from_replicas(replicas),
         snapshot_mode=snapshot_mode,
@@ -1070,6 +1258,12 @@ def _sandbox_from_deployment(
         pvc_name=f"{sandbox_id}-data",
         volume_mounts=_volume_mounts_from_deployment(spec),
     )
+
+
+def _deployment_template_id(deployment: Any) -> str:
+    """Read the template-id annotation from a Deployment, or empty string."""
+    annotations = (deployment.metadata.annotations or {}) if deployment.metadata else {}
+    return annotations.get(_ANNOT_TEMPLATE_ID) or ""
 
 
 def _deployment_status_to_sandbox_status(status: Any, replicas: int | None) -> SandboxStatus:

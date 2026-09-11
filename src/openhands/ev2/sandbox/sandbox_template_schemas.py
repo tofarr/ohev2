@@ -42,6 +42,7 @@ class SandboxTemplateCreate(BaseModel):
     working_dir: str = Field(default="/home/openhands", min_length=1, max_length=1024)
     snapshot_dirs: list[str] = Field(default_factory=list)
     snapshot_on_deactivate: bool = False
+    num_warm: int = Field(default=0, ge=0)
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -72,6 +73,7 @@ class SandboxTemplateUpdate(BaseModel):
     working_dir: str | None = Field(default=None, min_length=1, max_length=1024)
     snapshot_dirs: list[str] | None = None
     snapshot_on_deactivate: bool | None = None
+    num_warm: int | None = Field(default=None, ge=0)
     meta: dict[str, Any] | None = None
 
     @model_validator(mode="after")
@@ -100,6 +102,7 @@ class SandboxTemplateRead(BaseModel):
     working_dir: str
     snapshot_dirs: list[str]
     snapshot_on_deactivate: bool
+    num_warm: int
     meta: dict[str, Any]
     created_at: datetime
     updated_at: datetime

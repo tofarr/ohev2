@@ -221,6 +221,33 @@ async def _acl_prune_loop() -> None:
     await _background_sweep(interval, "acl prune", _sweep_acl_prune)
 
 
+async def _sweep_warm_sandboxes() -> str | None:
+    """Reconcile the warm sandbox pool to per-template num_warm targets."""
+    from sqlalchemy import select
+
+    from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(SandboxTemplate.id, SandboxTemplate.num_warm).where(SandboxTemplate.num_warm > 0)
+        )
+        targets = {str(row.id): row.num_warm for row in result.all()}
+    if not targets:
+        return None
+    sandbox_service = get_config().get_sandbox_service()
+    return await sandbox_service.refresh_warm_sandboxes(targets)
+
+
+async def _warm_sandbox_loop() -> None:
+    """Background sweep that reconciles the warm sandbox pool."""
+    cfg = get_config()
+    interval = cfg.sandbox_warm_refresh_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "sandbox warm refresh", _sweep_warm_sandboxes)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
@@ -236,6 +263,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_mcp_usage_partition_loop(), name="mcp-usage-partition"),
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
         asyncio.create_task(_acl_prune_loop(), name="acl-prune"),
+        asyncio.create_task(_warm_sandbox_loop(), name="sandbox-warm-refresh"),
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()

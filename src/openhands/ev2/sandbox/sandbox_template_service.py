@@ -105,6 +105,7 @@ class SandboxTemplateService:
             working_dir=template.working_dir,
             snapshot_dirs=template.snapshot_dirs,
             snapshot_on_deactivate=template.snapshot_on_deactivate,
+            num_warm=template.num_warm,
             meta=template.meta,
             created_at=template.created_at,
             updated_at=template.updated_at,
@@ -129,6 +130,7 @@ class SandboxTemplateService:
             working_dir=payload.working_dir,
             snapshot_dirs=payload.snapshot_dirs,
             snapshot_on_deactivate=payload.snapshot_on_deactivate,
+            num_warm=payload.num_warm,
             meta=payload.meta,
         )
         if not self._perm_filter.matches(template):
@@ -216,6 +218,8 @@ class SandboxTemplateService:
             template.snapshot_dirs = payload.snapshot_dirs
         if "snapshot_on_deactivate" in fields and payload.snapshot_on_deactivate is not None:
             template.snapshot_on_deactivate = payload.snapshot_on_deactivate
+        if "num_warm" in fields and payload.num_warm is not None:
+            template.num_warm = payload.num_warm
         if "meta" in fields and payload.meta is not None:
             template.meta = payload.meta
         await self._session.flush()

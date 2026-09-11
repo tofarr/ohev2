@@ -40,6 +40,7 @@ module sandbox {
     providerKind: ProviderKind,
     sandboxId: str,
     state: ComputeState,
+    warm: bool,
   }
 
   type Snapshot = {
@@ -118,7 +119,7 @@ module sandbox {
       else
         s),
     states' = states.set(id, Active),
-    computes' = computes.union(Set({ id: computeId, providerKind: providerKind, sandboxId: id, state: Serving })),
+          computes' = computes.union(Set({ id: computeId, providerKind: providerKind, sandboxId: id, state: Serving, warm: false })),
     snapshots' = snapshots,
     true
   }
@@ -140,7 +141,7 @@ module sandbox {
     sandboxes.exists(s => s.id == id and s.currentComputeId != ""),
     computes' = computes.map(c =>
       if (sandboxes.exists(s => s.id == id and s.currentComputeId == c.id))
-        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Released }
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Released, warm: c.warm }
       else
         c),
     sandboxes' = sandboxes.map(s =>
@@ -186,7 +187,7 @@ module sandbox {
     ),
     computes' = computes.map(c =>
       if (c.sandboxId == id)
-        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted, warm: c.warm }
       else
         c),
     snapshots' = snapshots,
@@ -289,7 +290,7 @@ module sandbox {
     ),
     computes' = computes.map(c =>
       if (c.sandboxId == id)
-        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted, warm: c.warm }
       else
         c),
     snapshots' = snapshots,
@@ -308,9 +309,73 @@ module sandbox {
     ),
     computes' = computes.map(c =>
       if (c.sandboxId == id)
-        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted }
+        { id: c.id, providerKind: c.providerKind, sandboxId: "", state: Deleted, warm: c.warm }
       else
         c),
+    snapshots' = snapshots,
+    true
+  }
+
+  // Create a warm compute for a template (pre-provisioned, not yet claimed).
+  // The compute runs with `warm=true` and an empty `sandboxId` (no sandbox
+  // owns it yet). `refreshWarm` creates/deletes warm computes to maintain the
+  // per-template target.
+  action createWarm(computeId: str, providerKind: ProviderKind): bool = all {
+    noCompute(computeId),
+    computes' = computes.union(Set({ id: computeId, providerKind: providerKind,
+      sandboxId: "", state: Warming, warm: true })),
+    sandboxes' = sandboxes,
+    states' = states,
+    snapshots' = snapshots,
+    true
+  }
+
+  // Claim a warm compute for a sandbox: atomically transition the compute
+  // from warm to claimed (warm=false, sandboxId set, state=Serving). This
+  // replaces the cold-create `finishActivate` path when a warm compute is
+  // available. The sandbox must be Inactive with no current compute, and the
+  // compute must be warm with no owner.
+  action claimWarm(id: str, computeId: str): bool = all {
+    states.keys().contains(id),
+    states.get(id) == Inactive or states.get(id) == Activating,
+    sandboxes.exists(s => s.id == id and s.currentComputeId == ""),
+    computes.exists(c => c.id == computeId and c.warm and c.sandboxId == ""),
+    sandboxes' = sandboxes.map(s =>
+      if (s.id == id)
+        { id: s.id, owner: s.owner, providerKind: s.providerKind,
+          filesystemId: s.filesystemId, currentComputeId: computeId,
+          currentSnapshotId: s.currentSnapshotId,
+          lastAccessedAt: s.lastAccessedAt, pausedAt: Absent }
+      else
+        s),
+    states' = states.set(id, Active),
+    computes' = computes.map(c =>
+      if (c.id == computeId)
+        { id: c.id, providerKind: c.providerKind, sandboxId: id, state: Serving, warm: false }
+      else
+        c),
+    snapshots' = snapshots,
+    true
+  }
+
+  // Refresh the warm pool to numWarm for a template: create or delete warm
+  // computes until the count matches. This is a simplified single-step model;
+  // the real implementation creates/deletes one at a time.
+  action refreshWarm(computeId: str, providerKind: ProviderKind): bool = all {
+    noCompute(computeId),
+    computes' = computes.union(Set({ id: computeId, providerKind: providerKind,
+      sandboxId: "", state: Warming, warm: true })),
+    sandboxes' = sandboxes,
+    states' = states,
+    snapshots' = snapshots,
+    true
+  }
+
+  action deleteWarm(computeId: str): bool = all {
+    computes.exists(c => c.id == computeId and c.warm),
+    computes' = computes.filter(c => c.id != computeId),
+    sandboxes' = sandboxes,
+    states' = states,
     snapshots' = snapshots,
     true
   }
@@ -356,6 +421,22 @@ module sandbox {
   val pausedAtConsistent: bool =
     sandboxes.forall(s =>
       states.get(s.id) == Active implies s.pausedAt == Absent)
+
+  // A warm compute is not owned by any sandbox (sandboxId is empty).
+  val warmComputeUnowned: bool =
+    computes.forall(c => c.warm implies c.sandboxId == "")
+
+  // A claimed (non-warm) compute attached to a sandbox must be Serving.
+  val claimedComputeServing: bool =
+    computes.forall(c =>
+      not(c.warm) and c.sandboxId != "" implies
+        c.state == Serving)
+
+  // Warm computes are not subject to lifecycle sweeps (only sandboxes with
+  // owners are swept). This invariant is expressed by the sweep actions
+  // operating on sandbox ids, not compute ids.
+  val warmNotSwept: bool =
+    computes.forall(c => c.warm implies c.state == Warming)
 
   run createStartsInactive = {
     init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
@@ -485,6 +566,61 @@ module sandbox {
         assert(states.get("sb1") == Deactivating),
         assert(sandboxes.exists(s => s.id == "sb1" and s.pausedAt == Present(200))),
         assert(pausedAtConsistent),
+        noop
+      })
+  }
+
+  run claimWarmServesSandbox = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
+      .then(createWarm("c1", Docker))
+      .then(all {
+        assert(computes.exists(c => c.id == "c1" and c.warm and c.sandboxId == "")),
+        assert(warmComputeUnowned),
+        noop
+      })
+      .then(claimWarm("sb1", "c1"))
+      .then(all {
+        assert(states.get("sb1") == Active),
+        assert(sandboxes.exists(s => s.id == "sb1" and s.currentComputeId == "c1")),
+        assert(computes.exists(c => c.id == "c1" and not(c.warm) and c.sandboxId == "sb1" and c.state == Serving)),
+        assert(warmComputeUnowned),
+        assert(claimedComputeServing),
+        assert(activeHasServingCompute),
+        noop
+      })
+  }
+
+  run refreshMaintainsWarmCount = {
+    init.then(createWarm("c1", Docker))
+      .then(createWarm("c2", Docker))
+      .then(all {
+        assert(warmComputeUnowned),
+        assert(computes.filter(c => c.warm).size() == 2),
+        noop
+      })
+      .then(deleteWarm("c1"))
+      .then(all {
+        assert(computes.filter(c => c.warm).size() == 1),
+        assert(warmComputeUnowned),
+        noop
+      })
+  }
+
+  run snapshotBypassesWarm = {
+    init.then(create({ id: "sb1", owner: "u1", providerKind: Docker,
+      filesystemId: "fs1", currentComputeId: "", currentSnapshotId: "", lastAccessedAt: Absent, pausedAt: Absent }))
+      .then(beginSnapshot("sb1", { id: "sn1", filesystemId: "fs1", storageKind: TarballStore,
+        archivePath: "/snapshots/sn1.tar.gz", state: Ready }))
+      .then(finishSnapshot("sb1", "sn1"))
+      .then(createWarm("c1", Docker))
+      .then(createFromSnapshot("sb2", "u2", Kubernetes, "fs1", "sn1"))
+      .then(all {
+        // createFromSnapshot does NOT consume the warm compute "c1";
+        // the warm compute remains warm and unowned.
+        assert(sandboxExists("sb2")),
+        assert(computes.exists(c => c.id == "c1" and c.warm and c.sandboxId == "")),
+        assert(warmComputeUnowned),
         noop
       })
   }

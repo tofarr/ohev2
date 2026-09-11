@@ -1178,6 +1178,7 @@ def upgrade() -> None:
         sa.Column("working_dir", sa.String(length=1024), nullable=False),
         sa.Column("snapshot_dirs", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("snapshot_on_deactivate", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column("num_warm", sa.Integer(), server_default="0", nullable=False),
         sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column(
             "created_at",

@@ -19,8 +19,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
-import secrets
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -86,16 +84,25 @@ DEFAULT_EXPOSED_PORTS: tuple[ExposedPort, ...] = (
     ),
 )
 
-# Docker image label recording the sandbox id a container belongs to. Set on
-# container creation so a container can be matched back to its sandbox even
-# after a restart.
-_TAG_SANDBOX_ID = "io.openhands.sandbox.sandbox_id"
-# Label recording the template id (image name) the container was built from.
+# Docker image labels. ``_TAG_SANDBOX_TEMPLATE_ID`` is the only label used;
+# it is set at container creation (immutable — that's fine for read-only
+# selection by the warm pool). Container labels are otherwise immutable after
+# creation, so the sandbox id and config id are encoded in the container
+# *name* (the OHE_ convention) rather than in labels.
 _TAG_SANDBOX_TEMPLATE_ID = "io.openhands.sandbox.sandbox_template_id"
 # Label recording the wall-clock time a sandbox was paused by the lifecycle
 # sweep, so ``paused_delete_seconds`` can be enforced across restarts. Cleared
 # whenever the sandbox is resumed.
 _TAG_PAUSED_AT = "io.openhands.sandbox.paused_at"
+
+# Container-name prefix marking a container as owned by the sandbox service.
+# Names follow the convention:
+#   Warm:    OHE_<sandbox_id>            (1 payload segment; no config yet)
+#   Claimed: OHE_<sandbox_id>_<config_id> (2 payload segments)
+# Both ids are UUIDs (dashes, no underscores), so splitting on ``_`` is
+# unambiguous. Any container whose name does not start with OHE_ is foreign and
+# is left entirely alone (not listed, claimed, swept, or deleted).
+_OHE_PREFIX = "OHE_"
 
 
 class DockerSandboxService(SandboxService):
@@ -228,6 +235,7 @@ class DockerSandboxService(SandboxService):
         self._http: httpx.AsyncClient | None = None
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._pull_tasks: set[asyncio.Task[None]] = set()
+        self._warm_claim_lock = asyncio.Lock()
 
     async def __aenter__(self) -> DockerSandboxService:
         await self.refresh_templates()
@@ -331,9 +339,11 @@ class DockerSandboxService(SandboxService):
 
     def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
         # ``id`` is assigned by the provider during ``_create_sandbox``; the
-        # pre-persistence model carries only the template id for scope checks.
+        # pre-persistence model carries only the template id and config id for
+        # scope checks.
         return DockerSandbox(
             sandbox_template_id=payload.sandbox_template_id,
+            sandbox_config_id=payload.sandbox_config_id,
             status=SandboxStatus.INACTIVE,
             desired_status=SandboxStatus.INACTIVE,
             snapshot_mode=self.snapshot_mode,
@@ -358,6 +368,23 @@ class DockerSandboxService(SandboxService):
 
     async def _delete_sandbox(self, sandbox_id: str) -> None:
         await asyncio.to_thread(self._sync_delete_sandbox, sandbox_id)
+
+    # ------------------------------------------------------------------ #
+    # Warm sandbox pool hooks (overridden from the ABC).
+    # ------------------------------------------------------------------ #
+    async def _claim_warm_sandbox(self, template_id: str, *, config_id: str) -> Sandbox | None:
+        """Claim a warm container by renaming it (daemon-serialized CAS)."""
+        async with self._warm_claim_lock:
+            return await asyncio.to_thread(self._sync_claim_warm_sandbox, template_id, config_id)
+
+    async def _count_warm(self, template_id: str) -> int:
+        return cast(int, await asyncio.to_thread(self._sync_count_warm, template_id))
+
+    async def _create_warm(self, template_id: str) -> None:
+        await asyncio.to_thread(self._sync_create_warm, template_id)
+
+    async def _delete_warm(self, template_id: str) -> None:
+        await asyncio.to_thread(self._sync_delete_warm, template_id)
 
     # ------------------------------------------------------------------ #
     # last_accessed_at derivation + lifecycle sweep.
@@ -599,6 +626,7 @@ class DockerSandboxService(SandboxService):
         # directory, not a running container's filesystem.
         containers = self._containers
         sandbox_id = _generate_sandbox_id()
+        container_name = _ohe_name(sandbox_id, sandbox.sandbox_config_id)
         ports: dict[str, Any] = {}
         for port in self.exposed_ports:
             ports[f"{port.container_port}/tcp"] = None
@@ -610,9 +638,9 @@ class DockerSandboxService(SandboxService):
             if snapshot_id is not None:
                 snapshot_store.restore_snapshot(self.snapshot_dir, snapshot_id, host_workspace)
             binds.append(f"{host_workspace}:{working_dir}")
-        container = containers.run(
+        containers.run(
             image=sandbox.sandbox_template_id,
-            name=sandbox_id,
+            name=container_name,
             detach=True,
             ports=ports or None,
             labels={
@@ -631,11 +659,7 @@ class DockerSandboxService(SandboxService):
                 "SESSION_API_KEY": "changeme"
             },
         )
-        # Stamp the sandbox-id label post-creation so the container can be
-        # matched back to its sandbox after a restart.
-        with contextlib.suppress(Exception):
-            container.attrs["Config"]["Labels"][_TAG_SANDBOX_ID] = sandbox_id
-        return sandbox_id
+        return container_name
 
     def _sync_update_sandbox(self, sandbox_id: str, desired: SandboxStatus) -> None:
         try:
@@ -653,9 +677,6 @@ class DockerSandboxService(SandboxService):
             container.unpause()
         elif state in ("exited", "created"):
             container.start()
-        # Clear the paused-at label so a subsequent idle pause re-stamps it.
-        with contextlib.suppress(Exception):
-            container.attrs["Config"]["Labels"].pop(_TAG_PAUSED_AT, None)
 
     def _deactivate_container(self, container: Any, state: str) -> None:
         """Deactivate per ``deactivate_mode``: pause (freeze) or stop (teardown)."""
@@ -665,9 +686,11 @@ class DockerSandboxService(SandboxService):
             container.stop()
         else:
             container.pause()
-        # Record when the sandbox was paused for paused_delete enforcement.
-        with contextlib.suppress(Exception):
-            container.attrs["Config"]["Labels"][_TAG_PAUSED_AT] = _iso_utc_now()
+        # NOTE: Docker container labels are immutable after creation, so we
+        # cannot stamp a ``paused_at`` label here. The ``_sync_paused_at``
+        # reader therefore returns ``None`` for Docker, which means
+        # ``paused_delete_seconds`` is not enforced until a mutable-label
+        # backend (K8s annotations) or a Docker API enhancement is available.
 
     def _sync_delete_sandbox(self, sandbox_id: str) -> None:
         try:
@@ -677,9 +700,100 @@ class DockerSandboxService(SandboxService):
         # force=True removes a running/paused/exited container without a stop.
         container.remove(force=True)
         # Best-effort cleanup of the per-sandbox workspace bind-mount directory.
+        # The workspace dir is keyed by the bare sandbox id (UUID), not the
+        # full container name (which includes the OHE_ prefix + config id).
         if self.workspace_dir is not None:
+            sid = _strip_ohe_prefix(sandbox_id)
             with contextlib.suppress(OSError):
-                Path(self.workspace_dir, sandbox_id).rmdir()
+                Path(self.workspace_dir, sid).rmdir()
+
+    # ------------------------------------------------------------------ #
+    # Synchronous warm-pool operations (offloaded from the event loop).
+    # ------------------------------------------------------------------ #
+    def _sync_create_warm(self, template_id: str) -> None:
+        """Create a paused warm container named ``OHE_<sandbox_id>``."""
+        sandbox_id = _generate_sandbox_id()
+        container_name = _ohe_name(sandbox_id)
+        ports: dict[str, Any] = {}
+        for port in self.exposed_ports:
+            ports[f"{port.container_port}/tcp"] = None
+        binds: list[str] = []
+        working_dir = _DEFAULT_WORKING_DIR
+        if self.workspace_dir is not None:
+            host_workspace = Path(self.workspace_dir) / sandbox_id
+            host_workspace.mkdir(parents=True, exist_ok=True)
+            binds.append(f"{host_workspace}:{working_dir}")
+        container = self._containers.run(
+            image=template_id,
+            name=container_name,
+            detach=True,
+            ports=ports or None,
+            labels={_TAG_SANDBOX_TEMPLATE_ID: template_id},
+            init=True,
+            volumes=binds or None,
+            working_dir=working_dir,
+            extra_hosts=self.extra_hosts
+            if self.extra_hosts and not self.use_host_network
+            else None,
+            devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
+            environment={"SESSION_API_KEY": "changeme"},
+        )
+        container.pause()
+
+    def _sync_claim_warm_sandbox(self, template_id: str, config_id: str) -> DockerSandbox | None:
+        """Claim the oldest warm container by renaming it (daemon CAS)."""
+        candidates = self._warm_containers(template_id)
+        for container in candidates:
+            name = _container_name(container)
+            parsed = _parse_ohe_name(name)
+            if parsed is None or parsed[1] is not None:
+                continue  # foreign or already claimed
+            sandbox_id = parsed[0]
+            new_name = _ohe_name(sandbox_id, config_id)
+            try:
+                container.rename(new_name)
+            except Exception:
+                # Lost the race (NotFound/Conflict) — try the next candidate.
+                continue
+            container.unpause()
+            return _sandbox_from_container_attrs(
+                container, self.exposed_ports, self.image_name_patterns, self.snapshot_mode
+            )
+        return None
+
+    def _sync_count_warm(self, template_id: str) -> int:
+        """Count warm (unclaimed) containers for *template_id*."""
+        count = 0
+        for container in self._warm_containers(template_id):
+            name = _container_name(container)
+            parsed = _parse_ohe_name(name)
+            if parsed is not None and parsed[1] is None:
+                count += 1
+        return count
+
+    def _sync_delete_warm(self, template_id: str) -> None:
+        """Remove one warm (unclaimed) container for *template_id*."""
+        for container in self._warm_containers(template_id):
+            name = _container_name(container)
+            parsed = _parse_ohe_name(name)
+            if parsed is None or parsed[1] is not None:
+                continue
+            sandbox_id = parsed[0]
+            container.remove(force=True)
+            if self.workspace_dir is not None:
+                with contextlib.suppress(OSError):
+                    Path(self.workspace_dir, sandbox_id).rmdir()
+            return
+
+    def _warm_containers(self, template_id: str) -> list[Any]:
+        """List paused containers matching *template_id* (warm candidates)."""
+        containers = self._containers.list(
+            all=True,
+            filters={"label": f"{_TAG_SANDBOX_TEMPLATE_ID}={template_id}"},
+        )
+        # Sort by created time so the oldest is claimed first.
+        containers.sort(key=lambda c: _parse_created(_container_attr(c, "Created", "")))
+        return list(containers)
 
     # ------------------------------------------------------------------ #
     # Synchronous snapshot store calls (offloaded from the event loop).
@@ -758,22 +872,27 @@ def _sandbox_from_container_attrs(
 ) -> DockerSandbox | None:
     """Build a :class:`DockerSandbox` from a Docker container, or ``None``.
 
-    Returns ``None`` when the container's image does not correspond to a
-    sandbox template (no sandbox-id label and an image outside the configured
-    patterns). A sandbox-id label short-circuits the image check so labeled
-    containers are always recognized as sandboxes.
+    Returns ``None`` when the container is not a claimed sandbox — i.e. its
+    name does not start with ``OHE_`` (foreign, left alone) or has only one
+    payload segment (warm, excluded from the public surface). Only claimed
+    names (``OHE_<sid>_<cid>``) are surfaced.
     """
     try:
         attrs = container.attrs
     except Exception:  # container may have been removed
         return None
+    name = attrs.get("Name", "").lstrip("/")
+    parsed = _parse_ohe_name(name)
+    if parsed is None:
+        return None  # foreign container — not ours
+    sandbox_id, config_id = parsed
+    if config_id is None:
+        return None  # warm container — excluded from the public surface
+    # The container name IS the sandbox id (used in _containers.get(name)).
+    sandbox_id = name
     config = attrs.get("Config") or {}
     labels = config.get("Labels") or {}
-    image = config.get("Image") or ""
-    sandbox_id = _resolve_sandbox_id(labels, attrs, image, image_name_patterns)
-    if sandbox_id is None:
-        return None
-    template_id = labels.get(_TAG_SANDBOX_TEMPLATE_ID) or image
+    template_id = labels.get(_TAG_SANDBOX_TEMPLATE_ID) or config.get("Image") or ""
     state = attrs.get("State") or {}
     status_str = str(state.get("Status") or "unknown")
     host_config = attrs.get("HostConfig") or {}
@@ -782,6 +901,7 @@ def _sandbox_from_container_attrs(
     return DockerSandbox(
         id=sandbox_id,
         sandbox_template_id=template_id,
+        sandbox_config_id=config_id,
         status=_docker_status_to_sandbox_status(status_str),
         desired_status=_desired_from_labels(labels, status_str),
         snapshot_mode=snapshot_mode,
@@ -791,28 +911,6 @@ def _sandbox_from_container_attrs(
         status_detail=state.get("Error") or None,
         volume_mounts=_volume_mounts_from_binds(host_config.get("Binds") or []),
     )
-
-
-def _resolve_sandbox_id(
-    labels: dict[str, Any],
-    attrs: dict[str, Any],
-    image: str,
-    image_name_patterns: list[str] | None,
-) -> str | None:
-    """Return the sandbox id for a container, or ``None`` if it is not a sandbox.
-
-    A labeled sandbox short-circuits the image check; otherwise the image must
-    match one of *image_name_patterns*, in which case the container name is used.
-    """
-    sandbox_id = labels.get(_TAG_SANDBOX_ID)
-    if sandbox_id:
-        return str(sandbox_id)
-    if not image or not image_name_patterns:
-        return None
-    if not any(_wildcard_match(pattern, image) for pattern in image_name_patterns):
-        return None
-    name = attrs.get("Name", "").lstrip("/")
-    return name or None
 
 
 def _docker_status_to_sandbox_status(status: str) -> SandboxStatus:
@@ -870,20 +968,6 @@ def _volume_mounts_from_binds(binds: list[str]) -> list[VolumeMount]:
     return mounts
 
 
-def _wildcard_match(pattern: str, target: str) -> bool:
-    """Match *target* against *pattern*, where ``*`` is a glob wildcard.
-
-    ``*`` matches any run of characters (including ``/``), so
-    ``ghcr.io/openhands/*`` matches any image under that prefix. A pattern
-    without wildcards must match exactly.
-    """
-    if "*" not in pattern:
-        return pattern == target
-    parts = pattern.split("*")
-    escaped = ".*".join(re.escape(part) for part in parts)
-    return re.fullmatch(escaped, target) is not None
-
-
 def _label_int(labels: dict[str, Any], name: str) -> int | None:
     """Parse an integer label, returning ``None`` when absent or invalid."""
     raw = labels.get(name)
@@ -919,11 +1003,67 @@ def _generate_snapshot_id() -> str:
 
 
 def _generate_sandbox_id() -> str:
-    """Generate a unique, human-friendly sandbox (container) name.
+    """Generate a unique sandbox id (UUID).
 
-    Docker container names must match ``/?[a-zA-Z0-9][a-zA-Z0-9_.-]+``. We
-    mint a short lowercase alphanumeric id prefixed with ``sandbox-`` so the
-    per-sandbox workspace directory (``<workspace_dir>/<sandbox_id>``) has a
-    predictable, collision-resistant name known before the container starts.
+    The id is encoded in the container name (``OHE_<sid>`` or
+    ``OHE_<sid>_<cid>``) and used as the workspace bind-mount directory key.
+    UUIDs use dashes (not underscores), so the name splits unambiguously on ``_``.
     """
-    return f"sandbox-{secrets.token_hex(8)}"
+    return str(uuid.uuid4())
+
+
+def _ohe_name(sandbox_id: str, config_id: str | None = None) -> str:
+    """Build the Docker container name for a sandbox.
+
+    Without *config_id*: ``OHE_<sandbox_id>`` (warm).
+    With *config_id*: ``OHE_<sandbox_id>_<config_id>`` (claimed).
+    """
+    if config_id is None:
+        return f"{_OHE_PREFIX}{sandbox_id}"
+    return f"{_OHE_PREFIX}{sandbox_id}_{config_id}"
+
+
+def _parse_ohe_name(name: str) -> tuple[str, str | None] | None:
+    """Parse an ``OHE_``-prefixed container name.
+
+    Returns ``(sandbox_id, None)`` for warm, ``(sandbox_id, config_id)`` for
+    claimed, or ``None`` when *name* is foreign (no ``OHE_`` prefix).
+    """
+    if not name.startswith(_OHE_PREFIX):
+        return None
+    payload = name[len(_OHE_PREFIX) :]
+    parts = payload.split("_", 1)
+    if len(parts) == 1:
+        return parts[0], None  # warm
+    return parts[0], parts[1]  # claimed
+
+
+def _strip_ohe_prefix(name: str) -> str:
+    """Return the bare sandbox id from a container name or OHE_-prefixed id."""
+    parsed = _parse_ohe_name(name)
+    if parsed is None:
+        return name  # not an OHE_ name — return as-is
+    return parsed[0]
+
+
+def _container_name(container: Any) -> str:
+    """Return the Docker container name (without leading ``/``)."""
+    try:
+        attrs = container.attrs
+    except Exception:
+        return ""
+    return str(attrs.get("Name", "").lstrip("/"))
+
+
+def _container_attr(container: Any, path: str, default: Any = None) -> Any:
+    """Read a dotted attr path from a Docker container's attrs, best-effort."""
+    try:
+        attrs = container.attrs
+    except Exception:
+        return default
+    obj: Any = attrs
+    for part in path.split("."):
+        if not isinstance(obj, dict):
+            return default
+        obj = obj.get(part, default)
+    return obj

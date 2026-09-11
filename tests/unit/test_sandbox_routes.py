@@ -96,7 +96,7 @@ class _FakeSandboxService(SandboxService):
 
 
 def _create_payload(template_id: str = "img-a") -> dict[str, Any]:
-    return {"sandbox_template_id": template_id}
+    return {"sandbox_template_id": template_id, "sandbox_config_id": "cfg-1"}
 
 
 @pytest_asyncio.fixture
@@ -311,7 +311,9 @@ class TestValidation:
         assert resp.status_code == 422
 
     async def test_create_rejects_empty_template_id(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox/sandboxes", json={"sandbox_template_id": ""})
+        resp = await client.post(
+            "/sandbox/sandboxes", json={"sandbox_template_id": "", "sandbox_config_id": "cfg-1"}
+        )
         assert resp.status_code == 422
 
     async def test_update_requires_desired_status(self, client: AsyncClient) -> None:
