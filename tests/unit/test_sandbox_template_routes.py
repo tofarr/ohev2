@@ -122,6 +122,43 @@ class TestCrud:
         assert resp.status_code == 200, resp.text
         assert resp.json()["working_dir"] == "/new"
 
+    async def test_create_with_num_warm(self, client: AsyncClient) -> None:
+        tag = _unique_tag()
+        resp = await client.post(
+            "/sandbox/sandbox-templates",
+            json=_template_payload(tag, num_warm=3),
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["num_warm"] == 3
+
+    async def test_create_defaults_num_warm_to_zero(self, client: AsyncClient) -> None:
+        tag = _unique_tag()
+        resp = await client.post(
+            "/sandbox/sandbox-templates",
+            json=_template_payload(tag),
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["num_warm"] == 0
+
+    async def test_patch_num_warm(self, client: AsyncClient) -> None:
+        tag = _unique_tag()
+        created = await client.post("/sandbox/sandbox-templates", json=_template_payload(tag))
+        template_id = created.json()["id"]
+        resp = await client.patch(
+            f"/sandbox/sandbox-templates/{template_id}",
+            json={"num_warm": 5},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["num_warm"] == 5
+
+    async def test_create_rejects_negative_num_warm(self, client: AsyncClient) -> None:
+        tag = _unique_tag()
+        resp = await client.post(
+            "/sandbox/sandbox-templates",
+            json=_template_payload(tag, num_warm=-1),
+        )
+        assert resp.status_code == 422
+
     async def test_get_template(self, client: AsyncClient) -> None:
         tag = _unique_tag()
         created = await client.post("/sandbox/sandbox-templates", json=_template_payload(tag))

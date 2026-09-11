@@ -81,6 +81,7 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
     # ``_create_sandbox`` (e.g. Docker mints a container name).
     id: str = ""
     sandbox_template_id: str
+    sandbox_config_id: str | None = None
     status: SandboxStatus
     desired_status: SandboxStatus
     snapshot_mode: SnapshotMode = Field(

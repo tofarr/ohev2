@@ -625,6 +625,10 @@ def _matches_label_selector(labels: dict[str, str] | None, selector: str) -> boo
             key, value = part.split("=", 1)
             if labels.get(key) != value:
                 return False
+        elif part.startswith("!"):
+            key = part[1:]
+            if key in labels:
+                return False
         elif part:
             if part not in labels:
                 return False
@@ -778,6 +782,15 @@ class _FakeAppsV1Api:
                     else:
                         existing[k] = v
                 dep.metadata.annotations = existing
+            labels_patch = meta.get("labels")
+            if labels_patch:
+                existing_labels = dep.metadata.labels or {}
+                for k, v in labels_patch.items():
+                    if v is None:
+                        existing_labels.pop(k, None)
+                    else:
+                        existing_labels[k] = v
+                dep.metadata.labels = existing_labels
         return dep
 
 
@@ -1009,7 +1022,9 @@ async def test_async_create_and_get_sandbox() -> None:
     fake = _FakeKube()
     _add_template_cm(fake, "img:1")
     service = _make_k8s_service(fake)
-    sandbox = await service.create_sandbox(SandboxCreate(sandbox_template_id="img:1"))
+    sandbox = await service.create_sandbox(
+        SandboxCreate(sandbox_template_id="img:1", sandbox_config_id="cfg-1")
+    )
     assert sandbox.id.startswith("sandbox-")
     fetched = await service.get_sandbox(sandbox.id)
     assert fetched.id == sandbox.id
@@ -1019,7 +1034,9 @@ async def test_async_update_sandbox() -> None:
     fake = _FakeKube()
     _add_template_cm(fake, "img:1")
     service = _make_k8s_service(fake)
-    sandbox = await service.create_sandbox(SandboxCreate(sandbox_template_id="img:1"))
+    sandbox = await service.create_sandbox(
+        SandboxCreate(sandbox_template_id="img:1", sandbox_config_id="cfg-1")
+    )
     updated = await service.update_sandbox(
         sandbox.id, SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
     )
@@ -1030,7 +1047,9 @@ async def test_async_delete_sandbox() -> None:
     fake = _FakeKube()
     _add_template_cm(fake, "img:1")
     service = _make_k8s_service(fake)
-    sandbox = await service.create_sandbox(SandboxCreate(sandbox_template_id="img:1"))
+    sandbox = await service.create_sandbox(
+        SandboxCreate(sandbox_template_id="img:1", sandbox_config_id="cfg-1")
+    )
     await service.delete_sandbox(sandbox.id)
     with pytest.raises(SandboxNotFoundError):
         await service.get_sandbox(sandbox.id)
@@ -1147,3 +1166,98 @@ async def test_sweep_skips_sandbox_without_template(tmp_path: Path) -> None:
     # No action taken — template ConfigMap missing → skipped.
     assert result is None
     assert "sb-1" in fake.apps.deployments
+
+
+# --------------------------------------------------------------------------- #
+# Warm pool (K8s).
+# --------------------------------------------------------------------------- #
+
+
+def _warm_deployment(
+    fake: _FakeKube,
+    sandbox_id: str,
+    *,
+    template_id: str = "img:latest",
+    replicas: int = 1,
+    created: str = "2024-01-02T03:04:05Z",
+) -> Any:
+    from openhands.ev2.sandbox.k8s_sandbox_service import (
+        _LABEL_SANDBOX_ID,
+        _LABEL_WARM,
+    )
+
+    dep = k8s_client.V1Deployment(
+        metadata=k8s_client.V1ObjectMeta(
+            name=sandbox_id,
+            resource_version="rv-1",
+            labels={
+                _LABEL_SANDBOX_ID: sandbox_id,
+                _LABEL_WARM: "true",
+            },
+            annotations={_ANNOT_TEMPLATE_ID: template_id},
+            creation_timestamp=created,
+        ),
+        spec=k8s_client.V1DeploymentSpec(
+            replicas=replicas,
+            selector=k8s_client.V1LabelSelector(match_labels={_LABEL_SANDBOX_ID: sandbox_id}),
+            template=k8s_client.V1PodTemplateSpec(),
+        ),
+        status=k8s_client.V1DeploymentStatus(ready_replicas=replicas),
+    )
+    fake.apps.deployments[sandbox_id] = dep
+    return dep
+
+
+def test_k8s_sync_count_warm_counts_warm_deployments() -> None:
+    fake = _FakeKube()
+    _warm_deployment(fake, "sb-1")
+    _warm_deployment(fake, "sb-2")
+    service = _make_k8s_service(fake)
+    assert service._sync_count_warm("img:latest") == 2
+
+
+def test_k8s_sync_count_warm_excludes_claimed() -> None:
+    fake = _FakeKube()
+    _warm_deployment(fake, "sb-1")
+    # A claimed deployment (no warm label) should not be counted.
+    _real_deployment(fake, "sb-2", template_id="img:latest")
+    service = _make_k8s_service(fake)
+    assert service._sync_count_warm("img:latest") == 1
+
+
+def test_k8s_sync_claim_warm_removes_warm_label_and_adds_config_id() -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_service import (
+        _LABEL_SANDBOX_CONFIG_ID,
+        _LABEL_WARM,
+    )
+
+    fake = _FakeKube()
+    _warm_deployment(fake, "sb-1")
+    service = _make_k8s_service(fake)
+    sb = service._sync_claim_warm_sandbox("img:latest", "cfg-1")
+    assert sb is not None
+    dep = fake.apps.deployments["sb-1"]
+    labels = dep.metadata.labels
+    assert labels.get(_LABEL_WARM) is None
+    assert labels.get(_LABEL_SANDBOX_CONFIG_ID) == "cfg-1"
+
+
+def test_k8s_sync_claim_warm_returns_none_when_empty() -> None:
+    fake = _FakeKube()
+    service = _make_k8s_service(fake)
+    assert service._sync_claim_warm_sandbox("img:latest", "cfg-1") is None
+
+
+def test_k8s_sync_delete_warm_removes_deployment() -> None:
+    fake = _FakeKube()
+    _warm_deployment(fake, "sb-1")
+    _warm_deployment(fake, "sb-2")
+    service = _make_k8s_service(fake)
+    service._sync_delete_warm("img:latest")
+    # One should be deleted.
+    remaining_warm = [
+        name
+        for name, dep in fake.apps.deployments.items()
+        if dep.metadata.labels and dep.metadata.labels.get("io.openhands.sandbox/warm") == "true"
+    ]
+    assert len(remaining_warm) == 1

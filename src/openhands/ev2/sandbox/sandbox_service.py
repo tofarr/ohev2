@@ -20,6 +20,7 @@ this ABC via ``capture_snapshot`` / ``import_snapshot_file`` /
 from __future__ import annotations
 
 import importlib
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Any
@@ -82,6 +83,9 @@ class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
 
 
+logger = logging.getLogger(__name__)
+
+
 class SandboxService(DiscriminatedUnionMixin, ABC):
     """Abstract base for the live sandbox control plane.
 
@@ -133,6 +137,68 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         return None
 
     # ------------------------------------------------------------------ #
+    # Warm sandbox pool. A warm sandbox is a pre-provisioned provider
+    # resource (Docker container / K8s Deployment) created from a template
+    # without a ``sandbox_config_id``; ``create_sandbox`` claims one
+    # atomically when no ``snapshot_id`` is supplied. The background warm
+    # refresh loop (see ``app.py``) calls ``refresh_warm_sandboxes`` with the
+    # per-template targets read from the DB ``SandboxTemplate.num_warm``.
+    # ------------------------------------------------------------------ #
+    async def refresh_warm_sandboxes(self, targets: dict[str, int]) -> str | None:
+        """Reconcile the warm pool to the per-template *targets*.
+
+        For each ``(template_id, num_warm)`` in *targets*, creates warm resources
+        until the count reaches ``num_warm``, or deletes excess ones down to
+        ``num_warm``. Idempotent. Returns a one-line summary or ``None`` when
+        no actions were taken. Failures per template are logged and do not
+        abort the remaining templates.
+        """
+        created = 0
+        deleted = 0
+        for template_id, num_warm in targets.items():
+            try:
+                count = await self._count_warm(template_id)
+                while count < num_warm:
+                    await self._create_warm(template_id)
+                    count += 1
+                    created += 1
+                while count > num_warm:
+                    await self._delete_warm(template_id)
+                    count -= 1
+                    deleted += 1
+            except Exception:
+                logger.exception(
+                    "warm sandbox refresh failed for template %s; will retry next interval",
+                    template_id,
+                )
+        parts: list[str] = []
+        if created:
+            parts.append(f"created {created} warm sandbox(es)")
+        if deleted:
+            parts.append(f"deleted {deleted} warm sandbox(es)")
+        return "; ".join(parts) if parts else None
+
+    async def _claim_warm_sandbox(self, template_id: str, *, config_id: str) -> Sandbox | None:
+        """Claim a warm sandbox for *template_id*, stamping *config_id*.
+
+        Base implementation returns ``None`` (no warm pool). Providers that
+        support warm sandboxes override this to atomically transition a warm
+        resource into a claimed sandbox, recording the ``config_id``
+        association, and return the resulting :class:`Sandbox`.
+        """
+        return None
+
+    async def _count_warm(self, template_id: str) -> int:
+        """Return the number of warm (unclaimed) resources for *template_id*."""
+        return 0
+
+    async def _create_warm(self, template_id: str) -> None:
+        """Pre-provision one warm resource for *template_id*."""
+
+    async def _delete_warm(self, template_id: str) -> None:
+        """Remove one warm (unclaimed) resource for *template_id*."""
+
+    # ------------------------------------------------------------------ #
     # Generic public sandbox CRUD (built on the provider hooks below).
     # Only ``desired_status`` is mutable (via ``update_sandbox``).
     # ------------------------------------------------------------------ #
@@ -169,8 +235,12 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
     ) -> Sandbox:
         """Create a sandbox. Raises on out-of-scope payload or provider conflict.
 
-        The sandbox ``id`` is assigned by the provider during creation; the
-        pre-persistence model built by ``_sandbox_from_create`` is checked
+        When ``payload.snapshot_id`` is ``None``, a warm sandbox is claimed
+        from the per-template pool if one is available (the provider's
+        ``_claim_warm_sandbox`` performs the atomic claim transition and records
+        the ``sandbox_config_id``). When no warm sandbox is available, or when
+        ``payload.snapshot_id`` is set, the provider cold-creates a new sandbox.
+        The pre-persistence model built by ``_sandbox_from_create`` is checked
         against ``perm_filter`` (the principal's create scope) before the
         backing compute is started. When ``payload.snapshot_id`` is set the
         provider restores that snapshot's workspace into the new sandbox
@@ -179,6 +249,14 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         sandbox = self._sandbox_from_create(payload)
         if not perm_filter.matches(sandbox):
             raise SandboxPermissionScopeError(payload.sandbox_template_id)
+        if payload.snapshot_id is None:
+            claimed = await self._claim_warm_sandbox(
+                payload.sandbox_template_id, config_id=payload.sandbox_config_id
+            )
+            if claimed is not None:
+                if not perm_filter.matches(claimed):
+                    raise SandboxPermissionScopeError(payload.sandbox_template_id)
+                return claimed
         return await self._create_sandbox(sandbox, snapshot_id=payload.snapshot_id)
 
     async def update_sandbox(

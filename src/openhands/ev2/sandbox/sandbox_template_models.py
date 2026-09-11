@@ -114,6 +114,13 @@ class SandboxTemplate(Base):
         default=False,
         server_default="false",
     )
+    num_warm: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+        comment="Target number of pre-provisioned (warm) sandboxes to maintain per template; 0 disables the warm pool for this template.",
+    )
     meta: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         default_factory=dict,

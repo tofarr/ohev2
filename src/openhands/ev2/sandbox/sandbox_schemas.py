@@ -56,6 +56,11 @@ class SandboxCreate(BaseModel):
     sandbox_template_id: str = Field(
         min_length=1, max_length=1024, description="Template id to instantiate."
     )
+    sandbox_config_id: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Sandbox config id this sandbox is associated with.",
+    )
     snapshot_id: str | None = Field(
         default=None,
         min_length=1,
@@ -86,6 +91,7 @@ class SandboxRead(BaseModel):
 
     id: str
     sandbox_template_id: str
+    sandbox_config_id: str | None
     status: SandboxStatus
     desired_status: SandboxStatus
     snapshot_mode: SnapshotMode
@@ -105,6 +111,9 @@ class SandboxSearchFilter(BaseSearchFilter[Sandbox]):
     id__eq: str | None = Field(default=None, description="Exact id match.")
     sandbox_template_id__eq: str | None = Field(
         default=None, description="Exact template id match."
+    )
+    sandbox_config_id__eq: str | None = Field(
+        default=None, description="Exact sandbox config id match."
     )
     status__eq: SandboxStatus | None = Field(default=None)
     desired_status__eq: SandboxStatus | None = Field(default=None)

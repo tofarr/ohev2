@@ -408,6 +408,18 @@ class AppConfig(BaseModel):
             "by an external scheduler (cron); see README 'ACL pruning'."
         ),
     )
+    sandbox_warm_refresh_interval: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds between background warm-sandbox pool refreshes that "
+            "reconcile the per-template warm count to each "
+            "SandboxTemplate.num_warm target. When 0 the in-process loop is "
+            "disabled and the refresh must be driven by an external scheduler "
+            "calling SandboxService.refresh_warm_sandboxes; see README "
+            "'Warm sandboxes'."
+        ),
+    )
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:
