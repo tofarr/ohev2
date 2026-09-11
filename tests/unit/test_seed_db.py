@@ -4,19 +4,26 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.sandbox.sandbox_models import ExposedPort
-from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
 from openhands.ev2.scripts.seed_db import (
     _assign_role,
+    _fetch_all_tags,
+    _fetch_registry_token,
+    _next_page_cursor,
     _parse_args,
+    _parse_tag_version,
     _pick_latest_tag,
+    _resolve_sandbox_template_tag,
+    fetch_latest_agent_server_tag,
+    main,
     seed_admin,
     seed_db,
 )
@@ -557,3 +564,197 @@ class TestSeedDefaultSandboxTemplate:
         templates = list((await session.scalars(select(SandboxTemplate))).all())
         assert len(templates) == 1
         assert templates[0].docker_image_tag == new_tag
+
+
+class TestParseTagVersion:
+    def test_stable_version(self) -> None:
+        assert (
+            _parse_tag_version("v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64")
+            is not None
+        )
+
+    def test_no_match_returns_none(self) -> None:
+        assert _parse_tag_version("main-python") is None
+
+    def test_pre_release_version(self) -> None:
+        ver = _parse_tag_version("v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12")
+        assert ver is not None and ver.is_prerelease
+
+
+class TestNextPageCursor:
+    def test_none_header(self) -> None:
+        assert _next_page_cursor(None) is None
+
+    def test_empty_header(self) -> None:
+        assert _next_page_cursor("") is None
+
+    def test_extracts_cursor(self) -> None:
+        header = '<...>?last=v1.0.0>; rel="next"'
+        assert _next_page_cursor(header) == "v1.0.0"
+
+    def test_no_cursor_in_header(self) -> None:
+        assert _next_page_cursor('<...>?foo=bar>; rel="next"') is None
+
+
+def _registry_transport(
+    token: str = "tok",
+    tags_pages: list[list[str]] | None = None,
+    link_headers: list[str | None] | None = None,
+) -> httpx.MockTransport:
+    """Build a MockTransport emulating the GHCR token + tags-list endpoints."""
+    pages = tags_pages or [["v1.0.0-amd64"]]
+    links = link_headers or [None]
+    state = {"page": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": token})
+        if request.url.path.endswith("/tags/list"):
+            page_idx = state["page"]
+            if page_idx >= len(pages):
+                page_idx = len(pages) - 1
+            body = {"tags": pages[page_idx]}
+            hdr: dict[str, str] = {}
+            if page_idx < len(links) and links[page_idx]:
+                hdr["link"] = links[page_idx]
+                state["page"] = page_idx + 1
+            return httpx.Response(200, json=body, headers=hdr)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+class TestFetchRegistryToken:
+    async def test_returns_token(self) -> None:
+        transport = _registry_transport(token="abc")
+        async with httpx.AsyncClient(transport=transport) as client:
+            assert await _fetch_registry_token(client) == "abc"
+
+    async def test_missing_token_raises(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+        ) as client:
+            with pytest.raises(RuntimeError, match="usable token"):
+                await _fetch_registry_token(client)
+
+    async def test_non_string_token_raises(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"token": 123}))
+        ) as client:
+            with pytest.raises(RuntimeError, match="usable token"):
+                await _fetch_registry_token(client)
+
+    async def test_http_error_raises(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(500))
+        ) as client:
+            with pytest.raises(httpx.HTTPStatusError):
+                await _fetch_registry_token(client)
+
+
+class TestFetchAllTags:
+    async def test_single_page(self) -> None:
+        transport = _registry_transport(tags_pages=[["v1.0.0-amd64", "v1.1.0-amd64"]])
+        async with httpx.AsyncClient(transport=transport) as client:
+            tags = await _fetch_all_tags(client, "tok")
+        assert tags == ["v1.0.0-amd64", "v1.1.0-amd64"]
+
+    async def test_multi_page(self) -> None:
+        transport = _registry_transport(
+            tags_pages=[["v1.0.0-amd64"], ["v1.1.0-amd64"]],
+            link_headers=['<...>?last=cursor>; rel="next"', None],
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            tags = await _fetch_all_tags(client, "tok")
+        assert tags == ["v1.0.0-amd64", "v1.1.0-amd64"]
+
+    async def test_empty_page_stops(self) -> None:
+        transport = _registry_transport(tags_pages=[[]])
+        async with httpx.AsyncClient(transport=transport) as client:
+            tags = await _fetch_all_tags(client, "tok")
+        assert tags == []
+
+
+class TestFetchLatestAgentServerTag:
+    async def test_returns_full_image_tag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        transport = _registry_transport(
+            tags_pages=[
+                [
+                    "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+                    "v1.0.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+                ]
+            ]
+        )
+        _real_async_client = httpx.AsyncClient
+
+        def _factory(**kwargs: object) -> httpx.AsyncClient:
+            return _real_async_client(transport=transport)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        result = await fetch_latest_agent_server_tag()
+        assert result.startswith("ghcr.io/openhands/agent-server:v1.3.0")
+
+    async def test_no_version_tags_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        transport = _registry_transport(tags_pages=[["main", "sha123"]])
+        _real_async_client = httpx.AsyncClient
+
+        def _factory(**kwargs: object) -> httpx.AsyncClient:
+            return _real_async_client(transport=transport)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        with pytest.raises(RuntimeError, match="no semver tags"):
+            await fetch_latest_agent_server_tag()
+
+
+class TestResolveSandboxTemplateTag:
+    async def test_skip_returns_none(self) -> None:
+        args = _parse_args(["--skip-sandbox-template"])
+        assert await _resolve_sandbox_template_tag(args) is None
+
+    async def test_explicit_tag_wins(self) -> None:
+        args = _parse_args(["--sandbox-template-tag", "ghcr.io/foo:bar"])
+        assert await _resolve_sandbox_template_tag(args) == "ghcr.io/foo:bar"
+
+    async def test_registry_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _boom() -> str:
+            raise RuntimeError("registry down")
+
+        monkeypatch.setattr("openhands.ev2.scripts.seed_db.fetch_latest_agent_server_tag", _boom)
+        args = _parse_args(
+            ["--admin-username", "a", "--admin-email", "a@b.com", "--admin-password", "pw"]
+        )
+        # No --skip flag and no explicit tag → tries registry fetch.
+        assert await _resolve_sandbox_template_tag(args) is None
+
+
+class TestMain:
+    async def test_main_seeds_db(
+        self,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # main() builds its own engine via get_config(); point it at the test DB.
+        from openhands.ev2 import db as db_mod
+        from openhands.ev2.scripts import seed_db as seed_mod
+
+        monkeypatch.setattr(seed_mod, "create_engine", lambda _url: engine)
+        monkeypatch.setattr(
+            seed_mod, "create_session_factory", lambda _eng: db_mod.get_session_factory()
+        )
+        rc = await main(
+            [
+                "--admin-username",
+                "seedadmin",
+                "--admin-email",
+                "seedadmin@example.com",
+                "--admin-password",
+                "pw",
+                "--skip-sandbox-template",
+            ]
+        )
+        assert rc == 0
+        from sqlalchemy import select as _sel
+
+        async with db_mod.get_session_factory()() as sess:
+            users = (await sess.scalars(_sel(User))).all()
+        assert any(u.username == "seedadmin" for u in users)

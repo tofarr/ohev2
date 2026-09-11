@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.sandbox.sandbox_models import ExposedPort
 from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError as _BatchPermissionDeniedError,
 )
@@ -25,7 +24,7 @@ from openhands.ev2.sandbox.sandbox_service import (
 from openhands.ev2.sandbox.sandbox_service import (
     SandboxTemplatePermissionScopeError as _SandboxTemplatePermissionScopeError,
 )
-from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
 from openhands.ev2.sandbox.sandbox_template_schemas import (
     SandboxTemplateBatchCreate,
     SandboxTemplateBatchDelete,

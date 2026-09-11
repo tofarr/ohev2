@@ -1,17 +1,18 @@
-"""Pydantic models for the sandbox feature.
+"""Pydantic models for the live sandbox surface.
 
-The public shape of a sandbox template (and, now, a sandbox) lives here
-rather than in the ORM models: template/sandbox state is owned by the
-configured ``SandboxService`` implementation (see
-:mod:`openhands.ev2.sandbox.sandbox_service`), not by a database
-table. ``SandboxTemplate`` and ``Sandbox`` are therefore plain
-``DiscriminatedUnionMixin`` Pydantic models whose concrete subclasses
-(:class:`DockerSandboxTemplate`, :class:`DockerSandbox`) contribute
-implementation-specific parameters.
+The live ``Sandbox`` is an in-memory representation of a running (or paused,
+or stopped) container/deployment owned by the configured
+:class:`SandboxService` implementation (see
+:mod:`openhands.ev2.sandbox.sandbox_service`). It is a plain
+``DiscriminatedUnionMixin`` Pydantic model whose concrete subclasses
+(:class:`DockerSandbox`, :class:`K8sSandbox`) contribute implementation-
+specific parameters.
 
-``SandboxStatus`` is the provider-neutral public lifecycle state, moved here
-from the phasing-out :mod:`openhands.ev2.sandbox` package; the old module
-re-exports it so existing callers keep working while it is retired.
+Durable sandbox intent — templates, configs, and snapshots — lives in the
+database as governed ORM models (see :mod:`sandbox_template_models`,
+:mod:`sandbox_config_models`, :mod:`sandbox_snapshot_models`); those are the
+source of truth, not the Pydantic types here. ``SandboxStatus`` is the
+provider-neutral public lifecycle state.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from datetime import datetime
 
 from openhands.sdk.utils import utc_now
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class SandboxStatus(enum.StrEnum):
@@ -56,21 +57,6 @@ class SnapshotMode(enum.StrEnum):
     AUTOMATIC = "automatic"
 
 
-class ExposedPort(BaseModel):
-    """Exposed port within a container to be matched to a free port on the host.
-
-    Declared on a sandbox template; the service allocates a host port per
-    container at runtime and surfaces the resulting URL via
-    :class:`ExposedUrl`.
-    """
-
-    name: str
-    description: str
-    container_port: int = 8000
-
-    model_config = ConfigDict(frozen=True)
-
-
 class ExposedUrl(BaseModel):
     """URL to access some named service within the container."""
 
@@ -85,58 +71,6 @@ class VolumeMount(BaseModel):
     host_path: str
     container_path: str
     mode: str = "rw"
-
-
-class SandboxTemplate(DiscriminatedUnionMixin, ABC):
-    """A template for creating a Sandbox (e.g: A Docker Image vs Container).
-
-    Templates are functionally immutable: they are created and deleted only,
-    never updated — image/label metadata is set at build time.
-
-    ``snapshot_mode`` declares the snapshot strategy a sandbox built from this
-    template supports; when a provider supports multiple modes the one in use
-    is recorded on the template so callers can discover it without a separate
-    probe.
-    """
-
-    id: str
-    command: list[str] | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-    user_id: uuid.UUID | None = Field(
-        default=None,
-        description="The user who created this sandbox template; null when unknown.",
-    )
-    initial_env: dict[str, str] = Field(
-        default_factory=dict, description="Initial Environment Variables"
-    )
-    working_dir: str = "/home/openhands"
-    idle_pause_seconds: int | None = Field(
-        default=None, description="Idle time before a sandbox should be automatically paused."
-    )
-    paused_delete_seconds: int | None = Field(
-        default=None,
-        description="Idle time before a paused sandbox should be automatically deleted.",
-    )
-    max_age_seconds: int | None = Field(
-        default=None, description="Max age for sandboxes after which they will be deleted."
-    )
-    snapshot_mode: SnapshotMode = Field(
-        default=SnapshotMode.UNSUPPORTED,
-        description="Snapshot strategy supported by sandboxes built from this template.",
-    )
-
-
-class DockerSandboxTemplate(SandboxTemplate):
-    """A sandbox template backed by a Docker image.
-
-    The ``id`` is the Docker image name (e.g. ``ghcr.io/org/agent-server:latest``).
-    """
-
-    max_memory: int | None = None
-    exposed_ports: list[ExposedPort] = Field(
-        default_factory=list,
-        description="Named container ports exposed to the host as URLs.",
-    )
 
 
 class Sandbox(DiscriminatedUnionMixin, ABC):
@@ -193,43 +127,4 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
             "Last pod/scheduling reason from the runtime (e.g. insufficient kvm, "
             "ImagePullBackOff), surfaced when a sandbox is stuck or errored."
         ),
-    )
-
-
-class SandboxSnapshot(DiscriminatedUnionMixin, ABC):
-    """A point-in-time snapshot of a sandbox workspace.
-
-    A snapshot is a gzip-compressed tarball of the sandbox workspace directory
-    captured while the sandbox is paused (``SNAPSHOTTING`` status), analogous
-    to a Kubernetes VolumeSnapshot of a PVC. Snapshots are created either from
-    an existing sandbox (``sandbox_id``) or by importing an uploaded tarball.
-    Each snapshot carries an id, the time it was created, the size of the
-    stored tarball, and a download URL the caller can use to fetch the
-    artifact. Provider-specific subclasses may carry implementation detail.
-
-    ``id`` defaults to the empty string for the pre-persistence model built by
-    ``_snapshot_from_sandbox`` / ``_snapshot_from_file``; the provider assigns
-    the real id during ``_create_snapshot``.
-    """
-
-    id: str = ""
-    created_at: datetime = Field(default_factory=utc_now)
-    user_id: uuid.UUID | None = Field(
-        default=None,
-        description="The user who created this snapshot; null when unknown.",
-    )
-    download_url: str | None = Field(
-        default=None,
-        description="URL to download the snapshot artifact, when available.",
-    )
-    sandbox_id: str | None = Field(
-        default=None,
-        description=(
-            "Source sandbox the snapshot was created from; null for snapshots "
-            "imported from an uploaded tarball."
-        ),
-    )
-    size_bytes: int | None = Field(
-        default=None,
-        description="Size of the stored tarball artifact in bytes, when known.",
     )
