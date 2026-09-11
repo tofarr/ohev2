@@ -62,6 +62,9 @@ from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: F401
     McpUsage,
 )
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
+from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig  # noqa: F401
+from openhands.ev2.sandbox.sandbox_snapshot_models import SandboxSnapshot  # noqa: F401
+from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate  # noqa: F401
 from openhands.ev2.secret.secret_models import (  # noqa: F401
     Secret,
 )
@@ -91,6 +94,9 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.mcp_server_config.mcp_server_config_models
     import openhands.ev2.mcp_server_config.mcp_usage_models
     import openhands.ev2.role.role_models
+    import openhands.ev2.sandbox.sandbox_config_models
+    import openhands.ev2.sandbox.sandbox_snapshot_models
+    import openhands.ev2.sandbox.sandbox_template_models
     import openhands.ev2.secret.secret_models
     import openhands.ev2.user.user_models  # noqa: F401
     from openhands.ev2.db import Base

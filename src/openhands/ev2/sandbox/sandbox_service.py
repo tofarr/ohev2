@@ -606,6 +606,41 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         """
         raise SandboxSnapshotUnsupportedError("snapshot download is not supported")
 
+    async def capture_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        sandbox_perm_filter: SearchFilter[Any] = ALL,
+    ) -> tuple[str, int | None]:
+        """Capture a snapshot artifact from a live sandbox.
+
+        Returns ``(download_url, size_bytes)``. The DB index row is persisted by
+        the caller (:class:`SandboxSnapshotService`). Raises
+        :class:`SandboxSnapshotUnsupportedError` when the provider cannot capture.
+        """
+        raise SandboxSnapshotUnsupportedError("snapshot capture is not supported")
+
+    async def import_snapshot_file(
+        self,
+        file_data: bytes | None,
+        *,
+        schema_type: str | None = None,
+    ) -> tuple[str, int | None]:
+        """Store an uploaded snapshot artifact and return ``(download_url, size_bytes)``.
+
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider cannot
+        import files.
+        """
+        raise SandboxSnapshotUnsupportedError("snapshot file import is not supported")
+
+    async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
+        """Delete the stored artifact for a snapshot (the DB row is deleted by the caller).
+
+        Raises :class:`SandboxSnapshotUnsupportedError` when the provider does not
+        manage artifacts.
+        """
+        raise SandboxSnapshotUnsupportedError("snapshot artifact deletion is not supported")
+
 
 def resolve_sandbox_service_class(fqcn: str) -> type[SandboxService]:
     """Resolve a fully qualified class name to a ``SandboxService`` subclass."""

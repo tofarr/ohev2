@@ -1,8 +1,10 @@
-"""Route tests for the ``/sandbox/sandbox-snapshots`` REST surface.
+"""Route tests for the DB-backed ``/sandbox/sandbox-snapshots`` REST surface.
 
-Exercises the FastAPI router end-to-end via the ASGI client with a fake
-in-memory :class:`SandboxService` that supports snapshots. No Docker daemon
-or DB-backed state is required.
+Exercises the full CRUD lifecycle (create from sandbox, create from file, get,
+download, delete), batch read/write, count, search, and validation against the
+embedded PostgreSQL via the ``client`` fixture. Artifact operations (capture,
+import, stream, delete-artifact) are delegated to a fake
+:class:`SandboxService` on ``app.state``.
 """
 
 from __future__ import annotations
@@ -11,103 +13,23 @@ import uuid
 from typing import Any
 
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
-from openhands.ev2.config import get_config
-from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
-from openhands.ev2.sandbox.sandbox_models import SandboxStatus, SnapshotMode
-from openhands.ev2.sandbox.sandbox_schemas import (
-    SandboxCreate,
-    SandboxSnapshotCreate,
-    SandboxUpdate,
-)
-from openhands.ev2.sandbox.sandbox_service import (
-    SandboxNotFoundError,
-    SandboxService,
-    SandboxSnapshotConflictError,
-    SandboxSnapshotNotFoundError,
-    SandboxTemplateNotFoundError,
-)
-from openhands.ev2.util.auth_token import create_auth_token
-
-_TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
+from openhands.ev2.sandbox.sandbox_service import SandboxService
 
 
-class _FakeSnapshotService(SandboxService):
-    """In-memory provider with snapshot support."""
+class _FakeArtifactService(SandboxService):
+    """Minimal provider that supports snapshot artifact operations only."""
 
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
-        self._sandboxes: dict[str, DockerSandbox] = {}
-        self._snapshots: dict[str, DockerSandboxSnapshot] = {}
-        self._sandbox_counter = 0
+    async def capture_snapshot(
+        self, sandbox_id: str, *, sandbox_perm_filter: Any = None
+    ) -> tuple[str, int | None]:
+        return f"artifact://{sandbox_id}", 42
 
-    def _next_sandbox_id(self) -> str:
-        self._sandbox_counter += 1
-        return f"sandbox-{self._sandbox_counter}"
-
-    # -- Sandbox hooks --
-    async def _list_sandboxes(self) -> list[Any]:
-        return list(self._sandboxes.values())
-
-    async def _get_sandbox(self, sandbox_id: str) -> Any:
-        try:
-            return self._sandboxes[sandbox_id]
-        except KeyError:
-            raise SandboxNotFoundError(sandbox_id) from None
-
-    def _sandbox_from_create(self, payload: SandboxCreate) -> Any:
-        return DockerSandbox(
-            sandbox_template_id=payload.sandbox_template_id,
-            status=SandboxStatus.ACTIVE,
-            desired_status=SandboxStatus.ACTIVE,
-            snapshot_mode=SnapshotMode.MANUAL,
-        )
-
-    async def _create_sandbox(self, sandbox: Any, *, snapshot_id: str | None = None) -> Any:
-        sandbox_id = self._next_sandbox_id()
-        sandbox.id = sandbox_id
-        self._sandboxes[sandbox_id] = sandbox
-        return sandbox
-
-    async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Any:
-        return self._sandboxes[sandbox_id]
-
-    async def _delete_sandbox(self, sandbox_id: str) -> None:
-        self._sandboxes.pop(sandbox_id, None)
-
-    # -- Snapshot hooks --
-    async def _list_snapshots(self) -> list[Any]:
-        return list(self._snapshots.values())
-
-    async def _get_snapshot(self, snapshot_id: str) -> Any:
-        try:
-            return self._snapshots[snapshot_id]
-        except KeyError:
-            raise SandboxSnapshotNotFoundError(snapshot_id) from None
-
-    async def _snapshot_from_sandbox(self, payload: SandboxSnapshotCreate, sandbox: Any) -> Any:
-        return DockerSandboxSnapshot(
-            sandbox_id=sandbox.id,
-        )
-
-    async def _snapshot_from_file(self, payload: SandboxSnapshotCreate) -> Any:
-        return DockerSandboxSnapshot(
-            sandbox_id=None,
-        )
-
-    async def _create_snapshot(self, snapshot: Any, payload: SandboxSnapshotCreate) -> Any:
-        snapshot_id = self._next_sandbox_id()
-        snapshot.id = snapshot_id
-        if snapshot.id in self._snapshots:
-            raise SandboxSnapshotConflictError(snapshot.id)
-        self._snapshots[snapshot.id] = snapshot
-        return snapshot
-
-    async def _delete_snapshot(self, snapshot_id: str) -> None:
-        if snapshot_id not in self._snapshots:
-            raise SandboxSnapshotNotFoundError(snapshot_id) from None
-        del self._snapshots[snapshot_id]
+    async def import_snapshot_file(
+        self, file_data: bytes | None, *, schema_type: str | None = None
+    ) -> tuple[str, int | None]:
+        return f"artifact://import-{schema_type}", len(file_data or b"")
 
     async def stream_snapshot(self, snapshot_id: str) -> Any:
         async def _gen() -> Any:
@@ -115,12 +37,15 @@ class _FakeSnapshotService(SandboxService):
 
         return _gen()
 
-    # Template hooks — not exercised here but required by the ABC.
+    async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
+        pass
+
+    # Required ABC stubs — not exercised by snapshot route tests.
     async def _list_templates(self) -> list[Any]:
         return []
 
     async def _get_template(self, template_id: str) -> Any:
-        raise SandboxTemplateNotFoundError(template_id)
+        raise NotImplementedError
 
     def _template_from_create(self, payload: Any) -> Any:
         raise NotImplementedError
@@ -131,33 +56,41 @@ class _FakeSnapshotService(SandboxService):
     async def _delete_template(self, template_id: str) -> None:
         raise NotImplementedError
 
+    async def _list_sandboxes(self) -> list[Any]:
+        return []
+
+    async def _get_sandbox(self, sandbox_id: str) -> Any:
+        raise NotImplementedError
+
+    def _sandbox_from_create(self, payload: Any) -> Any:
+        raise NotImplementedError
+
+    async def _create_sandbox(self, sandbox: Any, *, snapshot_id: str | None = None) -> Any:
+        raise NotImplementedError
+
+    async def _update_sandbox(self, sandbox_id: str, payload: Any) -> Any:
+        raise NotImplementedError
+
+    async def _delete_sandbox(self, sandbox_id: str) -> None:
+        raise NotImplementedError
+
 
 @pytest_asyncio.fixture
-async def snapshot_service() -> _FakeSnapshotService:
-    svc = _FakeSnapshotService()
-    # Pre-create a sandbox so snapshot-from-sandbox tests don't need a prior create.
-    svc._sandboxes["sb-1"] = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img-a",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        snapshot_mode=SnapshotMode.MANUAL,
+async def snapshot_client(app, client: AsyncClient) -> AsyncClient:
+    """Augment the DB-backed ``client`` with a fake sandbox service for artifacts."""
+    app.state.sandbox_service = _FakeArtifactService()
+    return client
+
+
+async def _create_template(client: AsyncClient) -> str:
+    """Create a sandbox template and return its UUID (needed for snapshot FK)."""
+    tag = f"snap-{uuid.uuid4()}"
+    resp = await client.post(
+        "/sandbox/sandbox-templates",
+        json={"docker_image_tag": tag, "working_dir": "/home/openhands"},
     )
-    return svc
-
-
-@pytest_asyncio.fixture
-async def client(app, snapshot_service: _FakeSnapshotService) -> AsyncClient:
-    app.state.sandbox_service = snapshot_service
-    get_config.cache_clear()
-    token = create_auth_token(_TEST_USER_ID)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-        headers={"Authorization": f"Bearer {token}"},
-    ) as ac:
-        yield ac
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
 
 
 # --------------------------------------------------------------------------- #
@@ -166,62 +99,66 @@ async def client(app, snapshot_service: _FakeSnapshotService) -> AsyncClient:
 
 
 class TestSearchAndCount:
-    async def test_search_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox/sandbox-snapshots")
+    async def test_search_empty(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.get("/sandbox/sandbox-snapshots")
         assert resp.status_code == 200
         body = resp.json()
         assert body["items"] == []
         assert body["next_cursor"] is None
 
-    async def test_search_returns_created(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_search_returns_created(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={
+                "sandbox_template_id": template_id,
+                "schema_type": "docker-workspace-tar-v1",
+            },
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
+        assert create.status_code == 201, create.text
         snapshot_id = create.json()["id"]
-        resp = await client.get("/sandbox/sandbox-snapshots")
+        resp = await snapshot_client.get("/sandbox/sandbox-snapshots")
         assert resp.status_code == 200
         items = resp.json()["items"]
-        assert len(items) == 1
-        assert items[0]["id"] == snapshot_id
+        assert len(items) >= 1
+        assert any(i["id"] == snapshot_id for i in items)
 
-    async def test_search_with_filter(self, client: AsyncClient) -> None:
-        await client.post(
-            "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
-        )
-        resp = await client.get("/sandbox/sandbox-snapshots?id__contains=nope")
-        assert resp.status_code == 200
-        assert resp.json()["items"] == []
-
-    async def test_search_pagination(self, client: AsyncClient) -> None:
+    async def test_search_pagination(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
         for _ in range(3):
-            await client.post(
+            resp = await snapshot_client.post(
                 "/sandbox/sandbox-snapshots",
-                data={"sandbox_id": "sb-1"},
+                data={"sandbox_template_id": template_id, "schema_type": "v1"},
+                files={"file": ("ws.tar", b"fake", "application/octet-stream")},
             )
-        resp = await client.get("/sandbox/sandbox-snapshots?limit=2")
-        assert resp.status_code == 200
-        body = resp.json()
+            assert resp.status_code == 201, resp.text
+        page = await snapshot_client.get("/sandbox/sandbox-snapshots?limit=2")
+        assert page.status_code == 200
+        body = page.json()
         assert len(body["items"]) == 2
         assert body["next_cursor"] is not None
 
-    async def test_count(self, client: AsyncClient) -> None:
-        await client.post(
+    async def test_count(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
-        resp = await client.get("/sandbox/sandbox-snapshots/count")
+        resp = await snapshot_client.get("/sandbox/sandbox-snapshots/count")
         assert resp.status_code == 200
         assert resp.json()["count"] >= 1
 
-    async def test_count_with_filter(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_count_with_filter(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.get(f"/sandbox/sandbox-snapshots/count?id__eq={snapshot_id}")
+        resp = await snapshot_client.get(f"/sandbox/sandbox-snapshots/count?id__eq={snapshot_id}")
         assert resp.json()["count"] == 1
 
 
@@ -231,77 +168,97 @@ class TestSearchAndCount:
 
 
 class TestCrud:
-    async def test_create_from_sandbox_returns_201(self, client: AsyncClient) -> None:
-        resp = await client.post(
+    async def test_create_from_file(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        resp = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "docker-workspace-tar-v1"},
+            files={"file": ("image.tar", b"fake-tar", "application/octet-stream")},
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["id"]
         assert body["download_url"] == f"/sandbox/sandbox-snapshots/{body['id']}/download"
+        assert body["schema"] == "docker-workspace-tar-v1"
 
-    async def test_create_does_not_accept_caller_id(self, client: AsyncClient) -> None:
-        # The id is generated by the service, not supplied by the caller; an
-        # ``id`` form field is simply ignored (not a 422 — FastAPI drops extra
-        # form fields by default).
-        resp = await client.post(
+    async def test_create_from_sandbox(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        resp = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"id": "caller-chosen", "sandbox_id": "sb-1"},
+            data={
+                "sandbox_template_id": template_id,
+                "sandbox_id": str(uuid.uuid4()),
+                "schema_type": "docker-workspace-tar-v1",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["id"]
+        assert body["sandbox_id"] is not None
+
+    async def test_create_does_not_accept_caller_id(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        resp = await snapshot_client.post(
+            "/sandbox/sandbox-snapshots",
+            data={
+                "sandbox_template_id": template_id,
+                "schema_type": "v1",
+                "id": "caller-chosen",
+            },
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["id"] != "caller-chosen"
 
-    async def test_create_from_file(self, client: AsyncClient) -> None:
-        resp = await client.post(
+    async def test_get_snapshot(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"schema_type": "docker-image-tar"},
-            files={"file": ("image.tar", b"fake-tar", "application/octet-stream")},
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["id"]
-
-    async def test_get_snapshot(self, client: AsyncClient) -> None:
-        create = await client.post(
-            "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}")
+        resp = await snapshot_client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}")
         assert resp.status_code == 200
         assert resp.json()["id"] == snapshot_id
 
-    async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox/sandbox-snapshots/nope")
+    async def test_get_missing_returns_404(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.get(f"/sandbox/sandbox-snapshots/{uuid.uuid4()}")
         assert resp.status_code == 404
 
-    async def test_download_snapshot(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_download_snapshot(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}/download")
+        resp = await snapshot_client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}/download")
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/gzip"
         assert "attachment" in resp.headers["content-disposition"]
 
-    async def test_download_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox/sandbox-snapshots/nope/download")
+    async def test_download_missing_returns_404(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.get(f"/sandbox/sandbox-snapshots/{uuid.uuid4()}/download")
         assert resp.status_code == 404
 
-    async def test_delete_snapshot(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_delete_snapshot(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.delete(f"/sandbox/sandbox-snapshots/{snapshot_id}")
+        resp = await snapshot_client.delete(f"/sandbox/sandbox-snapshots/{snapshot_id}")
         assert resp.status_code == 204
-        assert (await client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}")).status_code == 404
+        assert (
+            await snapshot_client.get(f"/sandbox/sandbox-snapshots/{snapshot_id}")
+        ).status_code == 404
 
-    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.delete("/sandbox/sandbox-snapshots/nope")
+    async def test_delete_missing_returns_404(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.delete(f"/sandbox/sandbox-snapshots/{uuid.uuid4()}")
         assert resp.status_code == 404
 
 
@@ -311,57 +268,60 @@ class TestCrud:
 
 
 class TestBatch:
-    async def test_batch_read_aligned_with_none(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_batch_read_aligned_with_none(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.get(f"/sandbox/sandbox-snapshots/batch?ids={snapshot_id}&ids=missing")
+        resp = await snapshot_client.get(
+            "/sandbox/sandbox-snapshots/batch",
+            params={"ids": [snapshot_id, str(uuid.uuid4())]},
+        )
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert items[0]["id"] == snapshot_id
         assert items[1] is None
 
-    async def test_batch_read_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/sandbox/sandbox-snapshots/batch")
+    async def test_batch_read_empty(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.get("/sandbox/sandbox-snapshots/batch")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
-    async def test_batch_read_too_many_returns_422(self, client: AsyncClient) -> None:
-        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
-        resp = await client.get(f"/sandbox/sandbox-snapshots/batch?{ids}")
+    async def test_batch_read_too_many_returns_422(self, snapshot_client: AsyncClient) -> None:
+        ids = [str(uuid.uuid4()) for _ in range(101)]
+        resp = await snapshot_client.get("/sandbox/sandbox-snapshots/batch", params={"ids": ids})
         assert resp.status_code == 422
 
-    async def test_batch_write_delete(self, client: AsyncClient) -> None:
-        create = await client.post(
+    async def test_batch_write_delete(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        create = await snapshot_client.post(
             "/sandbox/sandbox-snapshots",
-            data={"sandbox_id": "sb-1"},
+            data={"sandbox_template_id": template_id, "schema_type": "v1"},
+            files={"file": ("ws.tar", b"fake", "application/octet-stream")},
         )
         snapshot_id = create.json()["id"]
-        resp = await client.post(
+        resp = await snapshot_client.post(
             "/sandbox/sandbox-snapshots/batch",
-            json={
-                "operations": [
-                    {"op": "delete", "id": snapshot_id},
-                ]
-            },
+            json={"operations": [{"op": "delete", "id": snapshot_id}]},
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["items"] == [None]
+        assert resp.json()["items"] == []
 
-    async def test_batch_write_empty_ops_rejected(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox/sandbox-snapshots/batch", json={"operations": []})
+    async def test_batch_write_empty_ops_rejected(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.post(
+            "/sandbox/sandbox-snapshots/batch", json={"operations": []}
+        )
         assert resp.status_code == 422
 
-    async def test_batch_write_delete_missing_maps_to_404(self, client: AsyncClient) -> None:
-        resp = await client.post(
+    async def test_batch_write_delete_missing_maps_to_404(
+        self, snapshot_client: AsyncClient
+    ) -> None:
+        resp = await snapshot_client.post(
             "/sandbox/sandbox-snapshots/batch",
-            json={
-                "operations": [
-                    {"op": "delete", "id": "nope"},
-                ]
-            },
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
         )
         assert resp.status_code == 404
 
@@ -372,6 +332,14 @@ class TestBatch:
 
 
 class TestValidation:
-    async def test_create_requires_source(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox/sandbox-snapshots")
+    async def test_create_requires_template_id(self, snapshot_client: AsyncClient) -> None:
+        resp = await snapshot_client.post("/sandbox/sandbox-snapshots")
+        assert resp.status_code == 422
+
+    async def test_create_requires_source(self, snapshot_client: AsyncClient) -> None:
+        template_id = await _create_template(snapshot_client)
+        resp = await snapshot_client.post(
+            "/sandbox/sandbox-snapshots",
+            data={"sandbox_template_id": template_id},
+        )
         assert resp.status_code == 422

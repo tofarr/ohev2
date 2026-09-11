@@ -1,37 +1,45 @@
-"""HTTP routes for the sandbox feature.
+"""HTTP routes for the DB-backed sandbox template resource.
 
-Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox/``: the
-collection is ``/sandbox/sandbox-templates`` with cursor pagination; create
-is ``POST``, retrieve is ``GET``, remove is ``DELETE``, plus batch read/write
-and count. Templates are functionally immutable (no ``PATCH``): the batch
-write accepts create and delete operations only.
+Uniform REST surface (AGENTS.md §3) mounted under ``/sandbox/sandbox-templates``:
+cursor pagination, CRUD (create, read, update, delete), batch read/write, and
+count. Templates are mutable — unlike the prior image-inventory model they can
+be updated via ``PATCH`` without a redeploy.
 
-Template state is owned by the configured :class:`SandboxService` (a
-per-app async context manager), not by a request-scoped session, so handlers
-resolve the service from ``app.state`` and call it directly.
+Templates are DB-backed (not provider inventory), so handlers use a
+request-scoped DB session and the :class:`SandboxTemplateService`.
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
-from openhands.ev2.sandbox.sandbox_models import SandboxTemplate
-from openhands.ev2.sandbox.sandbox_schemas import (
+from openhands.ev2.auth.auth_dependencies import (
+    depends_permissions,
+    depends_permissions_or_none,
+    depends_user_id,
+)
+from openhands.ev2.db import SessionDep
+from openhands.ev2.sandbox.sandbox_service import (
+    BatchPermissionDeniedError,
+    SandboxTemplateConflictError,
+    SandboxTemplateNotFoundError,
+    SandboxTemplatePermissionScopeError,
+)
+from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_template_schemas import (
     SandboxTemplateBatchWriteRequest,
     SandboxTemplateCreate,
     SandboxTemplateRead,
     SandboxTemplateSearchFilter,
     SandboxTemplateSearchResult,
+    SandboxTemplateUpdate,
 )
-from openhands.ev2.sandbox.sandbox_service import (
-    BatchPermissionDeniedError,
-    SandboxService,
-    SandboxTemplateConflictError,
-    SandboxTemplateNotFoundError,
-    SandboxTemplatePermissionScopeError,
+from openhands.ev2.sandbox.sandbox_template_service import (
+    SandboxTemplateInUseError,
+    SandboxTemplateService,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
@@ -40,21 +48,21 @@ from openhands.ev2.util.search_filter import SearchFilter
 router = APIRouter(prefix="/sandbox/sandbox-templates", tags=["sandbox-templates"])
 
 
-async def get_sandbox_service(request: Request) -> SandboxService:
-    """Resolve the app-scoped sandbox service (started in the app lifespan)."""
-    service = getattr(request.app.state, "sandbox_service", None)
-    if not isinstance(service, SandboxService):
+def _cursor(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Sandbox service is not available.",
-        )
-    return service
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid cursor; expected a UUID.",
+        ) from exc
 
 
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (SandboxTemplateNotFoundError, status.HTTP_404_NOT_FOUND),
-    (SandboxTemplateConflictError, status.HTTP_409_CONFLICT),
     (SandboxTemplatePermissionScopeError, status.HTTP_403_FORBIDDEN),
+    (SandboxTemplateConflictError, status.HTTP_409_CONFLICT),
+    (SandboxTemplateInUseError, status.HTTP_409_CONFLICT),
     (BatchPermissionDeniedError, status.HTTP_403_FORBIDDEN),
 )
 
@@ -68,136 +76,175 @@ def _map_exception_to_status(exc: Exception) -> HTTPException:
 
 @router.get("", response_model=SandboxTemplateSearchResult)
 async def search_sandbox_templates(
-    request: Request,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.SEARCH)),
     ],
     search_filter: SandboxTemplateSearchFilter = Depends(),  # noqa: B008
-    cursor: Annotated[str | None, Query(description="Opaque id cursor")] = None,
+    cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> SandboxTemplateSearchResult:
-    service = await get_sandbox_service(request)
-    templates, next_cursor = await service.search_templates(
-        cursor=cursor,
+    service = SandboxTemplateService(session, perm_filter)
+    cursor_uuid = _cursor(cursor) if cursor is not None else None
+    rows, next_cursor = await service.search(
+        cursor=cursor_uuid,
         limit=limit,
         search_filter=search_filter,
-        perm_filter=perm_filter,
     )
     return SandboxTemplateSearchResult(
-        items=[SandboxTemplateRead.model_validate(t) for t in templates],
-        next_cursor=next_cursor,
+        items=[service.to_read(row) for row in rows],
+        next_cursor=str(next_cursor) if next_cursor is not None else None,
         limit=limit,
     )
 
 
 @router.get("/count", response_model=CountResult)
 async def count_sandbox_templates(
-    request: Request,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.SEARCH)),
     ],
     search_filter: SandboxTemplateSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
-    service = await get_sandbox_service(request)
-    total = await service.count_templates(search_filter=search_filter, perm_filter=perm_filter)
+    service = SandboxTemplateService(session, perm_filter)
+    total = await service.count(search_filter=search_filter)
     return CountResult(count=total)
 
 
 @router.post("", response_model=SandboxTemplateRead, status_code=status.HTTP_201_CREATED)
 async def create_sandbox_template(
     payload: SandboxTemplateCreate,
-    request: Request,
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.CREATE)),
     ],
 ) -> SandboxTemplateRead:
-    service = await get_sandbox_service(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    service = SandboxTemplateService(session, perm_filter)
     try:
-        template = await service.create_template(payload, perm_filter=perm_filter)
-    except Exception as exc:
+        template = await service.create(payload, creator_id=user_id)
+    except SandboxTemplatePermissionScopeError as exc:
         raise _map_exception_to_status(exc) from exc
-    return SandboxTemplateRead.model_validate(template)
+    await session.commit()
+    return service.to_read(template)
 
 
 @router.get("/batch", response_model=BatchReadResult[SandboxTemplateRead])
 async def get_sandbox_templates_batch(
-    request: Request,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.READ)),
     ],
-    ids: Annotated[list[str], Query(default_factory=list)],
+    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
 ) -> BatchReadResult[SandboxTemplateRead]:
     if len(ids) > 100:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="ids: at most 100 ids are allowed per batch read.",
         )
-    service = await get_sandbox_service(request)
-    templates = await service.get_templates(ids, perm_filter=perm_filter)
+    service = SandboxTemplateService(session, perm_filter)
+    templates = await service.get_many(ids)
     return BatchReadResult(
-        items=[SandboxTemplateRead.model_validate(t) if t is not None else None for t in templates],
+        items=[service.to_read(t) if t is not None else None for t in templates],
     )
 
 
 @router.post("/batch", response_model=BatchWriteResult[SandboxTemplateRead])
 async def write_sandbox_templates_batch(
     payload: SandboxTemplateBatchWriteRequest,
-    request: Request,
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
     create_filter: Annotated[
         SearchFilter[SandboxTemplate] | None,
         Depends(depends_permissions_or_none(SandboxTemplate, Action.CREATE)),
+    ],
+    update_filter: Annotated[
+        SearchFilter[SandboxTemplate] | None,
+        Depends(depends_permissions_or_none(SandboxTemplate, Action.UPDATE)),
     ],
     delete_filter: Annotated[
         SearchFilter[SandboxTemplate] | None,
         Depends(depends_permissions_or_none(SandboxTemplate, Action.DELETE)),
     ],
 ) -> BatchWriteResult[SandboxTemplateRead]:
-    service = await get_sandbox_service(request)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    service = SandboxTemplateService(session)
     perm_filters = {
         Action.CREATE: create_filter,
+        Action.UPDATE: update_filter,
         Action.DELETE: delete_filter,
     }
     try:
-        results = await service.apply_batch(payload.operations, perm_filters)
+        results = await service.apply_batch(payload.operations, perm_filters, creator_id=user_id)
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()
     return BatchWriteResult(
-        items=[SandboxTemplateRead.model_validate(t) if t is not None else None for t in results],
+        items=[service.to_read(t) if t is not None else None for t in results],
     )
 
 
 @router.get("/{template_id}", response_model=SandboxTemplateRead)
 async def get_sandbox_template(
-    template_id: str,
-    request: Request,
+    template_id: uuid.UUID,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.READ)),
     ],
 ) -> SandboxTemplateRead:
-    service = await get_sandbox_service(request)
+    service = SandboxTemplateService(session, perm_filter)
     try:
-        template = await service.get_template(template_id, perm_filter=perm_filter)
+        template = await service.get(template_id)
     except SandboxTemplateNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
-    return SandboxTemplateRead.model_validate(template)
+    return service.to_read(template)
+
+
+@router.patch("/{template_id}", response_model=SandboxTemplateRead)
+async def update_sandbox_template(
+    template_id: uuid.UUID,
+    payload: SandboxTemplateUpdate,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[SandboxTemplate],
+        Depends(depends_permissions(SandboxTemplate, Action.UPDATE)),
+    ],
+) -> SandboxTemplateRead:
+    service = SandboxTemplateService(session, perm_filter)
+    try:
+        template = await service.update(template_id, payload)
+    except SandboxTemplateNotFoundError as exc:
+        raise _map_exception_to_status(exc) from exc
+    await session.commit()
+    return service.to_read(template)
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sandbox_template(
-    template_id: str,
-    request: Request,
+    template_id: uuid.UUID,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.DELETE)),
     ],
 ) -> None:
-    service = await get_sandbox_service(request)
+    service = SandboxTemplateService(session, perm_filter)
     try:
-        await service.delete_template(template_id, perm_filter=perm_filter)
-    except SandboxTemplateNotFoundError as exc:
+        await service.delete(template_id)
+    except (SandboxTemplateNotFoundError, SandboxTemplateInUseError) as exc:
         raise _map_exception_to_status(exc) from exc
+    await session.commit()

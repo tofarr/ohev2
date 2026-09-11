@@ -32,6 +32,9 @@ Tables:
 * ``feature_flag_role_assignments``     — per-role overrides of feature flags.
 * ``groups``                 — named groups of users.
 * ``group_users``            — group-to-user memberships.
+* ``sandbox_templates``      — DB-backed sandbox templates (mutable, provider-neutral).
+* ``sandbox_configs``        — durable sandbox intent (DB-backed source of truth).
+* ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
 """
 
 from __future__ import annotations
@@ -1158,8 +1161,160 @@ def upgrade() -> None:
         "ix_mcp_aggregated_usage_creator_id", "mcp_aggregated_usage", ["creator_id"], unique=False
     )
 
+    # ------------------------------------------------------------------ #
+    # sandbox_templates
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "sandbox_templates",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("docker_image_tag", sa.String(length=1024), nullable=False),
+        sa.Column("delete_after_idle_seconds", sa.Integer(), nullable=True),
+        sa.Column("in_container_user_id", sa.Integer(), nullable=True),
+        sa.Column("in_container_group_id", sa.Integer(), nullable=True),
+        sa.Column("max_memory", sa.BigInteger(), nullable=True),
+        sa.Column("exposed_ports", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("env_vars", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("working_dir", sa.String(length=1024), nullable=False),
+        sa.Column("snapshot_dirs", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("snapshot_on_deactivate", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_sandbox_templates_creator_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="DB-backed sandbox templates (mutable, provider-neutral)",
+    )
+    op.create_index(
+        "ix_sandbox_templates_creator_id", "sandbox_templates", ["creator_id"], unique=False
+    )
+    op.create_index(
+        "ix_sandbox_templates_docker_image_tag",
+        "sandbox_templates",
+        ["docker_image_tag"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
+    # sandbox_configs
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "sandbox_configs",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
+        sa.Column("session_api_key", sa.String(length=8192), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column("sandbox_snapshot_id", sa.Uuid(), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("snapshot_on_deactivate", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_sandbox_configs_creator_id_users",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_template_id"],
+            ["sandbox_templates.id"],
+            ondelete="RESTRICT",
+            name="fk_sandbox_configs_sandbox_template_id_sandbox_templates",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Durable sandbox intent (DB-backed source of truth)",
+    )
+    op.create_index(
+        "ix_sandbox_configs_creator_id", "sandbox_configs", ["creator_id"], unique=False
+    )
+    op.create_index(
+        "ix_sandbox_configs_sandbox_template_id",
+        "sandbox_configs",
+        ["sandbox_template_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
+    # sandbox_snapshots
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "sandbox_snapshots",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
+        sa.Column("schema", sa.String(length=255), nullable=False),
+        sa.Column("download_url", sa.String(length=2048), nullable=False),
+        sa.Column("sandbox_id", sa.Uuid(), nullable=True),
+        sa.Column("size_bytes", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_sandbox_snapshots_creator_id_users",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_template_id"],
+            ["sandbox_templates.id"],
+            ondelete="RESTRICT",
+            name="fk_sandbox_snapshots_sandbox_template_id_sandbox_templates",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="DB-indexed sandbox workspace snapshots (tarball artifacts)",
+    )
+    op.create_index(
+        "ix_sandbox_snapshots_creator_id", "sandbox_snapshots", ["creator_id"], unique=False
+    )
+    op.create_index(
+        "ix_sandbox_snapshots_sandbox_template_id",
+        "sandbox_snapshots",
+        ["sandbox_template_id"],
+        unique=False,
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_sandbox_snapshots_sandbox_template_id", table_name="sandbox_snapshots")
+    op.drop_index("ix_sandbox_snapshots_creator_id", table_name="sandbox_snapshots")
+    op.drop_table("sandbox_snapshots")
+    op.drop_index("ix_sandbox_configs_sandbox_template_id", table_name="sandbox_configs")
+    op.drop_index("ix_sandbox_configs_creator_id", table_name="sandbox_configs")
+    op.drop_table("sandbox_configs")
+    op.drop_index("ix_sandbox_templates_docker_image_tag", table_name="sandbox_templates")
+    op.drop_index("ix_sandbox_templates_creator_id", table_name="sandbox_templates")
+    op.drop_table("sandbox_templates")
     op.drop_index("ix_mcp_aggregated_usage_creator_id", table_name="mcp_aggregated_usage")
     op.drop_index("ix_mcp_aggregated_usage_minute", table_name="mcp_aggregated_usage")
     op.drop_table("mcp_aggregated_usage")
