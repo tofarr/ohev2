@@ -40,32 +40,23 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import httpx
 from kubernetes import client as k8s_client  # type: ignore[import-untyped]
 from kubernetes.client import exceptions as k8s_exc  # type: ignore[import-untyped]
 from pydantic import Field
 
-from openhands.ev2.sandbox.k8s_sandbox_models import (
-    K8sSandbox,
-    K8sSandboxSnapshot,
-    K8sSandboxTemplate,
-)
+from openhands.ev2.sandbox.k8s_sandbox_models import K8sSandbox
 from openhands.ev2.sandbox.sandbox_models import (
-    ExposedPort,
     ExposedUrl,
     Sandbox,
-    SandboxSnapshot,
     SandboxStatus,
-    SandboxTemplate,
     SnapshotMode,
     VolumeMount,
 )
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
-    SandboxSnapshotCreate,
-    SandboxTemplateCreate,
     SandboxUpdate,
 )
 from openhands.ev2.sandbox.sandbox_service import (
@@ -75,10 +66,11 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxSnapshotConflictError,
     SandboxSnapshotNotFoundError,
     SandboxSnapshotUnsupportedError,
-    SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
 )
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 from openhands.ev2.util import snapshot_store
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 logger = logging.getLogger(__name__)
 
@@ -292,26 +284,6 @@ class K8sSandboxService(SandboxService):
         return config
 
     # ------------------------------------------------------------------ #
-    # Provider hooks — templates.
-    # ------------------------------------------------------------------ #
-    async def _list_templates(self) -> list[SandboxTemplate]:
-        return cast("list[SandboxTemplate]", await asyncio.to_thread(self._sync_list_templates))
-
-    async def _get_template(self, template_id: str) -> SandboxTemplate:
-        return await asyncio.to_thread(self._sync_get_template, template_id)
-
-    def _template_from_create(self, payload: SandboxTemplateCreate) -> SandboxTemplate:
-        return _k8s_template_from_payload(payload, self.exposed_ports, self.snapshot_mode)
-
-    async def _create_template(self, template: SandboxTemplate) -> K8sSandboxTemplate:
-        k8s_template = cast(K8sSandboxTemplate, template)
-        await asyncio.to_thread(self._sync_create_template, k8s_template)
-        return k8s_template
-
-    async def _delete_template(self, template_id: str) -> None:
-        await asyncio.to_thread(self._sync_delete_template, template_id)
-
-    # ------------------------------------------------------------------ #
     # Provider hooks — sandboxes.
     # ------------------------------------------------------------------ #
     async def _list_sandboxes(self) -> list[Sandbox]:
@@ -354,62 +326,49 @@ class K8sSandboxService(SandboxService):
         await asyncio.to_thread(self._sync_delete_sandbox, sandbox_id)
 
     # ------------------------------------------------------------------ #
-    # Provider hooks — snapshots.
-    # A K8s snapshot is a gzip tarball of the sandbox PVC workspace, stored
-    # in ``snapshot_dir`` (shared with the Docker provider). Capture runs a
-    # one-shot pod that tars the workspace into the store; import writes raw
-    # bytes; download streams the tarball; restore (at create time) runs a
-    # one-shot pod that extracts into a fresh PVC.
+    # Snapshot artifact hooks. A K8s snapshot is a gzip tarball of the sandbox
+    # PVC workspace, stored in ``snapshot_dir`` (shared with the Docker
+    # provider). Capture runs a one-shot pod that tars the workspace into the
+    # store; import writes raw bytes; download streams the tarball; restore (at
+    # create time) runs a one-shot pod that extracts into a fresh PVC. These
+    # operate on snapshot ids; the DB index row is owned by
+    # ``SandboxSnapshotService``.
     # ------------------------------------------------------------------ #
-    async def _list_snapshots(self) -> list[SandboxSnapshot]:
-        return cast("list[SandboxSnapshot]", await asyncio.to_thread(self._sync_list_snapshots))
-
-    async def _get_snapshot(self, snapshot_id: str) -> SandboxSnapshot:
-        return await asyncio.to_thread(self._sync_get_snapshot, snapshot_id)
-
-    async def _snapshot_from_sandbox(
-        self,
-        payload: SandboxSnapshotCreate,
-        sandbox: Sandbox,
-    ) -> SandboxSnapshot:
-        # Pre-persistence model; id assigned in _create_snapshot.
-        return K8sSandboxSnapshot(
-            sandbox_id=sandbox.id,
-        )
-
-    async def _snapshot_from_file(
-        self,
-        payload: SandboxSnapshotCreate,
-    ) -> SandboxSnapshot:
-        # Pre-persistence model; id assigned in _create_snapshot.
-        return K8sSandboxSnapshot(
-            sandbox_id=None,
-        )
-
-    async def _create_snapshot(
-        self,
-        snapshot: SandboxSnapshot,
-        payload: SandboxSnapshotCreate,
-    ) -> SandboxSnapshot:
-        k8s_snapshot = cast(K8sSandboxSnapshot, snapshot)
-        snapshot_id = uuid.uuid4().hex
-        k8s_snapshot.id = snapshot_id
-        k8s_snapshot.archive_path = str(
-            snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
-        )
-        if payload.sandbox_id is not None:
-            await asyncio.to_thread(self._sync_capture_snapshot, k8s_snapshot, payload.sandbox_id)
-        else:
-            assert payload.file_data is not None
-            await asyncio.to_thread(self._sync_import_snapshot, k8s_snapshot, payload.file_data)
-        return await self._get_snapshot(snapshot_id)
-
-    async def _delete_snapshot(self, snapshot_id: str) -> None:
-        await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
-
     async def stream_snapshot(self, snapshot_id: str) -> Any:
         """Stream the snapshot tarball (gzip) for download."""
         return snapshot_store.stream_snapshot(self.snapshot_dir, snapshot_id)
+
+    async def capture_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        sandbox_perm_filter: SearchFilter[Any] = ALL,
+    ) -> tuple[str, int | None]:
+        """Capture a workspace tarball from a live sandbox's PVC.
+
+        Returns ``(snapshot_id, size_bytes)``.
+        """
+        snapshot_id = uuid.uuid4().hex
+        await asyncio.to_thread(self._sync_capture_snapshot, snapshot_id, sandbox_id)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return snapshot_id, size
+
+    async def import_snapshot_file(
+        self,
+        file_data: bytes | None,
+        *,
+        schema_type: str | None = None,
+    ) -> tuple[str, int | None]:
+        """Store an uploaded tarball and return ``(snapshot_id, size_bytes)``."""
+        assert file_data is not None
+        snapshot_id = uuid.uuid4().hex
+        await asyncio.to_thread(self._sync_import_snapshot, snapshot_id, file_data)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return snapshot_id, size
+
+    async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
+        """Delete the stored tarball for a snapshot."""
+        await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
 
     # ------------------------------------------------------------------ #
     # last_accessed_at derivation + lifecycle sweep.
@@ -503,10 +462,10 @@ class K8sSandboxService(SandboxService):
         paused = 0
         deleted = 0
         for sandbox in sandboxes:
-            template = await self._safe_template(sandbox.sandbox_template_id)
-            if template is None:
+            knobs = await self._safe_template(sandbox.sandbox_template_id)
+            if knobs is None:
                 continue
-            action = await self._lifecycle_action(sandbox, template)
+            action = await self._lifecycle_action(sandbox, knobs)
             if action == "deleted":
                 deleted += 1
             elif action == "paused":
@@ -518,31 +477,31 @@ class K8sSandboxService(SandboxService):
             parts.append(f"deleted {deleted} sandbox(es)")
         return "; ".join(parts) if parts else None
 
-    async def _safe_template(self, template_id: str) -> K8sSandboxTemplate | None:
+    async def _safe_template(self, template_id: str) -> _K8sTemplateSpec | None:
         try:
-            return cast(K8sSandboxTemplate, await self._get_template(template_id))
+            return await asyncio.to_thread(self._sync_get_template, template_id)
         except SandboxTemplateNotFoundError:
             return None
 
-    async def _lifecycle_action(self, sandbox: K8sSandbox, template: SandboxTemplate) -> str | None:
+    async def _lifecycle_action(self, sandbox: K8sSandbox, knobs: _K8sTemplateSpec) -> str | None:
         """Apply the highest-priority lifespan action to *sandbox*."""
         now = datetime.now(UTC)
-        if template.max_age_seconds is not None and (now - sandbox.created_at) > timedelta(
-            seconds=template.max_age_seconds
+        if knobs.max_age_seconds is not None and (now - sandbox.created_at) > timedelta(
+            seconds=knobs.max_age_seconds
         ):
             await self._delete_sandbox(sandbox.id)
             return "deleted"
-        if sandbox.status is SandboxStatus.ACTIVE and template.idle_pause_seconds is not None:
+        if sandbox.status is SandboxStatus.ACTIVE and knobs.idle_pause_seconds is not None:
             idle_seconds = self._idle_seconds(sandbox)
-            if idle_seconds is not None and idle_seconds > template.idle_pause_seconds:
+            if idle_seconds is not None and idle_seconds > knobs.idle_pause_seconds:
                 await self._update_sandbox(
                     sandbox.id, SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
                 )
                 return "paused"
-        if sandbox.status is SandboxStatus.INACTIVE and template.paused_delete_seconds is not None:
+        if sandbox.status is SandboxStatus.INACTIVE and knobs.paused_delete_seconds is not None:
             paused_at = await asyncio.to_thread(self._sync_paused_at, sandbox.id)
             if paused_at is not None and (now - paused_at) > timedelta(
-                seconds=template.paused_delete_seconds
+                seconds=knobs.paused_delete_seconds
             ):
                 await self._delete_sandbox(sandbox.id)
                 return "deleted"
@@ -573,19 +532,13 @@ class K8sSandboxService(SandboxService):
     # ------------------------------------------------------------------ #
     # Synchronous Kubernetes API calls (offloaded from the event loop).
     # ------------------------------------------------------------------ #
-    def _sync_list_templates(self) -> list[K8sSandboxTemplate]:
-        cm_list = self._core_api.list_namespaced_config_map(
-            namespace=self.namespace,
-            label_selector=f"{_LABEL_TEMPLATE}=true",
-        )
-        return [
-            template
-            for cm in cm_list.items
-            if (template := _template_from_config_map(cm, self.exposed_ports, self.snapshot_mode))
-            is not None
-        ]
+    def _sync_get_template(self, template_id: str) -> _K8sTemplateSpec:
+        """Read a template's image + lifespan knobs from its ConfigMap.
 
-    def _sync_get_template(self, template_id: str) -> K8sSandboxTemplate:
+        Templates are DB-backed; the ConfigMap is the provider-side mirror the
+        sandbox creation path reads for image/env/working_dir/memory and the
+        sweep reads for lifespan knobs.
+        """
         name = _sanitize_name(template_id)
         try:
             cm = self._core_api.read_namespaced_config_map(name=name, namespace=self.namespace)
@@ -593,32 +546,10 @@ class K8sSandboxService(SandboxService):
             if exc.status == 404:
                 raise SandboxTemplateNotFoundError(template_id) from None
             raise
-        template = _template_from_config_map(cm, self.exposed_ports, self.snapshot_mode)
-        if template is None:
+        spec = _template_spec_from_config_map(cm)
+        if spec is None:
             raise SandboxTemplateNotFoundError(template_id)
-        return template
-
-    def _sync_create_template(self, template: K8sSandboxTemplate) -> None:
-        name = _sanitize_name(template.id)
-        # Check for an existing template ConfigMap; raise conflict if present.
-        try:
-            self._core_api.read_namespaced_config_map(name=name, namespace=self.namespace)
-        except k8s_exc.ApiException as exc:
-            if exc.status != 404:
-                raise
-        else:
-            raise SandboxTemplateConflictError(template.id)
-        cm = _template_to_config_map(template, self.namespace)
-        self._core_api.create_namespaced_config_map(namespace=self.namespace, body=cm)
-
-    def _sync_delete_template(self, template_id: str) -> None:
-        name = _sanitize_name(template_id)
-        try:
-            self._core_api.delete_namespaced_config_map(name=name, namespace=self.namespace)
-        except k8s_exc.ApiException as exc:
-            if exc.status == 404:
-                raise SandboxTemplateNotFoundError(template_id) from None
-            raise
+        return spec
 
     # ------------------------------------------------------------------ #
     # Synchronous Deployment / PVC / Service calls.
@@ -810,7 +741,7 @@ class K8sSandboxService(SandboxService):
         self,
         *,
         sandbox_id: str,
-        template: K8sSandboxTemplate,
+        template: _K8sTemplateSpec,
         pvc_name: str,
         namespace: str,
         image_pull_policy: str,
@@ -849,7 +780,7 @@ class K8sSandboxService(SandboxService):
 
     def _build_container(
         self,
-        template: K8sSandboxTemplate,
+        template: _K8sTemplateSpec,
         image_pull_policy: str,
         exposed_ports: list[ExposedPort],
     ) -> k8s_client.V1Container:
@@ -874,7 +805,7 @@ class K8sSandboxService(SandboxService):
         )
 
     @staticmethod
-    def _build_env(template: K8sSandboxTemplate) -> list[k8s_client.V1EnvVar]:
+    def _build_env(template: _K8sTemplateSpec) -> list[k8s_client.V1EnvVar]:
         """Build the container env list, ensuring SESSION_API_KEY is present."""
         env = [k8s_client.V1EnvVar(name=k, value=v) for k, v in template.initial_env.items()]
         # Temporary measure: the agent server does not start with --host 0.0.0.0
@@ -884,7 +815,7 @@ class K8sSandboxService(SandboxService):
         return env
 
     @staticmethod
-    def _build_resources(template: K8sSandboxTemplate) -> k8s_client.V1ResourceRequirements | None:
+    def _build_resources(template: _K8sTemplateSpec) -> k8s_client.V1ResourceRequirements | None:
         if template.max_memory is None:
             return None
         return k8s_client.V1ResourceRequirements(limits={"memory": str(template.max_memory)})
@@ -970,43 +901,15 @@ class K8sSandboxService(SandboxService):
     # ------------------------------------------------------------------ #
     # Synchronous snapshot store calls (offloaded from the event loop).
     # ------------------------------------------------------------------ #
-    def _sync_list_snapshots(self) -> list[K8sSandboxSnapshot]:
-        snapshots: list[K8sSandboxSnapshot] = []
-        for snap_id in snapshot_store.list_snapshot_ids(self.snapshot_dir):
-            snapshot = self._snapshot_from_store(snap_id)
-            if snapshot is not None:
-                snapshots.append(snapshot)
-        return snapshots
-
-    def _sync_get_snapshot(self, snapshot_id: str) -> K8sSandboxSnapshot:
-        snapshot = self._snapshot_from_store(snapshot_id)
-        if snapshot is None:
-            raise SandboxSnapshotNotFoundError(snapshot_id) from None
-        return snapshot
-
-    def _snapshot_from_store(self, snapshot_id: str) -> K8sSandboxSnapshot | None:
-        """Build a snapshot model from a stored tarball, or ``None`` if absent."""
-        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
-            return None
-        created = snapshot_store.snapshot_created_at(self.snapshot_dir, snapshot_id)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return K8sSandboxSnapshot(
-            id=snapshot_id,
-            created_at=created or datetime.now(UTC),
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)),
-            size_bytes=size,
-            sandbox_id=None,  # source-sandbox is not recoverable from the tarball alone
-        )
-
-    def _sync_capture_snapshot(self, snapshot: K8sSandboxSnapshot, sandbox_id: str) -> None:
-        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot.id):
-            raise SandboxSnapshotConflictError(snapshot.id)
+    def _sync_capture_snapshot(self, snapshot_id: str, sandbox_id: str) -> None:
+        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
+            raise SandboxSnapshotConflictError(snapshot_id)
         sandbox = self._sync_get_sandbox(sandbox_id)
         template = self._sync_get_template(sandbox.sandbox_template_id)
         working_dir = template.working_dir or "/home/openhands"
         pvc_name = f"{sandbox_id}-data"
         pod_name = f"{sandbox_id}-snapshot"
-        archive_name = snapshot_store.snapshot_path(self.snapshot_dir, snapshot.id).name
+        archive_name = snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id).name
         pod = k8s_client.V1Pod(
             metadata=k8s_client.V1ObjectMeta(
                 name=pod_name,
@@ -1051,11 +954,11 @@ class K8sSandboxService(SandboxService):
         with contextlib.suppress(k8s_exc.ApiException):
             self._core_api.delete_namespaced_pod(name=pod_name, namespace=self.namespace)
 
-    def _sync_import_snapshot(self, snapshot: K8sSandboxSnapshot, file_data: bytes) -> None:
+    def _sync_import_snapshot(self, snapshot_id: str, file_data: bytes) -> None:
         try:
-            snapshot_store.import_snapshot(self.snapshot_dir, snapshot.id, file_data)
+            snapshot_store.import_snapshot(self.snapshot_dir, snapshot_id, file_data)
         except FileExistsError as exc:
-            raise SandboxSnapshotConflictError(snapshot.id) from exc
+            raise SandboxSnapshotConflictError(snapshot_id) from exc
 
     def _sync_delete_snapshot(self, snapshot_id: str) -> None:
         if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
@@ -1090,12 +993,26 @@ def _generate_sandbox_name() -> str:
     return f"sandbox-{suffix}"
 
 
-def _template_from_config_map(
-    cm: Any,
-    exposed_ports: list[ExposedPort],
-    snapshot_mode: SnapshotMode = SnapshotMode.UNSUPPORTED,
-) -> K8sSandboxTemplate | None:
-    """Build a :class:`K8sSandboxTemplate` from a ConfigMap, or ``None``.
+class _K8sTemplateSpec(NamedTuple):
+    """Image + lifespan knobs read from a template's ConfigMap.
+
+    Templates are DB-backed; the ConfigMap is the provider-side mirror the
+    sandbox creation path and the lifecycle sweep read for the fields they
+    need (image, command, env, working_dir, memory, lifespan knobs).
+    """
+
+    id: str
+    command: list[str] | None
+    initial_env: dict[str, str]
+    working_dir: str
+    max_memory: int | None
+    idle_pause_seconds: int | None
+    paused_delete_seconds: int | None
+    max_age_seconds: int | None
+
+
+def _template_spec_from_config_map(cm: Any) -> _K8sTemplateSpec | None:
+    """Build a :class:`_K8sTemplateSpec` from a ConfigMap, or ``None``.
 
     Returns ``None`` when the ConfigMap does not carry the template label or
     is missing the image (template id) data.
@@ -1107,74 +1024,15 @@ def _template_from_config_map(
     template_id = data.get("image")
     if not template_id:
         return None
-    return K8sSandboxTemplate(
+    return _K8sTemplateSpec(
         id=template_id,
         command=_parse_json_list(data.get(_CM_KEY_COMMAND)),
         initial_env=_parse_json_dict(data.get(_CM_KEY_INITIAL_ENV)),
         working_dir=data.get(_CM_KEY_WORKING_DIR) or "/home/openhands",
+        max_memory=_parse_int(data.get(_CM_KEY_MAX_MEMORY)),
         idle_pause_seconds=_parse_int(data.get(_CM_KEY_IDLE_PAUSE_SECONDS)),
         paused_delete_seconds=_parse_int(data.get(_CM_KEY_PAUSED_DELETE_SECONDS)),
         max_age_seconds=_parse_int(data.get(_CM_KEY_MAX_AGE_SECONDS)),
-        max_memory=_parse_int(data.get(_CM_KEY_MAX_MEMORY)),
-        exposed_ports=_parse_exposed_ports(data.get(_CM_KEY_EXPOSED_PORTS)) or list(exposed_ports),
-        snapshot_mode=_parse_snapshot_mode(data.get(_CM_KEY_SNAPSHOT_MODE), snapshot_mode),
-        created_at=_parse_created((cm.metadata.creation_timestamp or "") if cm.metadata else ""),
-    )
-
-
-def _template_to_config_map(template: K8sSandboxTemplate, namespace: str) -> Any:
-    """Build a Kubernetes ConfigMap from a :class:`K8sSandboxTemplate`."""
-
-    data = {
-        "image": template.id,
-        _CM_KEY_WORKING_DIR: template.working_dir,
-        _CM_KEY_IDLE_PAUSE_SECONDS: str(template.idle_pause_seconds)
-        if template.idle_pause_seconds is not None
-        else "",
-        _CM_KEY_PAUSED_DELETE_SECONDS: str(template.paused_delete_seconds)
-        if template.paused_delete_seconds is not None
-        else "",
-        _CM_KEY_MAX_AGE_SECONDS: str(template.max_age_seconds)
-        if template.max_age_seconds is not None
-        else "",
-        _CM_KEY_MAX_MEMORY: str(template.max_memory) if template.max_memory is not None else "",
-        _CM_KEY_COMMAND: json.dumps(template.command) if template.command else "",
-        _CM_KEY_INITIAL_ENV: json.dumps(template.initial_env),
-        _CM_KEY_EXPOSED_PORTS: json.dumps([p.model_dump() for p in template.exposed_ports]),
-        _CM_KEY_SNAPSHOT_MODE: template.snapshot_mode.value,
-    }
-    return k8s_client.V1ConfigMap(
-        metadata=k8s_client.V1ObjectMeta(
-            name=_sanitize_name(template.id),
-            namespace=namespace,
-            labels={_LABEL_TEMPLATE: "true"},
-        ),
-        data=data,
-    )
-
-
-def _k8s_template_from_payload(
-    payload: SandboxTemplateCreate,
-    exposed_ports: list[ExposedPort],
-    snapshot_mode: SnapshotMode = SnapshotMode.UNSUPPORTED,
-) -> K8sSandboxTemplate:
-    """Build a K8s template from a create payload (no persistence)."""
-    ports = (
-        [ExposedPort(**p) if isinstance(p, dict) else p for p in payload.exposed_ports]
-        if payload.exposed_ports
-        else list(exposed_ports)
-    )
-    return K8sSandboxTemplate(
-        id=payload.id,
-        command=payload.command,
-        initial_env=payload.initial_env,
-        working_dir=payload.working_dir,
-        idle_pause_seconds=payload.idle_pause_seconds,
-        paused_delete_seconds=payload.paused_delete_seconds,
-        max_age_seconds=payload.max_age_seconds,
-        max_memory=payload.max_memory,
-        exposed_ports=ports,
-        snapshot_mode=payload.snapshot_mode if payload.snapshot_mode is not None else snapshot_mode,
     )
 
 
@@ -1339,30 +1197,6 @@ def _parse_json_dict(value: str | None) -> dict[str, str]:
     if isinstance(parsed, dict):
         return {str(k): str(v) for k, v in parsed.items()}
     return {}
-
-
-def _parse_exposed_ports(value: str | None) -> list[ExposedPort] | None:
-    """Parse a JSON list of exposed ports from a string."""
-    if not value:
-        return None
-
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(parsed, list):
-        return None
-    return [ExposedPort(**item) if isinstance(item, dict) else item for item in parsed]
-
-
-def _parse_snapshot_mode(value: str | None, fallback: SnapshotMode) -> SnapshotMode:
-    """Parse a snapshot mode string, falling back to *fallback* when absent/invalid."""
-    if not value:
-        return fallback
-    try:
-        return SnapshotMode(value)
-    except ValueError:
-        return fallback
 
 
 def _parse_created(created: object) -> datetime:

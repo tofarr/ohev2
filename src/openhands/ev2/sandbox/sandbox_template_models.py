@@ -16,17 +16,31 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from openhands.ev2.db import Base
-from openhands.ev2.sandbox.sandbox_models import ExposedPort
 
 if TYPE_CHECKING:
     from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 
 _TZ = DateTime(timezone=True)
+
+
+class ExposedPort(BaseModel):
+    """Exposed port within a container matched to a free port on the host.
+
+    Declared on a sandbox template; the service allocates a host port per
+    container at runtime and surfaces the resulting URL via ``ExposedUrl``.
+    """
+
+    name: str
+    description: str
+    container_port: int = 8000
+
+    model_config = ConfigDict(frozen=True)
 
 
 class SandboxTemplate(Base):

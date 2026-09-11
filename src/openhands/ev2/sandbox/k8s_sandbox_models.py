@@ -1,46 +1,23 @@
 """Kubernetes-specific sandbox models.
 
 :class:`K8sSandbox` is the Kubernetes Deployment projection of the
-provider-neutral :class:`Sandbox`, and :class:`K8sSandboxTemplate` is the
-Kubernetes ConfigMap projection of :class:`SandboxTemplate`. They live in
-their own module so the Kubernetes implementation details
-(:mod:`k8s_sandbox_service`) are decoupled from the provider-neutral models,
-mirroring the Docker layout in :mod:`docker_sandbox_models`.
+provider-neutral :class:`Sandbox`. It lives in its own module so the
+Kubernetes implementation details (:mod:`k8s_sandbox_service`) are decoupled
+from the provider-neutral models, mirroring the Docker layout in
+:mod:`docker_sandbox_models`.
 
-A template's ``id`` is the container image reference (e.g.
-``ghcr.io/org/agent-server:latest``); the lifespan metadata are stored as
-annotations on a ConfigMap in the sandbox namespace. A sandbox's ``id`` is the
-Deployment name; each sandbox is backed by a Deployment (one pod, one
-container), a PVC for persistent data, and a ClusterIP Service exposing the
-container ports.
+A sandbox's ``id`` is the Deployment name; each sandbox is backed by a
+Deployment (one pod, one container), a PVC for persistent data, and a
+ClusterIP Service exposing the container ports. Templates and snapshots are
+DB-backed governed resources (see :mod:`sandbox_template_models` and
+:mod:`sandbox_snapshot_models`).
 """
 
 from __future__ import annotations
 
 from pydantic import Field
 
-from openhands.ev2.sandbox.sandbox_models import (
-    ExposedPort,
-    Sandbox,
-    SandboxSnapshot,
-    SandboxTemplate,
-    VolumeMount,
-)
-
-
-class K8sSandboxTemplate(SandboxTemplate):
-    """A sandbox template backed by a Kubernetes ConfigMap.
-
-    The ``id`` is the container image reference. ``max_memory`` is the memory
-    limit (in bytes) applied to the sandbox container. ``exposed_ports`` are
-    the named container ports exposed via a per-sandbox Service.
-    """
-
-    max_memory: int | None = None
-    exposed_ports: list[ExposedPort] = Field(
-        default_factory=list,
-        description="Named container ports exposed via a per-sandbox Service.",
-    )
+from openhands.ev2.sandbox.sandbox_models import Sandbox, VolumeMount
 
 
 class K8sSandbox(Sandbox):
@@ -54,16 +31,3 @@ class K8sSandbox(Sandbox):
 
     pvc_name: str | None = None
     volume_mounts: list[VolumeMount] = Field(default_factory=list)
-
-
-class K8sSandboxSnapshot(SandboxSnapshot):
-    """A snapshot backed by a gzip tarball restored into / from a PVC.
-
-    A Kubernetes snapshot is produced by tarring the sandbox workspace (the PVC
-    contents, captured while the sandbox is scaled to zero) into a tarball in
-    the configured snapshot store. ``archive_path`` is the path of the stored
-    tarball. Restore populates a new PVC from the tarball before the sandbox
-    Deployment is created, analogous to creating a PVC from a VolumeSnapshot.
-    """
-
-    archive_path: str | None = None

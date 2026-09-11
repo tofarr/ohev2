@@ -24,29 +24,23 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 import httpx
 from docker.errors import ImageNotFound, NotFound  # type: ignore[import-untyped]
 from pydantic import Field
 
-from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox.sandbox_models import (
-    DockerSandboxTemplate,
-    ExposedPort,
     ExposedUrl,
     Sandbox,
-    SandboxSnapshot,
     SandboxStatus,
-    SandboxTemplate,
     SnapshotMode,
     VolumeMount,
 )
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxCreate,
-    SandboxSnapshotCreate,
-    SandboxTemplateCreate,
     SandboxUpdate,
 )
 from openhands.ev2.sandbox.sandbox_service import (
@@ -55,10 +49,10 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxSnapshotConflictError,
     SandboxSnapshotNotFoundError,
     SandboxSnapshotUnsupportedError,
-    SandboxTemplateConflictError,
-    SandboxTemplateNotFoundError,
 )
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 from openhands.ev2.util import snapshot_store
+from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 logger = logging.getLogger(__name__)
 
@@ -264,26 +258,6 @@ class DockerSandboxService(SandboxService):
         return self._client.containers
 
     # ------------------------------------------------------------------ #
-    # Provider hooks — templates.
-    # ------------------------------------------------------------------ #
-    async def _list_templates(self) -> list[SandboxTemplate]:
-        return cast("list[SandboxTemplate]", await asyncio.to_thread(self._sync_list_templates))
-
-    async def _get_template(self, template_id: str) -> SandboxTemplate:
-        return await asyncio.to_thread(self._sync_get_template, template_id)
-
-    def _template_from_create(self, payload: SandboxTemplateCreate) -> SandboxTemplate:
-        return _docker_template_from_payload(payload, self.exposed_ports, self.snapshot_mode)
-
-    async def _create_template(self, template: SandboxTemplate) -> DockerSandboxTemplate:
-        docker_template = cast(DockerSandboxTemplate, template)
-        await asyncio.to_thread(self._sync_create_template, docker_template.id)
-        return docker_template
-
-    async def _delete_template(self, template_id: str) -> None:
-        await asyncio.to_thread(self._sync_delete_template, template_id)
-
-    # ------------------------------------------------------------------ #
     # Provider hooks — sandboxes.
     # ------------------------------------------------------------------ #
     async def _list_sandboxes(self) -> list[Sandbox]:
@@ -416,10 +390,10 @@ class DockerSandboxService(SandboxService):
         paused = 0
         deleted = 0
         for sandbox in sandboxes:
-            template = await self._safe_template(sandbox.sandbox_template_id)
-            if template is None:
+            knobs = await self._safe_template(sandbox.sandbox_template_id)
+            if knobs is None:
                 continue
-            action = await self._lifecycle_action(sandbox, template)
+            action = await self._lifecycle_action(sandbox, knobs)
             if action == "deleted":
                 deleted += 1
             elif action == "paused":
@@ -431,33 +405,32 @@ class DockerSandboxService(SandboxService):
             parts.append(f"deleted {deleted} sandbox(es)")
         return "; ".join(parts) if parts else None
 
-    async def _safe_template(self, template_id: str) -> DockerSandboxTemplate | None:
+    async def _safe_template(self, template_id: str) -> _LifespanKnobs | None:
         try:
-            return cast(DockerSandboxTemplate, await self._get_template(template_id))
-        except SandboxTemplateNotFoundError:
+            image = await asyncio.to_thread(self._images.get, template_id)
+        except ImageNotFound:
             return None
+        return _lifespan_knobs_from_image(image.attrs)
 
-    async def _lifecycle_action(
-        self, sandbox: DockerSandbox, template: SandboxTemplate
-    ) -> str | None:
+    async def _lifecycle_action(self, sandbox: DockerSandbox, knobs: _LifespanKnobs) -> str | None:
         """Apply the highest-priority lifespan action to *sandbox*."""
         now = datetime.now(UTC)
-        if template.max_age_seconds is not None and (now - sandbox.created_at) > timedelta(
-            seconds=template.max_age_seconds
+        if knobs.max_age_seconds is not None and (now - sandbox.created_at) > timedelta(
+            seconds=knobs.max_age_seconds
         ):
             await self._delete_sandbox(sandbox.id)
             return "deleted"
-        if sandbox.status is SandboxStatus.ACTIVE and template.idle_pause_seconds is not None:
+        if sandbox.status is SandboxStatus.ACTIVE and knobs.idle_pause_seconds is not None:
             idle_seconds = self._idle_seconds(sandbox)
-            if idle_seconds is not None and idle_seconds > template.idle_pause_seconds:
+            if idle_seconds is not None and idle_seconds > knobs.idle_pause_seconds:
                 await self._update_sandbox(
                     sandbox.id, SandboxUpdate(desired_status=SandboxStatus.INACTIVE)
                 )
                 return "paused"
-        if sandbox.status is SandboxStatus.INACTIVE and template.paused_delete_seconds is not None:
+        if sandbox.status is SandboxStatus.INACTIVE and knobs.paused_delete_seconds is not None:
             paused_at = await asyncio.to_thread(self._sync_paused_at, sandbox.id)
             if paused_at is not None and (now - paused_at) > timedelta(
-                seconds=template.paused_delete_seconds
+                seconds=knobs.paused_delete_seconds
             ):
                 await self._delete_sandbox(sandbox.id)
                 return "deleted"
@@ -482,119 +455,51 @@ class DockerSandboxService(SandboxService):
         return _parse_created(raw)
 
     # ------------------------------------------------------------------ #
-    # Provider hooks - snapshots.
-    # A Docker snapshot is a gzip tarball of the sandbox workspace bind-mount
-    # directory, stored in ``snapshot_dir`` as ``<snapshot_id>.tar.gz``. The
-    # sandbox must be paused (or stopped) before snapshotting so the workspace
-    # is quiescent. Importing a snapshot from an uploaded file writes the raw
-    # bytes into the snapshot store. Download streams the tarball. Restore
-    # happens at sandbox creation time (see ``_sync_create_sandbox``).
+    # Snapshot artifact hooks. A Docker snapshot is a gzip tarball of the
+    # sandbox workspace bind-mount directory, stored in ``snapshot_dir`` as
+    # ``<snapshot_id>.tar.gz``. The sandbox must be paused (or stopped) before
+    # snapshotting so the workspace is quiescent. Importing a snapshot from an
+    # uploaded file writes the raw bytes into the snapshot store. Download
+    # streams the tarball. Restore happens at sandbox creation time (see
+    # ``_sync_create_sandbox``). These operate on snapshot ids; the DB index
+    # row is owned by ``SandboxSnapshotService``.
     # ------------------------------------------------------------------ #
-    async def _list_snapshots(self) -> list[SandboxSnapshot]:
-        return cast("list[SandboxSnapshot]", await asyncio.to_thread(self._sync_list_snapshots))
-
-    async def _get_snapshot(self, snapshot_id: str) -> SandboxSnapshot:
-        return await asyncio.to_thread(self._sync_get_snapshot, snapshot_id)
-
-    async def _snapshot_from_sandbox(
-        self,
-        payload: SandboxSnapshotCreate,
-        sandbox: Sandbox,
-    ) -> SandboxSnapshot:
-        # Pre-persistence model; the id is assigned during _create_snapshot
-        # when the provider generates the snapshot id.
-        return DockerSandboxSnapshot(
-            sandbox_id=sandbox.id,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
-        )
-
-    async def _snapshot_from_file(
-        self,
-        payload: SandboxSnapshotCreate,
-    ) -> SandboxSnapshot:
-        # Pre-persistence model; the id is assigned during _create_snapshot
-        # when the provider generates the snapshot id.
-        return DockerSandboxSnapshot(
-            sandbox_id=None,
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, "")),
-        )
-
-    async def _create_snapshot(
-        self,
-        snapshot: SandboxSnapshot,
-        payload: SandboxSnapshotCreate,
-    ) -> SandboxSnapshot:
-        docker_snapshot = cast(DockerSandboxSnapshot, snapshot)
-        snapshot_id = _generate_snapshot_id()
-        docker_snapshot.id = snapshot_id
-        docker_snapshot.archive_path = str(
-            snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)
-        )
-        if payload.sandbox_id is not None:
-            await asyncio.to_thread(self._sync_tar_snapshot, docker_snapshot, payload.sandbox_id)
-        else:
-            assert payload.file_data is not None
-            await asyncio.to_thread(self._sync_import_snapshot, docker_snapshot, payload.file_data)
-        return await self._get_snapshot(snapshot_id)
-
-    async def _delete_snapshot(self, snapshot_id: str) -> None:
-        await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
-
     async def stream_snapshot(self, snapshot_id: str) -> Any:
         """Stream the snapshot tarball (gzip) for download."""
         return snapshot_store.stream_snapshot(self.snapshot_dir, snapshot_id)
 
-    # ------------------------------------------------------------------ #
-    # Synchronous Docker Image API calls (offloaded from the event loop).
-    # ------------------------------------------------------------------ #
-    def _sync_list_templates(self) -> list[DockerSandboxTemplate]:
-        templates: list[DockerSandboxTemplate] = []
-        for image in self._images.list():
-            template = self._template_from_image(image)
-            if template is not None:
-                templates.append(template)
-        return templates
+    async def capture_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        sandbox_perm_filter: SearchFilter[Any] = ALL,
+    ) -> tuple[str, int | None]:
+        """Capture a workspace tarball from a live sandbox.
 
-    def _template_from_image(self, image: Any) -> DockerSandboxTemplate | None:
-        """Convert a Docker image to a template, or ``None`` if it is not one.
-
-        Untagged intermediates are skipped.
+        Returns ``(snapshot_id, size_bytes)``. The snapshot id is the tarball
+        filename stem and doubles as the download URL identifier.
         """
-        try:
-            template = _template_from_image_attrs(
-                image.attrs, self.exposed_ports, self.snapshot_mode
-            )
-        except SandboxTemplateNotFoundError:
-            return None
-        return template if self._matches_image_name_patterns(template.id) else None
+        snapshot_id = _generate_snapshot_id()
+        await asyncio.to_thread(self._sync_tar_snapshot, snapshot_id, sandbox_id)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return snapshot_id, size
 
-    def _sync_get_template(self, template_id: str) -> DockerSandboxTemplate:
-        try:
-            image = self._images.get(template_id)
-        except ImageNotFound:
-            raise SandboxTemplateNotFoundError(template_id) from None
-        template = _template_from_image_attrs(image.attrs, self.exposed_ports, self.snapshot_mode)
-        if not self._matches_image_name_patterns(template.id):
-            raise SandboxTemplateNotFoundError(template_id)
-        return template
+    async def import_snapshot_file(
+        self,
+        file_data: bytes | None,
+        *,
+        schema_type: str | None = None,
+    ) -> tuple[str, int | None]:
+        """Store an uploaded tarball and return ``(snapshot_id, size_bytes)``."""
+        assert file_data is not None
+        snapshot_id = _generate_snapshot_id()
+        await asyncio.to_thread(self._sync_import_snapshot, snapshot_id, file_data)
+        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
+        return snapshot_id, size
 
-    def _matches_image_name_patterns(self, image_name: str) -> bool:
-        return any(_wildcard_match(pattern, image_name) for pattern in self.image_name_patterns)
-
-    def _sync_create_template(self, template_id: str) -> None:
-        images = self._images
-        try:
-            images.get(template_id)
-        except ImageNotFound:
-            images.pull(repository=template_id)
-            return
-        raise SandboxTemplateConflictError(template_id)
-
-    def _sync_delete_template(self, template_id: str) -> None:
-        try:
-            self._images.remove(image=template_id)
-        except ImageNotFound:
-            raise SandboxTemplateNotFoundError(template_id) from None
+    async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
+        """Delete the stored tarball for a snapshot."""
+        await asyncio.to_thread(self._sync_delete_snapshot, snapshot_id)
 
     # ------------------------------------------------------------------ #
     # Synchronous Docker Container API calls (offloaded from the event loop).
@@ -720,47 +625,19 @@ class DockerSandboxService(SandboxService):
     # ------------------------------------------------------------------ #
     # Synchronous snapshot store calls (offloaded from the event loop).
     # ------------------------------------------------------------------ #
-    def _sync_list_snapshots(self) -> list[DockerSandboxSnapshot]:
-        snapshots: list[DockerSandboxSnapshot] = []
-        for snap_id in snapshot_store.list_snapshot_ids(self.snapshot_dir):
-            snapshot = self._snapshot_from_store(snap_id)
-            if snapshot is not None:
-                snapshots.append(snapshot)
-        return snapshots
-
-    def _sync_get_snapshot(self, snapshot_id: str) -> DockerSandboxSnapshot:
-        snapshot = self._snapshot_from_store(snapshot_id)
-        if snapshot is None:
-            raise SandboxSnapshotNotFoundError(snapshot_id) from None
-        return snapshot
-
-    def _snapshot_from_store(self, snapshot_id: str) -> DockerSandboxSnapshot | None:
-        """Build a snapshot model from a stored tarball, or ``None`` if absent."""
-        if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
-            return None
-        created = snapshot_store.snapshot_created_at(self.snapshot_dir, snapshot_id)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return DockerSandboxSnapshot(
-            id=snapshot_id,
-            created_at=created or datetime.now(UTC),
-            archive_path=str(snapshot_store.snapshot_path(self.snapshot_dir, snapshot_id)),
-            size_bytes=size,
-            sandbox_id=None,  # source-sandbox is not recoverable from the tarball alone
-        )
-
-    def _sync_tar_snapshot(self, snapshot: DockerSandboxSnapshot, sandbox_id: str) -> None:
-        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot.id):
-            raise SandboxSnapshotConflictError(snapshot.id)
+    def _sync_tar_snapshot(self, snapshot_id: str, sandbox_id: str) -> None:
+        if snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
+            raise SandboxSnapshotConflictError(snapshot_id)
         workspace = self._workspace_path_for_sandbox(sandbox_id)
         if workspace is None:
             raise SandboxNotFoundError(sandbox_id)
-        snapshot_store.create_snapshot(self.snapshot_dir, snapshot.id, workspace)
+        snapshot_store.create_snapshot(self.snapshot_dir, snapshot_id, workspace)
 
-    def _sync_import_snapshot(self, snapshot: DockerSandboxSnapshot, file_data: bytes) -> None:
+    def _sync_import_snapshot(self, snapshot_id: str, file_data: bytes) -> None:
         try:
-            snapshot_store.import_snapshot(self.snapshot_dir, snapshot.id, file_data)
+            snapshot_store.import_snapshot(self.snapshot_dir, snapshot_id, file_data)
         except FileExistsError as exc:
-            raise SandboxSnapshotConflictError(snapshot.id) from exc
+            raise SandboxSnapshotConflictError(snapshot_id) from exc
 
     def _sync_delete_snapshot(self, snapshot_id: str) -> None:
         if not snapshot_store.snapshot_exists(self.snapshot_dir, snapshot_id):
@@ -790,60 +667,27 @@ def _container_state(container: Any) -> str:
     return str(state.get("Status") or "unknown")
 
 
-def _template_from_image_attrs(
-    attrs: dict[str, Any],
-    exposed_ports: list[ExposedPort],
-    snapshot_mode: SnapshotMode = SnapshotMode.MANUAL,
-) -> DockerSandboxTemplate:
-    """Build a :class:`DockerSandboxTemplate` from a Docker image's ``attrs``.
+class _LifespanKnobs(NamedTuple):
+    """Lifespan knobs read from a template image's labels (provider inventory).
 
-    Uses the first repository tag as the template id; an untagged image is not
-    a usable template.
+    The DB ``SandboxTemplate`` is the source of truth for template metadata,
+    but the provider-level lifecycle sweep still reads these knobs from the
+    Docker image labels of the image a sandbox was started from.
     """
-    tags = [tag for tag in (attrs.get("RepoTags") or []) if tag != "<none>:<none>"]
-    if not tags:
-        raise SandboxTemplateNotFoundError("image is untagged")
+
+    idle_pause_seconds: int | None
+    paused_delete_seconds: int | None
+    max_age_seconds: int | None
+
+
+def _lifespan_knobs_from_image(attrs: dict[str, Any]) -> _LifespanKnobs:
+    """Extract lifespan knobs from a Docker image's label metadata."""
     config = attrs.get("Config") or {}
     labels = config.get("Labels") or {}
-    host_config = attrs.get("HostConfig") or {}
-    memory = host_config.get("Memory")
-    return DockerSandboxTemplate(
-        id=tags[0],
-        command=config.get("Cmd"),
-        created_at=_parse_created(attrs.get("Created")),
-        initial_env=_parse_env(config.get("Env")),
-        working_dir=config.get("WorkingDir") or _DEFAULT_WORKING_DIR,
+    return _LifespanKnobs(
         idle_pause_seconds=_label_int(labels, _TAG_IDLE_PAUSE_SECONDS),
         paused_delete_seconds=_label_int(labels, _TAG_PAUSED_DELETE_SECONDS),
         max_age_seconds=_label_int(labels, _TAG_MAX_AGE_SECONDS),
-        max_memory=int(memory) if memory else None,
-        exposed_ports=list(exposed_ports),
-        snapshot_mode=snapshot_mode,
-    )
-
-
-def _docker_template_from_payload(
-    payload: SandboxTemplateCreate,
-    exposed_ports: list[ExposedPort],
-    snapshot_mode: SnapshotMode = SnapshotMode.MANUAL,
-) -> DockerSandboxTemplate:
-    """Build a Docker template from a create payload (no persistence)."""
-    ports = (
-        [ExposedPort(**p) if isinstance(p, dict) else p for p in payload.exposed_ports]
-        if payload.exposed_ports
-        else list(exposed_ports)
-    )
-    return DockerSandboxTemplate(
-        id=payload.id,
-        command=payload.command,
-        initial_env=payload.initial_env,
-        working_dir=payload.working_dir,
-        idle_pause_seconds=payload.idle_pause_seconds,
-        paused_delete_seconds=payload.paused_delete_seconds,
-        max_age_seconds=payload.max_age_seconds,
-        max_memory=payload.max_memory,
-        exposed_ports=ports,
-        snapshot_mode=payload.snapshot_mode if payload.snapshot_mode is not None else snapshot_mode,
     )
 
 
@@ -979,19 +823,6 @@ def _wildcard_match(pattern: str, target: str) -> bool:
     parts = pattern.split("*")
     escaped = ".*".join(re.escape(part) for part in parts)
     return re.fullmatch(escaped, target) is not None
-
-
-def _parse_env(env: list[str] | None) -> dict[str, str]:
-    """Parse a Docker ``Config.Env`` list into a name/value mapping."""
-    if not env:
-        return {}
-    result: dict[str, str] = {}
-    for entry in env:
-        if "=" not in entry:
-            continue
-        key, _, value = entry.partition("=")
-        result[key] = value
-    return result
 
 
 def _label_int(labels: dict[str, Any], name: str) -> int | None:

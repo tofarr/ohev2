@@ -13,8 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openhands.ev2.sandbox.sandbox_models import ExposedPort
-from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 _MAX_ENV_VARS_CHARS = 4096

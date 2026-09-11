@@ -1,8 +1,12 @@
-"""Tests for the pluggable sandbox control plane.
+"""Tests for the Docker sandbox control plane.
 
 Covers the pieces that do not require a live Docker daemon or database: the
-template model/schemas, the Docker Image attribute mapping helpers, and the
-service factory/config wiring.
+sandbox model, the Docker container attribute mapping helpers, the snapshot
+tarball store, the lifecycle sweep, the ``last_accessed_at`` derivation, the
+service factory/config wiring, and the exception-to-status mapping. Templates,
+configs, and snapshot index rows are DB-backed and covered by their own route
+tests; this file exercises only the live-sandbox + snapshot-artifact surface
+owned by :class:`DockerSandboxService`.
 """
 
 from __future__ import annotations
@@ -16,75 +20,45 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 import respx
-from docker.errors import ImageNotFound  # type: ignore[import-untyped]
+from docker.errors import ImageNotFound, NotFound  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
-from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox, DockerSandboxSnapshot
+from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox.docker_sandbox_service import (
     DEFAULT_EXPOSED_PORTS,
     DockerSandboxService,
-    _docker_template_from_payload,
+    _docker_status_to_sandbox_status,
     _exposed_urls_from_ports,
     _generate_sandbox_id,
+    _generate_snapshot_id,
     _label_int,
+    _lifespan_knobs_from_image,
     _parse_created,
-    _parse_env,
+    _resolve_sandbox_id,
     _sandbox_from_container_attrs,
-    _template_from_image_attrs,
     _volume_mounts_from_binds,
     _wildcard_match,
 )
 from openhands.ev2.sandbox.sandbox_models import (
-    DockerSandboxTemplate,
-    ExposedPort,
     ExposedUrl,
     Sandbox,
     SandboxStatus,
-    SandboxTemplate,
-    SnapshotMode,
     VolumeMount,
 )
-from openhands.ev2.sandbox.sandbox_schemas import (
-    SandboxCreate,
-    SandboxRead,
-    SandboxSearchFilter,
-    SandboxSnapshotCreate,
-    SandboxTemplateCreate,
-    SandboxTemplateRead,
-    SandboxUpdate,
-)
+from openhands.ev2.sandbox.sandbox_schemas import SandboxCreate, SandboxUpdate
 from openhands.ev2.sandbox.sandbox_service import (
+    SandboxNotFoundError,
     SandboxService,
+    SandboxSnapshotConflictError,
+    SandboxSnapshotNotFoundError,
+    SandboxSnapshotUnsupportedError,
     resolve_sandbox_service_class,
 )
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 
 # --------------------------------------------------------------------------- #
 # Models.
 # --------------------------------------------------------------------------- #
-
-
-def test_docker_template_defaults() -> None:
-    template = DockerSandboxTemplate(id="ghcr.io/org/agent-server:latest")
-    assert template.command is None
-    assert template.initial_env == {}
-    assert template.working_dir == "/home/openhands"
-    assert template.idle_pause_seconds is None
-    assert template.paused_delete_seconds is None
-    assert template.max_age_seconds is None
-    assert template.max_memory is None
-    assert template.exposed_ports == []
-    assert template.kind == "DockerSandboxTemplate"
-
-
-def test_docker_template_carries_exposed_ports() -> None:
-    template = DockerSandboxTemplate(
-        id="img",
-        exposed_ports=[
-            ExposedPort(name="agent_server", description="agent server", container_port=8000),
-        ],
-    )
-    assert len(template.exposed_ports) == 1
-    assert template.exposed_ports[0].name == "agent_server"
 
 
 def test_sandbox_model_round_trip() -> None:
@@ -103,7 +77,9 @@ def test_sandbox_model_round_trip() -> None:
     assert restored.sandbox_template_id == "img:latest"
     assert restored.status is SandboxStatus.ACTIVE
     assert restored.session_api_key == "key"
+    assert restored.exposed_urls is not None
     assert restored.exposed_urls[0].name == "agent_server"
+    assert restored.volume_mounts is not None
     assert restored.volume_mounts[0].host_path == "/h"
 
 
@@ -123,7 +99,7 @@ def test_sandbox_defaults() -> None:
 def test_exposed_port_is_frozen() -> None:
     port = ExposedPort(name="x", description="d")
     with pytest.raises(ValidationError):
-        port.container_port = 9  # type: ignore[misc]
+        port.container_port = 9
 
 
 def test_default_exposed_ports_include_agent_server_and_vscode() -> None:
@@ -141,108 +117,15 @@ def test_sandbox_create_and_update_payloads() -> None:
 
 def test_sandbox_update_requires_desired_status() -> None:
     with pytest.raises(ValidationError):
-        SandboxUpdate.model_validate({})  # type: ignore[arg-type]
-
-
-def test_template_discriminated_union_round_trip() -> None:
-    template = DockerSandboxTemplate(
-        id="img",
-        command=["bash", "-c", "true"],
-        idle_pause_seconds=60,
-        max_memory=1024,
-    )
-    restored = SandboxTemplate.model_validate(template.model_dump(mode="json"))
-    assert isinstance(restored, DockerSandboxTemplate)
-    assert restored.id == "img"
-    assert restored.idle_pause_seconds == 60
-    assert restored.max_memory == 1024
-
-
-def test_template_requires_id() -> None:
-    with pytest.raises(ValidationError):
-        DockerSandboxTemplate()  # type: ignore[call-arg]
+        SandboxUpdate.model_validate({})
 
 
 # --------------------------------------------------------------------------- #
-# Schemas.
-# --------------------------------------------------------------------------- #
-
-
-def test_create_payload_defaults() -> None:
-    payload = SandboxTemplateCreate.model_validate({"id": "img"})
-    assert payload.command is None
-    assert payload.initial_env == {}
-    assert payload.working_dir == "/home/openhands"
-    assert payload.max_memory is None
-    assert payload.exposed_ports == []
-
-
-def test_create_payload_rejects_non_positive_timeouts() -> None:
-    with pytest.raises(ValidationError):
-        SandboxTemplateCreate.model_validate({"id": "img", "idle_pause_seconds": 0})
-    with pytest.raises(ValidationError):
-        SandboxTemplateCreate.model_validate({"id": "img", "max_age_seconds": -1})
-
-
-def test_read_model_from_template() -> None:
-    template = DockerSandboxTemplate(id="img", idle_pause_seconds=30, max_memory=2048)
-    read = SandboxTemplateRead.model_validate(template)
-    assert read.id == "img"
-    assert read.idle_pause_seconds == 30
-    assert read.max_memory == 2048
-    assert read.created_at == template.created_at
-    assert read.exposed_ports == []
-
-
-# --------------------------------------------------------------------------- #
-# Docker Image attribute mapping.
+# Docker attribute mapping helpers.
 # --------------------------------------------------------------------------- #
 
 
 _PORTS = list(DEFAULT_EXPOSED_PORTS)
-
-
-def test_template_from_image_attrs_basic() -> None:
-    attrs = {
-        "RepoTags": ["ghcr.io/org/agent-server:latest", "ghcr.io/org/agent-server:v1"],
-        "Created": "2024-01-02T03:04:05.000000000Z",
-        "Config": {
-            "Cmd": ["bash", "-c", "sleep infinity"],
-            "Env": ["A=1", "B=two"],
-            "WorkingDir": "/workspace",
-            "Labels": {
-                "io.openhands.sandbox.idle_pause_seconds": "120",
-                "io.openhands.sandbox.max_age_seconds": "3600",
-            },
-        },
-        "HostConfig": {"Memory": 1073741824},
-    }
-    template = _template_from_image_attrs(attrs, _PORTS)
-    assert isinstance(template, DockerSandboxTemplate)
-    assert template.id == "ghcr.io/org/agent-server:latest"
-    assert template.command == ["bash", "-c", "sleep infinity"]
-    assert template.initial_env == {"A": "1", "B": "two"}
-    assert template.working_dir == "/workspace"
-    assert template.idle_pause_seconds == 120
-    assert template.paused_delete_seconds is None
-    assert template.max_age_seconds == 3600
-    assert template.max_memory == 1073741824
-    assert [p.name for p in template.exposed_ports] == ["agent_server", "vscode"]
-
-
-def test_template_from_image_attrs_untagged_is_not_template() -> None:
-    from openhands.ev2.sandbox.sandbox_service import (
-        SandboxTemplateNotFoundError,
-    )
-
-    with pytest.raises(SandboxTemplateNotFoundError):
-        _template_from_image_attrs({"RepoTags": ["<none>:<none>"]}, _PORTS)
-
-
-def test_parse_env_skips_malformed() -> None:
-    assert _parse_env(None) == {}
-    assert _parse_env([]) == {}
-    assert _parse_env(["NO_EQUALS", "A=1", "B="]) == {"A": "1", "B": ""}
 
 
 def test_label_int_tolerates_garbage() -> None:
@@ -261,44 +144,25 @@ def test_parse_created_handles_z_and_naive() -> None:
     assert naive.utcoffset() is not None
 
 
-def test_docker_template_from_payload() -> None:
-    payload = SandboxTemplateCreate.model_validate(
-        {
-            "id": "img",
-            "command": ["echo", "hi"],
-            "initial_env": {"K": "v"},
-            "working_dir": "/app",
-            "idle_pause_seconds": 10,
-            "max_memory": 512,
-        }
-    )
-    template = _docker_template_from_payload(payload, _PORTS)
-    assert isinstance(template, DockerSandboxTemplate)
-    assert template.id == "img"
-    assert template.command == ["echo", "hi"]
-    assert template.initial_env == {"K": "v"}
-    assert template.working_dir == "/app"
-    assert template.idle_pause_seconds == 10
-    assert template.max_memory == 512
-    assert [p.name for p in template.exposed_ports] == ["agent_server", "vscode"]
+def test_parse_created_invalid_string_returns_now() -> None:
+    now = datetime.now(UTC)
+    parsed = _parse_created("not-a-date")
+    assert parsed >= now - timedelta(seconds=5)
 
 
-def test_docker_template_from_payload_custom_ports() -> None:
-    payload = SandboxTemplateCreate.model_validate(
-        {
-            "id": "img",
-            "exposed_ports": [
-                {"name": "custom", "description": "d", "container_port": 9000},
-            ],
-        }
-    )
-    template = _docker_template_from_payload(payload, list(DEFAULT_EXPOSED_PORTS))
-    assert [p.name for p in template.exposed_ports] == ["custom"]
+def test_parse_created_non_string_returns_now() -> None:
+    parsed = _parse_created(12345)
+    assert parsed.tzinfo is UTC
+
+
+def test_parse_created_naive_datetime_gets_utc() -> None:
+    parsed = _parse_created("2024-01-02T03:04:05")
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def test_exposed_urls_from_ports() -> None:
     ports = list(DEFAULT_EXPOSED_PORTS)
-    binding = {"8000/tcp": [{"HostPort": "32771"}], "8001/tcp": None}
+    binding: dict[str, Any] = {"8000/tcp": [{"HostPort": "32771"}], "8001/tcp": None}
     urls = _exposed_urls_from_ports(ports, binding)
     assert [u.name for u in urls] == ["agent_server"]
     assert urls[0].port == 32771
@@ -307,6 +171,12 @@ def test_exposed_urls_from_ports() -> None:
 
 def test_exposed_urls_empty_when_no_binding() -> None:
     assert _exposed_urls_from_ports(list(DEFAULT_EXPOSED_PORTS), {}) == []
+
+
+def test_exposed_urls_skips_binding_without_host_port() -> None:
+    ports = list(DEFAULT_EXPOSED_PORTS)
+    binding: dict[str, Any] = {"8000/tcp": [{}]}
+    assert _exposed_urls_from_ports(ports, binding) == []
 
 
 def test_volume_mounts_from_binds() -> None:
@@ -323,80 +193,163 @@ def test_volume_mounts_empty() -> None:
     assert _volume_mounts_from_binds([]) == []
 
 
+def test_wildcard_match() -> None:
+    assert _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server")
+    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-server")
+    assert not _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/other/agent-canvas")
+    # A bare pattern (no wildcard) requires an exact match, so a tagged
+    # image is *not* matched by it — use ``:*`` to opt into tagged variants.
+    assert not _wildcard_match(
+        "ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server:1.16.0"
+    )
+    assert _wildcard_match(
+        "ghcr.io/openhands/agent-server:*", "ghcr.io/openhands/agent-server:1.16.0"
+    )
+
+
+def test_docker_status_to_sandbox_status_edge_cases() -> None:
+    assert _docker_status_to_sandbox_status("running") is SandboxStatus.ACTIVE
+    assert _docker_status_to_sandbox_status("paused") is SandboxStatus.INACTIVE
+    assert _docker_status_to_sandbox_status("exited") is SandboxStatus.INACTIVE
+    assert _docker_status_to_sandbox_status("created") is SandboxStatus.ACTIVATING
+    assert _docker_status_to_sandbox_status("restarting") is SandboxStatus.ACTIVATING
+    assert _docker_status_to_sandbox_status("weird") is SandboxStatus.ERROR
+
+
+def test_generate_sandbox_id_is_unique() -> None:
+    ids = {_generate_sandbox_id() for _ in range(100)}
+    assert len(ids) == 100
+    assert all(s.startswith("sandbox-") for s in ids)
+
+
+def test_generate_snapshot_id_is_unique() -> None:
+    ids = {_generate_snapshot_id() for _ in range(100)}
+    assert len(ids) == 100
+
+
 # --------------------------------------------------------------------------- #
-# Docker synchronous CRUD (using a fake in-process image client).
+# Container attribute mapping -> DockerSandbox.
 # --------------------------------------------------------------------------- #
 
 
-class _FakeImage:
+class _FakeContainer:
     def __init__(self, attrs: dict[str, Any]) -> None:
         self.attrs = attrs
 
-
-class _FakeImages:
-    def __init__(self, images: list[_FakeImage]) -> None:
-        self._images = {image.attrs["RepoTags"][0]: image for image in images}
-
-    def list(self) -> list[_FakeImage]:
-        return list(self._images.values())
-
-    def get(self, name: str) -> _FakeImage:
-        try:
-            return self._images[name]
-        except KeyError:
-            raise ImageNotFound(name) from None
+    def reload(self) -> None:
+        pass
 
 
-class _FakeDockerClient:
-    def __init__(self, images: list[_FakeImage]) -> None:
-        self.images = _FakeImages(images)
-
-
-def _image_attrs(repo_tag: str) -> dict[str, Any]:
+def _container_attrs(
+    *,
+    status: str = "running",
+    sandbox_id: str | None = "sb-1",
+    image: str = "ghcr.io/openhands/agent-server:latest",
+    name: str = "sb-1",
+    created: str = "2024-01-02T03:04:05Z",
+    ports: dict[str, Any] | None = None,
+    binds: list[str] | None = None,
+    labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    full_labels = {"io.openhands.sandbox.sandbox_id": sandbox_id} if sandbox_id else {}
+    if labels:
+        full_labels.update(labels)
     return {
-        "RepoTags": [repo_tag],
-        "Created": "2024-01-02T03:04:05Z",
-        "Config": {"Cmd": None, "Env": None, "WorkingDir": None, "Labels": {}},
-        "HostConfig": {},
+        "Name": f"/{name}",
+        "Created": created,
+        "State": {"Status": status, "Error": None},
+        "Config": {"Image": image, "Labels": full_labels},
+        "HostConfig": {"Binds": binds or []},
+        "NetworkSettings": {"Ports": ports or {}},
     }
 
 
-def test_sync_list_templates_filters_by_image_name_patterns() -> None:
-    service = DockerSandboxService(
-        image_name_patterns=["ghcr.io/openhands/*"],
+def test_sandbox_from_container_attrs_running() -> None:
+    container = _FakeContainer(
+        _container_attrs(status="running", ports={"8000/tcp": [{"HostPort": "32771"}]})
     )
-    service._client = _FakeDockerClient(
-        [
-            _FakeImage(_image_attrs("ghcr.io/openhands/agent-server:latest")),
-            _FakeImage(_image_attrs("ghcr.io/other/agent:latest")),
-        ]
-    )
-    templates = service._sync_list_templates()
-    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-server:latest"]
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
+    assert sandbox is not None
+    assert sandbox.id == "sb-1"
+    assert sandbox.status is SandboxStatus.ACTIVE
+    assert sandbox.desired_status is SandboxStatus.ACTIVE
+    assert sandbox.exposed_urls is not None
+    assert [u.name for u in sandbox.exposed_urls] == ["agent_server"]
 
 
-def test_sync_get_template_returns_matching_image() -> None:
-    service = DockerSandboxService(
-        image_name_patterns=["ghcr.io/openhands/*"],
-    )
-    service._client = _FakeDockerClient(
-        [_FakeImage(_image_attrs("ghcr.io/openhands/agent-server:latest"))]
-    )
-    template = service._sync_get_template("ghcr.io/openhands/agent-server:latest")
-    assert template.id == "ghcr.io/openhands/agent-server:latest"
+def test_sandbox_from_container_attrs_paused_is_inactive() -> None:
+    container = _FakeContainer(_container_attrs(status="paused"))
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
+    assert sandbox is not None
+    assert sandbox.status is SandboxStatus.INACTIVE
 
 
-def test_sync_get_template_rejects_non_matching_image() -> None:
-    from openhands.ev2.sandbox.sandbox_service import (
-        SandboxTemplateNotFoundError,
-    )
+def test_sandbox_from_container_attrs_exited_is_inactive() -> None:
+    container = _FakeContainer(_container_attrs(status="exited"))
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
+    assert sandbox is not None
+    assert sandbox.status is SandboxStatus.INACTIVE
 
-    service = DockerSandboxService(
-        image_name_patterns=["ghcr.io/openhands/*"],
+
+def test_sandbox_from_container_attrs_no_label_returns_none_via_pattern() -> None:
+    # No sandbox-id label and an image that does not match the patterns -> None.
+    container = _FakeContainer(
+        _container_attrs(sandbox_id=None, image="ghcr.io/other/agent:latest", name="x")
     )
-    service._client = _FakeDockerClient([_FakeImage(_image_attrs("ghcr.io/other/agent:latest"))])
-    with pytest.raises(SandboxTemplateNotFoundError):
-        service._sync_get_template("ghcr.io/other/agent:latest")
+    sandbox = _sandbox_from_container_attrs(
+        container, _PORTS, image_name_patterns=["ghcr.io/openhands/agent-server:*"]
+    )
+    assert sandbox is None
+
+
+def test_sandbox_from_container_attrs_returns_none_on_exception() -> None:
+    class _Broken:
+        @property
+        def attrs(self) -> dict[str, Any]:
+            raise RuntimeError("container gone")
+
+    assert _sandbox_from_container_attrs(_Broken(), _PORTS) is None
+
+
+def test_resolve_sandbox_id_uses_name_when_image_matches_pattern() -> None:
+    labels: dict[str, Any] = {}
+    attrs = {"Name": "/named-sandbox"}
+    sid = _resolve_sandbox_id(
+        labels, attrs, "ghcr.io/openhands/agent-server:1.0", ["ghcr.io/openhands/*"]
+    )
+    assert sid == "named-sandbox"
+
+
+def test_resolve_sandbox_id_returns_none_when_name_empty() -> None:
+    labels: dict[str, Any] = {}
+    attrs = {"Name": ""}
+    sid = _resolve_sandbox_id(
+        labels, attrs, "ghcr.io/openhands/agent-server:1.0", ["ghcr.io/openhands/*"]
+    )
+    assert sid is None
+
+
+def test_lifespan_knobs_from_image() -> None:
+    attrs = {
+        "Config": {
+            "Labels": {
+                "io.openhands.sandbox.idle_pause_seconds": "120",
+                "io.openhands.sandbox.paused_delete_seconds": "300",
+                "io.openhands.sandbox.max_age_seconds": "3600",
+            }
+        }
+    }
+    knobs = _lifespan_knobs_from_image(attrs)
+    assert knobs.idle_pause_seconds == 120
+    assert knobs.paused_delete_seconds == 300
+    assert knobs.max_age_seconds == 3600
+
+
+def test_lifespan_knobs_from_image_missing() -> None:
+    knobs = _lifespan_knobs_from_image({})
+    assert knobs.idle_pause_seconds is None
+    assert knobs.paused_delete_seconds is None
+    assert knobs.max_age_seconds is None
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +366,7 @@ def test_resolve_docker_service_class() -> None:
 
 def test_resolve_rejects_non_service() -> None:
     with pytest.raises(TypeError):
-        resolve_sandbox_service_class("openhands.ev2.sandbox.sandbox_service.SandboxTemplate")
+        resolve_sandbox_service_class("openhands.ev2.sandbox.docker_sandbox_service._LifespanKnobs")
 
 
 def test_resolve_rejects_missing_module() -> None:
@@ -455,53 +408,9 @@ def test_sandbox_service_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert service.image_name_patterns == ["ghcr.io/acme/agent-*"]
 
 
-def test_wildcard_match() -> None:
-    assert _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server")
-    assert _wildcard_match("ghcr.io/openhands/*", "ghcr.io/openhands/agent-server")
-    assert not _wildcard_match("ghcr.io/openhands/agent-server", "ghcr.io/other/agent-canvas")
-    # A bare pattern (no wildcard) requires an exact match, so a tagged
-    # image is *not* matched by it — use ``:*`` to opt into tagged variants.
-    assert not _wildcard_match(
-        "ghcr.io/openhands/agent-server", "ghcr.io/openhands/agent-server:1.16.0"
-    )
-    assert _wildcard_match(
-        "ghcr.io/openhands/agent-server:*", "ghcr.io/openhands/agent-server:1.16.0"
-    )
-
-
-def test_docker_service_image_name_matching() -> None:
-    service = DockerSandboxService()
-    # The default pattern is ``:*`` so tagged images match…
-    assert service._matches_image_name_patterns("ghcr.io/openhands/agent-server:1.16.0")
-    # …but a bare (tagless) image does not.
-    assert not service._matches_image_name_patterns("ghcr.io/openhands/agent-server")
-    assert not service._matches_image_name_patterns("ghcr.io/other/agent-canvas")
-
-
 # --------------------------------------------------------------------------- #
-# Router helpers (no Docker/DB required).
+# Router exception-to-status mapping.
 # --------------------------------------------------------------------------- #
-
-
-def test_exception_to_status_mapping() -> None:
-    from fastapi import status as http_status
-
-    from openhands.ev2.sandbox.sandbox_service import (
-        BatchPermissionDeniedError,
-        SandboxTemplateConflictError,
-        SandboxTemplateNotFoundError,
-        SandboxTemplatePermissionScopeError,
-    )
-    from openhands.ev2.sandbox.sandbox_template_router import _map_exception_to_status
-
-    assert _map_exception_to_status(SandboxTemplateNotFoundError("x")).status_code == 404
-    assert _map_exception_to_status(SandboxTemplateConflictError("x")).status_code == 409
-    assert _map_exception_to_status(SandboxTemplatePermissionScopeError("x")).status_code == 403
-    assert _map_exception_to_status(BatchPermissionDeniedError("x")).status_code == 403
-    assert (
-        _map_exception_to_status(RuntimeError("boom")).status_code
-        == http_status.HTTP_500_INTERNAL_SERVER_ERROR
-    )
 
 
 def test_sandbox_router_exception_to_status_mapping() -> None:
@@ -525,515 +434,545 @@ def test_sandbox_router_exception_to_status_mapping() -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Docker container attribute mapping (sandbox projection).
-# --------------------------------------------------------------------------- #
-
-
-class _FakeContainer:
-    def __init__(self, attrs: dict[str, Any]) -> None:
-        self.attrs = attrs
-
-    def reload(self) -> None:
-        return None
-
-
-class _FakeContainers:
-    def __init__(self, containers: list[_FakeContainer]) -> None:
-        self._containers = {c.attrs["Name"].lstrip("/"): c for c in containers}
-
-    def list(self, all: bool = False) -> list[_FakeContainer]:  # noqa: A002
-        return list(self._containers.values())
-
-    def get(self, name: str) -> _FakeContainer:
-        try:
-            return self._containers[name]
-        except KeyError:
-            from docker.errors import NotFound  # type: ignore[import-untyped]
-
-            raise NotFound(name) from None
-
-
-class _FakeContainerClient:
-    def __init__(self, containers: list[_FakeContainer]) -> None:
-        self.containers = _FakeContainers(containers)
-
-
-def _container_attrs(name: str, *, image: str = "img", status: str = "running") -> dict[str, Any]:
-    return {
-        "Name": f"/{name}",
-        "Created": "2024-01-02T03:04:05Z",
-        "State": {"Status": status, "Error": None},
-        "Config": {
-            "Image": image,
-            "Labels": {
-                "io.openhands.sandbox.sandbox_id": name,
-                "io.openhands.sandbox.sandbox_template_id": image,
-            },
-        },
-        "HostConfig": {"Binds": ["/host:/container:rw"]},
-        "NetworkSettings": {"Ports": {"8000/tcp": [{"HostPort": "32771"}]}},
-    }
-
-
-def test_sandbox_from_container_attrs_running() -> None:
-    container = _FakeContainer(_container_attrs("sb-1", status="running"))
-    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
-    assert isinstance(sandbox, DockerSandbox)
-    assert sandbox.id == "sb-1"
-    assert sandbox.sandbox_template_id == "img"
-    assert sandbox.status is SandboxStatus.ACTIVE
-    assert sandbox.desired_status is SandboxStatus.ACTIVE
-    assert [u.name for u in (sandbox.exposed_urls or [])] == ["agent_server"]
-    assert sandbox.volume_mounts[0].host_path == "/host"
-
-
-def test_sandbox_from_container_attrs_paused_is_inactive() -> None:
-    container = _FakeContainer(_container_attrs("sb-2", status="paused"))
-    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
-    assert sandbox is not None
-    assert sandbox.status is SandboxStatus.INACTIVE
-
-
-def test_sandbox_from_container_attrs_no_label_returns_none() -> None:
-    attrs = _container_attrs("anon", status="running")
-    attrs["Config"]["Labels"] = {}
-    container = _FakeContainer(attrs)
-    assert _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS)) is None
-
-
-def test_sandbox_from_container_attrs_exited_is_inactive() -> None:
-    container = _FakeContainer(_container_attrs("sb-3", status="exited"))
-    sandbox = _sandbox_from_container_attrs(container, list(DEFAULT_EXPOSED_PORTS))
-    assert sandbox is not None
-    assert sandbox.status is SandboxStatus.INACTIVE
-
-
-def test_sync_list_sandboxes_projects_containers() -> None:
-    service = DockerSandboxService()
-    service._client = _FakeContainerClient(
-        [
-            _FakeContainer(_container_attrs("sb-1")),
-            _FakeContainer(_container_attrs("sb-2", status="paused")),
-        ]
+def test_snapshot_router_exception_to_status_mapping() -> None:
+    from openhands.ev2.sandbox.sandbox_service import (
+        SandboxSnapshotConflictError,
+        SandboxSnapshotNotFoundError,
+        SandboxSnapshotPermissionScopeError,
+        SandboxSnapshotUnsupportedError,
     )
-    sandboxes = service._sync_list_sandboxes()
-    assert {sb.id for sb in sandboxes} == {"sb-1", "sb-2"}
+    from openhands.ev2.sandbox.sandbox_snapshot_router import _map_exception_to_status
 
-
-def test_sync_get_sandbox_returns_container() -> None:
-    service = DockerSandboxService()
-    service._client = _FakeContainerClient([_FakeContainer(_container_attrs("sb-1"))])
-    sandbox = service._sync_get_sandbox("sb-1")
-    assert sandbox.id == "sb-1"
-
-
-def test_sync_get_sandbox_missing_raises_not_found() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
-    service = DockerSandboxService()
-    service._client = _FakeContainerClient([])
-    with pytest.raises(SandboxNotFoundError):
-        service._sync_get_sandbox("nope")
-
-
-def test_sync_get_sandbox_unlabeled_raises_not_found() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
-    service = DockerSandboxService()
-    attrs = _container_attrs("anon", status="running")
-    attrs["Config"]["Labels"] = {}
-    service._client = _FakeContainerClient([_FakeContainer(attrs)])
-    with pytest.raises(SandboxNotFoundError):
-        service._sync_get_sandbox("anon")
+    assert _map_exception_to_status(SandboxSnapshotNotFoundError("x")).status_code == 404
+    assert _map_exception_to_status(SandboxSnapshotPermissionScopeError("x")).status_code == 403
+    assert _map_exception_to_status(SandboxSnapshotConflictError("x")).status_code == 409
+    assert _map_exception_to_status(SandboxSnapshotUnsupportedError("x")).status_code == 501
 
 
 # --------------------------------------------------------------------------- #
-# Snapshots.
+# Snapshot tarball store (sync helpers + artifact hooks).
 # --------------------------------------------------------------------------- #
 
 
-def test_snapshot_mode_default_is_manual() -> None:
-    service = DockerSandboxService()
-    assert service.snapshot_mode == SnapshotMode.MANUAL
-
-
-def test_snapshot_mode_can_be_configured() -> None:
-    service = DockerSandboxService(snapshot_mode=SnapshotMode.UNSUPPORTED)
-    assert service.snapshot_mode == SnapshotMode.UNSUPPORTED
-
-
-def test_sandbox_from_create_carries_snapshot_mode() -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxCreate
-
-    service = DockerSandboxService(snapshot_mode=SnapshotMode.AUTOMATIC)
-    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
-    assert sandbox.snapshot_mode == SnapshotMode.AUTOMATIC
-
-
-def test_generate_sandbox_id_is_unique() -> None:
-    ids = {_generate_sandbox_id() for _ in range(100)}
-    assert len(ids) == 100
-    assert all(sid.startswith("sandbox-") for sid in ids)
-
-
-def test_template_from_image_attrs_carries_snapshot_mode() -> None:
-    attrs = {
-        "RepoTags": ["img-a:latest"],
-        "Config": {"Labels": {}, "WorkingDir": "/w"},
-    }
-    template = _template_from_image_attrs(attrs, _PORTS, SnapshotMode.AUTOMATIC)
-    assert template.snapshot_mode == SnapshotMode.AUTOMATIC
-
-
-# --------------------------------------------------------------------------- #
-# Docker snapshot CRUD (tarball store, using tmp_path for the snapshot dir).
-# --------------------------------------------------------------------------- #
-
-
-def _make_tarball_service(
-    snapshot_dir: Path,
-    *,
-    workspace_dir: str | None = None,
-    deactivate_mode: str = "pause",
-) -> DockerSandboxService:
-    """Build a DockerSandboxService wired to a real on-disk snapshot store."""
+def _service_with_workspace(tmp_path: Path) -> DockerSandboxService:
     service = DockerSandboxService(
-        snapshot_dir=str(snapshot_dir),
-        workspace_dir=workspace_dir,
-        deactivate_mode=deactivate_mode,  # type: ignore[arg-type]
+        workspace_dir=str(tmp_path / "ws"), snapshot_dir=str(tmp_path / "snaps")
     )
     return service
 
 
-def _seed_workspace(workspace_dir: Path, sandbox_id: str, content: str = "hello") -> Path:
-    """Create a per-sandbox workspace dir with a test file, returning its path."""
-    ws = workspace_dir / sandbox_id
-    ws.mkdir(parents=True, exist_ok=True)
-    (ws / "file.txt").write_text(content)
-    return ws
-
-
-def test_sync_list_snapshots_returns_tarball_ids(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-2", b"dummy2")
-    snapshots = service._sync_list_snapshots()
-    assert {s.id for s in snapshots} == {"snap-1", "snap-2"}
-
-
-def test_sync_get_snapshot_returns_snapshot(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    snapshot = service._sync_get_snapshot("snap-1")
-    assert snapshot.id == "snap-1"
-    assert snapshot.archive_path is not None
-    assert snapshot.archive_path.endswith("snap-1.tar.gz")
-    assert snapshot.size_bytes == len(b"dummy")
-
-
-def test_sync_get_snapshot_missing_raises_not_found(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    with pytest.raises(SandboxSnapshotNotFoundError):
-        service._sync_get_snapshot("nope")
-
-
 def test_sync_tar_snapshot_creates_tarball(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=str(workspace))
-    _seed_workspace(workspace, "sb-1", "workspace-content")
-    snapshot = DockerSandboxSnapshot(
-        id="snap-1", archive_path=str(tmp_path / "snapshots" / "snap-1.tar.gz"), sandbox_id="sb-1"
-    )
-    service._sync_tar_snapshot(snapshot, "sb-1")
-    assert (tmp_path / "snapshots" / "snap-1.tar.gz").is_file()
+    service = _service_with_workspace(tmp_path)
+    assert service.workspace_dir is not None
+    sandbox_id = "sb-1"
+    (Path(service.workspace_dir) / sandbox_id).mkdir(parents=True)
+    (Path(service.workspace_dir) / sandbox_id / "file.txt").write_text("hello")
+    service._sync_tar_snapshot("snap-1", sandbox_id)
+    from openhands.ev2.util import snapshot_store
+
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, "snap-1")
 
 
 def test_sync_tar_snapshot_conflict_when_tarball_exists(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
-
-    workspace = tmp_path / "ws"
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=str(workspace))
-    _seed_workspace(workspace, "sb-1")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"preexisting")
-    snapshot = DockerSandboxSnapshot(id="snap-1", sandbox_id="sb-1")
+    service = _service_with_workspace(tmp_path)
+    assert service.workspace_dir is not None
+    sandbox_id = "sb-1"
+    (Path(service.workspace_dir) / sandbox_id).mkdir(parents=True)
+    service._sync_tar_snapshot("snap-1", sandbox_id)
     with pytest.raises(SandboxSnapshotConflictError):
-        service._sync_tar_snapshot(snapshot, "sb-1")
+        service._sync_tar_snapshot("snap-1", sandbox_id)
 
 
 def test_sync_tar_snapshot_raises_when_workspace_missing(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=str(tmp_path / "ws"))
-    snapshot = DockerSandboxSnapshot(id="snap-1", sandbox_id="sb-missing")
+    service = _service_with_workspace(tmp_path)
+    # Workspace dir exists but the per-sandbox subdirectory does not.
+    assert service.workspace_dir is not None
+    Path(service.workspace_dir).mkdir(parents=True)
     with pytest.raises(SandboxNotFoundError):
-        service._sync_tar_snapshot(snapshot, "sb-missing")
+        service._sync_tar_snapshot("snap-1", "sb-missing")
 
 
 def test_sync_tar_snapshot_raises_when_no_workspace_dir(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=None)
-    snapshot = DockerSandboxSnapshot(id="snap-1", sandbox_id="sb-1")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
     with pytest.raises(SandboxNotFoundError):
-        service._sync_tar_snapshot(snapshot, "sb-1")
+        service._sync_tar_snapshot("snap-1", "sb-1")
 
 
 def test_sync_import_snapshot_writes_file(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    snapshot = DockerSandboxSnapshot(id="snap-1", sandbox_id=None)
-    service._sync_import_snapshot(snapshot, b"tarball-bytes")
-    assert (tmp_path / "snapshots" / "snap-1.tar.gz").read_bytes() == b"tarball-bytes"
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    service._sync_import_snapshot("snap-1", b"tarball-bytes")
+    from openhands.ev2.util import snapshot_store
+
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, "snap-1")
 
 
 def test_sync_import_snapshot_conflict_when_exists(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotConflictError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"preexisting")
-    snapshot = DockerSandboxSnapshot(id="snap-1", sandbox_id=None)
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    service._sync_import_snapshot("snap-1", b"tarball-bytes")
     with pytest.raises(SandboxSnapshotConflictError):
-        service._sync_import_snapshot(snapshot, b"tarball-bytes")
+        service._sync_import_snapshot("snap-1", b"again")
 
 
 def test_sync_delete_snapshot_removes_tarball(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    service._sync_import_snapshot("snap-1", b"tarball-bytes")
+    service._sync_delete_snapshot("snap-1")
     from openhands.ev2.util import snapshot_store
 
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    service._sync_delete_snapshot("snap-1")
-    assert not (tmp_path / "snapshots" / "snap-1.tar.gz").is_file()
+    assert not snapshot_store.snapshot_exists(service.snapshot_dir, "snap-1")
 
 
 def test_sync_delete_snapshot_missing_raises_not_found(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
     with pytest.raises(SandboxSnapshotNotFoundError):
         service._sync_delete_snapshot("nope")
 
 
-@pytest.mark.asyncio
-async def test_async_list_snapshots_returns_all(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-2", b"dummy")
-    snapshots = await service._list_snapshots()
-    assert {s.id for s in snapshots} == {"snap-1", "snap-2"}
-
-
-@pytest.mark.asyncio
-async def test_async_get_snapshot_returns_snapshot(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    snapshot = await service._get_snapshot("snap-1")
-    assert snapshot.id == "snap-1"
-
-
-@pytest.mark.asyncio
-async def test_snapshot_from_sandbox_builds_model(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img-a",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        snapshot_mode=SnapshotMode.MANUAL,
-        session_api_key=None,
-        exposed_urls=[],
-        status_detail=None,
-        volume_mounts=[],
-    )
-    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
-    snapshot = await service._snapshot_from_sandbox(payload, sandbox)
-    assert snapshot.id == ""
-    assert snapshot.sandbox_id == "sb-1"
-
-
-@pytest.mark.asyncio
-async def test_snapshot_from_file_builds_model(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
-    snapshot = await service._snapshot_from_file(payload)
-    assert snapshot.id == ""
-    assert snapshot.sandbox_id is None
-
-
-@pytest.mark.asyncio
-async def test_create_snapshot_from_sandbox_creates_tarball(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=str(workspace))
-    _seed_workspace(workspace, "sb-1", "content")
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img-a",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        snapshot_mode=SnapshotMode.MANUAL,
-        session_api_key=None,
-        exposed_urls=[],
-        status_detail=None,
-        volume_mounts=[],
-    )
-    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
-    snapshot_model = await service._snapshot_from_sandbox(payload, sandbox)
-    result = await service._create_snapshot(snapshot_model, payload)
-    assert result.id
-    assert (tmp_path / "snapshots" / f"{result.id}.tar.gz").is_file()
-
-
-@pytest.mark.asyncio
-async def test_create_snapshot_from_file_writes_tarball(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
-    snapshot_model = await service._snapshot_from_file(payload)
-    result = await service._create_snapshot(snapshot_model, payload)
-    assert result.id
-    assert (tmp_path / "snapshots" / f"{result.id}.tar.gz").read_bytes() == b"tar"
-
-
-@pytest.mark.asyncio
-async def test_delete_snapshot_removes_tarball(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    await service._delete_snapshot("snap-1")
-    assert not (tmp_path / "snapshots" / "snap-1.tar.gz").is_file()
-
-
-@pytest.mark.asyncio
 async def test_stream_snapshot_returns_bytes(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    from openhands.ev2.util import snapshot_store
-
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"tarball-data")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    service._sync_import_snapshot("snap-1", b"tarball-bytes")
     chunks = await service.stream_snapshot("snap-1")
-    assert b"".join(chunks) == b"tarball-data"
+    assert b"".join(chunks) == b"tarball-bytes"
 
 
-@pytest.mark.asyncio
-async def test_service_list_snapshots(tmp_path: Path) -> None:
-    from openhands.ev2.util import snapshot_store
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-2", b"dummy")
-    snapshots = await service.list_snapshots()
-    assert {s.id for s in snapshots} == {"snap-1", "snap-2"}
-
-
-@pytest.mark.asyncio
-async def test_service_get_snapshot_not_found_raises(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.get_snapshot("nope")
+async def test_service_capture_snapshot_from_sandbox(tmp_path: Path) -> None:
+    service = _service_with_workspace(tmp_path)
+    assert service.workspace_dir is not None
+    sandbox_id = "sb-1"
+    ws = Path(service.workspace_dir) / sandbox_id
+    ws.mkdir(parents=True)
+    (ws / "f.txt").write_text("data")
+    snapshot_id, size = await service.capture_snapshot(sandbox_id)
+    assert snapshot_id
+    assert size is not None and size > 0
 
 
-@pytest.mark.asyncio
-async def test_service_create_snapshot_from_sandbox(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    service = _make_tarball_service(tmp_path / "snapshots", workspace_dir=str(workspace))
-    _seed_workspace(workspace, "sb-1", "content")
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img-a",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        snapshot_mode=SnapshotMode.MANUAL,
-        session_api_key=None,
-        exposed_urls=[],
-        status_detail=None,
-        volume_mounts=[],
-    )
-    # Bypass the sandbox lookup by calling the lower-level hook directly.
-    payload = SandboxSnapshotCreate(sandbox_id="sb-1")
-    snapshot_model = await service._snapshot_from_sandbox(payload, sandbox)
-    result = await service._create_snapshot(snapshot_model, payload)
-    snapshot = await service.get_snapshot(result.id)
-    assert snapshot.id == result.id
+async def test_service_import_snapshot_from_file(tmp_path: Path) -> None:
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    snapshot_id, size = await service.import_snapshot_file(b"tarball-bytes")
+    assert snapshot_id
+    assert size is not None and size > 0
 
 
-@pytest.mark.asyncio
-async def test_service_create_snapshot_from_file(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    payload = SandboxSnapshotCreate(file_data=b"tar", schema_type="docker-image-tar")
-    snapshot = await service.create_snapshot(payload)
-    assert snapshot.id
-    assert snapshot.sandbox_id is None
-
-
-@pytest.mark.asyncio
 async def test_service_delete_snapshot(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
+    await service.import_snapshot_file(b"tarball-bytes")
+    snapshot_id = (await service.import_snapshot_file(b"more"))[0]
+    await service.delete_snapshot_artifact(snapshot_id)
     from openhands.ev2.util import snapshot_store
 
-    snapshot_store.import_snapshot(service.snapshot_dir, "snap-1", b"dummy")
-    await service.delete_snapshot("snap-1")
-    with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.get_snapshot("snap-1")
+    assert not snapshot_store.snapshot_exists(service.snapshot_dir, snapshot_id)
 
 
-@pytest.mark.asyncio
 async def test_service_delete_snapshot_not_found_raises(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    service = _make_tarball_service(tmp_path / "snapshots")
+    service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
     with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.delete_snapshot("nope")
+        await service.delete_snapshot_artifact("nope")
 
 
-def test_snapshot_restore_roundtrip(tmp_path: Path) -> None:
-    """A snapshot taken from one workspace restores into another."""
-    from openhands.ev2.util import snapshot_store
+def test_base_service_snapshot_hooks_raise_unsupported() -> None:
+    # A SandboxService subclass that does not override the snapshot hooks
+    # inherits the unsupported defaults from the base class.
+    class _BareService(SandboxService):
+        async def _list_sandboxes(self) -> list[Sandbox]:
+            return []
 
-    snapshot_dir = tmp_path / "snapshots"
-    source_ws = tmp_path / "source" / "sb-1"
-    source_ws.mkdir(parents=True)
-    (source_ws / "hello.txt").write_text("world")
-    snapshot_store.create_snapshot(snapshot_dir, "snap-1", source_ws)
-    dest_ws = tmp_path / "dest" / "sb-2"
-    snapshot_store.restore_snapshot(snapshot_dir, "snap-1", dest_ws)
-    assert (dest_ws / "hello.txt").read_text() == "world"
+        async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
+            raise SandboxNotFoundError(sandbox_id)
+
+        def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
+            raise NotImplementedError
+
+        async def _create_sandbox(
+            self, sandbox: Sandbox, *, snapshot_id: str | None = None
+        ) -> Sandbox:
+            raise NotImplementedError
+
+        async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
+            raise NotImplementedError
+
+        async def _delete_sandbox(self, sandbox_id: str) -> None:
+            pass
+
+    service = _BareService()
+    with pytest.raises(SandboxSnapshotUnsupportedError):
+        asyncio.run(service.stream_snapshot("snap-a"))
 
 
 # --------------------------------------------------------------------------- #
-# Fake Docker client for template & sandbox CRUD tests (image/container ops).
+# last_accessed_at derivation.
+# --------------------------------------------------------------------------- #
+
+
+def _active_sandbox_with_url(url: str = "http://localhost:32771") -> DockerSandbox:
+    return DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.ACTIVE,
+        desired_status=SandboxStatus.ACTIVE,
+        exposed_urls=[ExposedUrl(name="agent_server", url=url, port=32771)],
+    )
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_from_idle_time() -> None:
+    service = DockerSandboxService()
+    respx.get("http://localhost:32771/").mock(
+        return_value=httpx.Response(200, json={"idle_time": 60})
+    )
+    accessed = await service._resolve_last_accessed_at(_active_sandbox_with_url())
+    assert accessed is not None
+    delta = datetime.now(UTC) - accessed
+    assert 55 <= delta.total_seconds() <= 70
+
+
+async def test_resolve_last_accessed_at_none_when_not_active() -> None:
+    service = DockerSandboxService()
+    sandbox = DockerSandbox(
+        id="sb-1",
+        sandbox_template_id="img",
+        status=SandboxStatus.INACTIVE,
+        desired_status=SandboxStatus.INACTIVE,
+    )
+    assert await service._resolve_last_accessed_at(sandbox) is None
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_none_on_http_error() -> None:
+    service = DockerSandboxService()
+    respx.get("http://localhost:32771/").mock(side_effect=httpx.ConnectError("boom"))
+    assert await service._resolve_last_accessed_at(_active_sandbox_with_url()) is None
+
+
+@respx.mock
+async def test_resolve_last_accessed_at_none_when_idle_time_missing() -> None:
+    service = DockerSandboxService()
+    respx.get("http://localhost:32771/").mock(return_value=httpx.Response(200, json={"other": 1}))
+    assert await service._resolve_last_accessed_at(_active_sandbox_with_url()) is None
+
+
+@respx.mock
+async def test_list_sandboxes_enriches_last_accessed_at() -> None:
+    service = DockerSandboxService()
+    respx.get("http://localhost:32771/").mock(
+        return_value=httpx.Response(200, json={"idle_time": 5})
+    )
+
+    class _FakeContainers:
+        def list(self, all: bool = False) -> list[Any]:  # noqa: A002
+            return [
+                _FakeContainer(
+                    _container_attrs(status="running", ports={"8000/tcp": [{"HostPort": "32771"}]})
+                )
+            ]
+
+    service._client = _FakeDockerClient(containers=_FakeContainers())
+    sandboxes = await service._list_sandboxes()
+    assert len(sandboxes) == 1
+    assert sandboxes[0].last_accessed_at is not None
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle sweep.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeImage:
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+
+
+class _FakeImages:
+    def __init__(self, images: list[_FakeImage]) -> None:
+        self._images = {image.attrs["RepoTags"][0]: image for image in images}
+
+    def get(self, name: str) -> _FakeImage:
+        try:
+            return self._images[name]
+        except KeyError:
+            raise ImageNotFound(name) from None
+
+
+class _FakeContainerCtrl:
+    """A fake Docker container supporting pause/stop/remove + label mutation."""
+
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.attrs = attrs
+        self.paused = False
+        self.stopped = False
+        self.removed = False
+
+    def reload(self) -> None:
+        pass
+
+    def pause(self) -> None:
+        self.paused = True
+        self.attrs["State"]["Status"] = "paused"
+        with contextlib.suppress(Exception):
+            self.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_at"] = datetime.now(
+                UTC
+            ).isoformat()
+
+    def unpause(self) -> None:
+        self.paused = False
+        self.attrs["State"]["Status"] = "running"
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.attrs["State"]["Status"] = "exited"
+
+    def start(self) -> None:
+        self.stopped = False
+        self.attrs["State"]["Status"] = "running"
+
+    def remove(self, force: bool = False) -> None:
+        self.removed = True
+
+
+class _FakeContainers:
+    def __init__(self, containers: list[_FakeContainerCtrl]) -> None:
+        self._containers = {c.attrs["Name"].lstrip("/"): c for c in containers}
+
+    def list(self, all: bool = False) -> list[_FakeContainerCtrl]:  # noqa: A002
+        return list(self._containers.values())
+
+    def get(self, sandbox_id: str) -> _FakeContainerCtrl:
+        try:
+            return self._containers[sandbox_id]
+        except KeyError:
+            raise NotFound(sandbox_id) from None
+
+
+class _FakeDockerClient:
+    def __init__(
+        self,
+        images: list[_FakeImage] | None = None,
+        containers: Any = None,
+    ) -> None:
+        self.images = _FakeImages(images or [])
+        self.containers = containers or _FakeContainers([])
+
+
+def _image_attrs_with_knobs(
+    repo_tag: str,
+    *,
+    idle_pause_seconds: int | None = None,
+    paused_delete_seconds: int | None = None,
+    max_age_seconds: int | None = None,
+) -> dict[str, Any]:
+    labels: dict[str, str] = {}
+    if idle_pause_seconds is not None:
+        labels["io.openhands.sandbox.idle_pause_seconds"] = str(idle_pause_seconds)
+    if paused_delete_seconds is not None:
+        labels["io.openhands.sandbox.paused_delete_seconds"] = str(paused_delete_seconds)
+    if max_age_seconds is not None:
+        labels["io.openhands.sandbox.max_age_seconds"] = str(max_age_seconds)
+    return {
+        "RepoTags": [repo_tag],
+        "Created": "2024-01-02T03:04:05Z",
+        "Config": {"Cmd": None, "Env": None, "WorkingDir": None, "Labels": labels},
+        "HostConfig": {},
+    }
+
+
+@respx.mock
+async def test_sweep_pauses_idle_active_sandbox() -> None:
+    service = DockerSandboxService()
+    respx.get("http://localhost:32771/").mock(
+        return_value=httpx.Response(200, json={"idle_time": 999})
+    )
+    sandbox = _FakeContainerCtrl(
+        _container_attrs(
+            status="running",
+            image="img:latest",
+            ports={"8000/tcp": [{"HostPort": "32771"}]},
+        )
+    )
+    # Make last_accessed_at old enough to exceed idle_pause_seconds.
+    sandbox.attrs["Created"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    service._client = _FakeDockerClient(
+        images=[_FakeImage(_image_attrs_with_knobs("img:latest", idle_pause_seconds=10))],
+        containers=_FakeContainers([sandbox]),
+    )
+    summary = await service.sweep_lifecycle()
+    assert sandbox.paused
+    assert summary is not None and "paused" in summary
+
+
+async def test_sweep_skips_active_sandbox_under_idle_threshold() -> None:
+    service = DockerSandboxService()
+    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    service._client = _FakeDockerClient(
+        images=[_FakeImage(_image_attrs_with_knobs("img:latest", idle_pause_seconds=3600))],
+        containers=_FakeContainers([sandbox]),
+    )
+    # No exposed URL -> last_accessed_at None -> idle_seconds None -> no pause.
+    summary = await service.sweep_lifecycle()
+    assert not sandbox.paused
+    assert summary is None
+
+
+async def test_sweep_deletes_paused_sandbox_past_paused_delete() -> None:
+    service = DockerSandboxService()
+    paused_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    sandbox = _FakeContainerCtrl(
+        _container_attrs(
+            status="paused",
+            image="img:latest",
+            labels={"io.openhands.sandbox.paused_at": paused_at},
+        )
+    )
+    service._client = _FakeDockerClient(
+        images=[_FakeImage(_image_attrs_with_knobs("img:latest", paused_delete_seconds=60))],
+        containers=_FakeContainers([sandbox]),
+    )
+    summary = await service.sweep_lifecycle()
+    assert sandbox.removed
+    assert summary is not None and "deleted" in summary
+
+
+async def test_sweep_deletes_sandbox_past_max_age() -> None:
+    service = DockerSandboxService()
+    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    sandbox.attrs["Created"] = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    service._client = _FakeDockerClient(
+        images=[_FakeImage(_image_attrs_with_knobs("img:latest", max_age_seconds=60))],
+        containers=_FakeContainers([sandbox]),
+    )
+    summary = await service.sweep_lifecycle()
+    assert sandbox.removed
+    assert summary is not None and "deleted" in summary
+
+
+async def test_sweep_no_op_when_no_thresholds_set() -> None:
+    service = DockerSandboxService()
+    sandbox = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    service._client = _FakeDockerClient(
+        images=[_FakeImage(_image_attrs_with_knobs("img:latest"))],
+        containers=_FakeContainers([sandbox]),
+    )
+    summary = await service.sweep_lifecycle()
+    assert not sandbox.paused
+    assert not sandbox.removed
+    assert summary is None
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle task management.
+# --------------------------------------------------------------------------- #
+
+
+async def test_aenter_starts_lifecycle_task() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0.1)
+    service._client = _FakeDockerClient()
+    async with service:
+        assert service._lifecycle_task is not None
+        task = service._lifecycle_task
+    assert task.cancelled() or task.done()
+
+
+async def test_aenter_skips_task_when_interval_zero() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0)
+    service._client = _FakeDockerClient()
+    async with service:
+        assert service._lifecycle_task is None
+
+
+async def test_aclose_cancels_lifecycle_task() -> None:
+    service = DockerSandboxService(sandbox_lifecycle_interval=0.1)
+    service._client = _FakeDockerClient()
+    await service.__aenter__()
+    task = service._lifecycle_task
+    assert task is not None
+    await service.__aexit__(None, None, None)
+    assert task.cancelled() or task.done()
+
+
+async def test_aclose_closes_http_client() -> None:
+    service = DockerSandboxService()
+    await service.__aenter__()
+    # Force creation of the http client.
+    client = service._http_client()
+    assert service._http is client
+    await service.__aexit__(None, None, None)
+    assert client.is_closed
+
+
+async def test_lifecycle_loop_runs_one_sweep_then_cancels() -> None:
+    swept: list[bool] = []
+
+    class _StubSweepService(DockerSandboxService):
+        async def sweep_lifecycle(self) -> str | None:
+            swept.append(True)
+            return None
+
+    service = _StubSweepService(sandbox_lifecycle_interval=0.01)
+    service._client = _FakeDockerClient()
+    await service.__aenter__()
+    await asyncio.sleep(0.05)
+    await service.__aexit__(None, None, None)
+    assert swept
+
+
+# --------------------------------------------------------------------------- #
+# Deactivation mode (pause vs stop) stamps/clears the paused_at label.
+# --------------------------------------------------------------------------- #
+
+
+def test_deactivate_container_stamps_paused_at_label() -> None:
+    service = DockerSandboxService(deactivate_mode="pause")
+    container = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    service._deactivate_container(container, "running")
+    assert container.paused
+    assert container.attrs["Config"]["Labels"].get("io.openhands.sandbox.paused_at") is not None
+
+
+def test_deactivate_container_stamps_paused_at_label_in_stop_mode() -> None:
+    service = DockerSandboxService(deactivate_mode="stop")
+    container = _FakeContainerCtrl(_container_attrs(status="running", image="img:latest"))
+    service._deactivate_container(container, "running")
+    assert container.stopped
+    assert container.attrs["Config"]["Labels"].get("io.openhands.sandbox.paused_at") is not None
+
+
+def test_activate_container_clears_paused_at_label() -> None:
+    service = DockerSandboxService()
+    container = _FakeContainerCtrl(
+        _container_attrs(
+            status="paused",
+            image="img:latest",
+            labels={"io.openhands.sandbox.paused_at": "2024-01-02T03:04:05Z"},
+        )
+    )
+    service._activate_container(container, "paused")
+    assert "io.openhands.sandbox.paused_at" not in (container.attrs["Config"]["Labels"])
+
+
+def test_container_state_handles_reload_exception() -> None:
+    from openhands.ev2.sandbox.docker_sandbox_service import _container_state
+
+    class _Broken:
+        def reload(self) -> None:
+            raise RuntimeError("reload failed")
+
+        attrs: ClassVar[dict[str, Any]] = {"State": {"Status": "running"}}
+
+    assert _container_state(_Broken()) == "running"
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox CRUD via a fake Docker client with container/image ops.
 # --------------------------------------------------------------------------- #
 
 
 class _FakeImageWithOps:
-    """Fake Docker image supporting save(), tag(), and remove()."""
-
     def __init__(self, attrs: dict[str, Any]) -> None:
         self.attrs = attrs
-        self._saved = False
-        self._tagged: list[tuple[str, str]] = []
 
     def save(self, named: bool = False) -> list[bytes]:
-        self._saved = True
         return [b"fake-tarball"]
 
     def tag(self, repository: str, tag: str) -> bool:
-        self._tagged.append((repository, tag))
         return True
 
     def remove(self, force: bool = False) -> None:
@@ -1041,14 +980,10 @@ class _FakeImageWithOps:
 
 
 class _FakeImagesWithOps:
-    """Fake Docker images client with get/list/remove/load/pull."""
-
     def __init__(self, images: list[_FakeImageWithOps]) -> None:
-        self._images: dict[str, _FakeImageWithOps] = {}
-        for image in images:
-            tag = image.attrs["RepoTags"][0]
-            self._images[tag] = image
-        self._loaded_images: list[bytes] = []
+        self._images: dict[str, _FakeImageWithOps] = {
+            image.attrs["RepoTags"][0]: image for image in images
+        }
 
     def list(self) -> list[_FakeImageWithOps]:
         return list(self._images.values())
@@ -1064,28 +999,13 @@ class _FakeImagesWithOps:
             raise ImageNotFound(image) from None
         del self._images[image]
 
-    def load(self, data: bytes) -> list[_FakeImageWithOps]:
-        self._loaded_images.append(data)
-        fake = _FakeImageWithOps(
-            {
-                "RepoTags": ["loaded-temp:latest"],
-                "Created": "2024-01-02T03:04:05Z",
-                "Config": {"Labels": {}},
-            }
-        )
-        self._images["loaded-temp:latest"] = fake
-        return [fake]
-
     def pull(self, repository: str) -> None:
-        fake = _FakeImageWithOps(
+        self._images[repository] = _FakeImageWithOps(
             {"RepoTags": [repository], "Created": "2024-01-02T03:04:05Z", "Config": {"Labels": {}}}
         )
-        self._images[repository] = fake
 
 
 class _FakeContainerWithOps:
-    """Fake Docker container supporting reload(), pause/unpause/stop/start/remove."""
-
     def __init__(self, attrs: dict[str, Any]) -> None:
         self.attrs = attrs
         self._paused = False
@@ -1122,6 +1042,8 @@ class _FakeContainerWithOps:
 
 
 class _FakeContainersWithOps:
+    _generated_name_counter = 0
+
     def __init__(self, containers: list[_FakeContainerWithOps]) -> None:
         self._containers: dict[str, _FakeContainerWithOps] = {
             c.attrs["Name"].lstrip("/"): c for c in containers
@@ -1134,8 +1056,6 @@ class _FakeContainersWithOps:
         try:
             return self._containers[name]
         except KeyError:
-            from docker.errors import NotFound  # type: ignore[import-untyped]
-
             raise NotFound(name) from None
 
     def run(
@@ -1155,19 +1075,15 @@ class _FakeContainersWithOps:
         if name is None:
             type(self)._generated_name_counter += 1
             name = f"fakename-{type(self)._generated_name_counter}"
-        attrs = _container_attrs(name, image=image)
+        attrs = _container_attrs(name=name, image=image, sandbox_id=name)
         attrs["State"]["Status"] = "running"
         attrs["Config"]["Labels"] = labels or {}
         container = _FakeContainerWithOps(attrs)
         self._containers[name] = container
         return container
 
-    _generated_name_counter = 0
-
 
 class _FakeSnapshotDockerClient:
-    """Fake Docker client supporting images and containers."""
-
     def __init__(
         self,
         images: list[_FakeImageWithOps],
@@ -1181,121 +1097,46 @@ def _make_snapshot_service(
     images: list[_FakeImageWithOps],
     containers: list[tuple[str, str]] | None = None,
 ) -> tuple[DockerSandboxService, _FakeSnapshotDockerClient]:
-    """Build a DockerSandboxService with a fake client and wired containers."""
     client = _FakeSnapshotDockerClient(images)
-    for name, image in containers or []:
-        container = _FakeContainerWithOps(_container_attrs(name, image=image))
-        client.containers._containers[name] = container
+    for cname, image in containers or []:
+        attrs = _container_attrs(name=cname, image=image, sandbox_id=cname)
+        attrs["Config"]["Labels"]["io.openhands.sandbox.sandbox_template_id"] = image
+        attrs["HostConfig"]["Binds"] = ["/host:/container:rw"]
+        attrs["NetworkSettings"]["Ports"] = {"8000/tcp": [{"HostPort": "32771"}]}
+        container = _FakeContainerWithOps(attrs)
+        client.containers._containers[cname] = container
     service = DockerSandboxService()
     service._client = client
     return service, client
 
 
-# --------------------------------------------------------------------------- #
-# Docker template & sandbox async CRUD (provider hooks).
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_async_list_templates_returns_templates() -> None:
-    service, _ = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    service.image_name_patterns = ["ghcr.io/openhands/*"]
-    templates = await service._list_templates()
-    assert [t.id for t in templates] == ["ghcr.io/openhands/agent-canvas:latest"]
-
-
-@pytest.mark.asyncio
-async def test_async_get_template_returns_template() -> None:
-    service, _ = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    service.image_name_patterns = ["ghcr.io/openhands/*"]
-    template = await service._get_template("ghcr.io/openhands/agent-canvas:latest")
-    assert template.id == "ghcr.io/openhands/agent-canvas:latest"
-
-
-@pytest.mark.asyncio
-async def test_async_create_template_pulls_image() -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxTemplateCreate
-
-    service = DockerSandboxService()
-    service._client = _FakeSnapshotDockerClient([])
-    payload = SandboxTemplateCreate(id="ghcr.io/openhands/agent-canvas:latest")
-    template = service._template_from_create(payload)
-    result = await service._create_template(template)
-    assert result.id == "ghcr.io/openhands/agent-canvas:latest"
-
-
-@pytest.mark.asyncio
-async def test_async_create_template_conflict_when_exists() -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxTemplateCreate
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateConflictError
-
-    service, _ = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    payload = SandboxTemplateCreate(id="ghcr.io/openhands/agent-canvas:latest")
-    template = service._template_from_create(payload)
-    with pytest.raises(SandboxTemplateConflictError):
-        await service._create_template(template)
-
-
-@pytest.mark.asyncio
-async def test_async_delete_template_removes_image() -> None:
-    service, client = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    await service._delete_template("ghcr.io/openhands/agent-canvas:latest")
-    with pytest.raises(ImageNotFound):
-        client.images.get("ghcr.io/openhands/agent-canvas:latest")
-
-
-@pytest.mark.asyncio
-async def test_async_delete_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
-
-    service, _ = _make_snapshot_service([])
-    with pytest.raises(SandboxTemplateNotFoundError):
-        await service._delete_template("nope")
-
-
-@pytest.mark.asyncio
 async def test_async_list_sandboxes_returns_sandboxes() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a"), ("sb-2", "img-a")])
     sandboxes = await service._list_sandboxes()
     assert {sb.id for sb in sandboxes} == {"sb-1", "sb-2"}
 
 
-@pytest.mark.asyncio
 async def test_async_get_sandbox_returns_sandbox() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     sandbox = await service._get_sandbox("sb-1")
     assert sandbox.id == "sb-1"
 
 
-@pytest.mark.asyncio
 async def test_async_get_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
         await service._get_sandbox("nope")
 
 
-@pytest.mark.asyncio
 async def test_async_create_sandbox_creates_container() -> None:
     service, client = _make_snapshot_service([], [])
     sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
     result = await service._create_sandbox(sandbox)
-    # The id is generated by the service (Docker container name), not caller-supplied.
     assert result.id != ""
     assert result.sandbox_template_id == "img-a"
     assert result.id in client.containers._containers
 
 
-@pytest.mark.asyncio
 async def test_async_update_sandbox_activates_paused() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     container = service._client.containers.get("sb-1")
@@ -1304,7 +1145,6 @@ async def test_async_update_sandbox_activates_paused() -> None:
     assert container._unpaused
 
 
-@pytest.mark.asyncio
 async def test_async_update_sandbox_starts_exited() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     container = service._client.containers.get("sb-1")
@@ -1313,7 +1153,6 @@ async def test_async_update_sandbox_starts_exited() -> None:
     assert container._started
 
 
-@pytest.mark.asyncio
 async def test_async_update_sandbox_pauses_running() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     container = service._client.containers.get("sb-1")
@@ -1322,16 +1161,12 @@ async def test_async_update_sandbox_pauses_running() -> None:
     assert container._paused
 
 
-@pytest.mark.asyncio
 async def test_async_update_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
         await service._update_sandbox("nope", SandboxUpdate(desired_status=SandboxStatus.ACTIVE))
 
 
-@pytest.mark.asyncio
 async def test_async_delete_sandbox_removes_container() -> None:
     service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
     container = service._client.containers.get("sb-1")
@@ -1339,16 +1174,12 @@ async def test_async_delete_sandbox_removes_container() -> None:
     assert container._removed
 
 
-@pytest.mark.asyncio
 async def test_async_delete_sandbox_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxNotFoundError
-
     service, _ = _make_snapshot_service([])
     with pytest.raises(SandboxNotFoundError):
         await service._delete_sandbox("nope")
 
 
-@pytest.mark.asyncio
 async def test_sandbox_service_context_manager() -> None:
     service = DockerSandboxService()
     entered = await service.__aenter__()
@@ -1358,715 +1189,126 @@ async def test_sandbox_service_context_manager() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SandboxService snapshot search/count/batch/unsupported coverage.
+# snapshot_store round-trip (restore path).
 # --------------------------------------------------------------------------- #
 
 
-def _seed_snapshots(snapshot_dir: Path, *ids: str) -> None:
+def test_snapshot_restore_roundtrip(tmp_path: Path) -> None:
     from openhands.ev2.util import snapshot_store
 
-    for sid in ids:
-        snapshot_store.import_snapshot(snapshot_dir, sid, b"dummy")
-
-
-@pytest.mark.asyncio
-async def test_service_search_snapshots_paginates(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2", "snap-3")
-    page, next_cursor = await service.search_snapshots(cursor=None, limit=2)
-    assert {s.id for s in page} == {"snap-1", "snap-2"}
-    page2, next_cursor2 = await service.search_snapshots(cursor=next_cursor, limit=2)
-    assert {s.id for s in page2} == {"snap-3"}
-    assert next_cursor2 is None
-
-
-@pytest.mark.asyncio
-async def test_service_search_snapshots_with_search_filter(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotSearchFilter
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2")
-    sf = SandboxSnapshotSearchFilter(sandbox_id__eq="sb-1")
-    page, _ = await service.search_snapshots(search_filter=sf)
-    # Tarball snapshots don't carry sandbox_id in the store, so filtering by
-    # sandbox_id returns nothing — the filter is applied but the stored models
-    # have sandbox_id=None. Verify the search returns all when filter matches.
-    assert all(s.sandbox_id is None for s in page)
-
-
-@pytest.mark.asyncio
-async def test_service_count_snapshots(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2")
-    total = await service.count_snapshots()
-    assert total == 2
-
-
-@pytest.mark.asyncio
-async def test_service_count_snapshots_with_filter(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotSearchFilter
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2")
-    sf = SandboxSnapshotSearchFilter(sandbox_id__eq="sb-1")
-    total = await service.count_snapshots(search_filter=sf)
-    # All stored snapshots have sandbox_id=None, so the filter matches none.
-    assert total == 0
-
-
-@pytest.mark.asyncio
-async def test_service_get_snapshots_batch(tmp_path: Path) -> None:
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2")
-    results = await service.get_snapshots(["snap-1", "nope", "snap-2"])
-    assert results[0] is not None
-    assert results[0].id == "snap-1"
-    assert results[1] is None
-    assert results[2] is not None
-    assert results[2].id == "snap-2"
-
-
-@pytest.mark.asyncio
-async def test_service_apply_snapshot_batch_deletes(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotBatchDelete
-    from openhands.ev2.security.security_models import Action
-    from openhands.ev2.util.search_filter import AllSearchFilter
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1", "snap-2")
-    ops = [SandboxSnapshotBatchDelete(id="snap-1"), SandboxSnapshotBatchDelete(id="snap-2")]
-    perm_filters: dict[Any, Any] = {Action.DELETE: AllSearchFilter()}
-    results = await service.apply_snapshot_batch(ops, perm_filters)
-    assert results == [None, None]
-    from openhands.ev2.sandbox.sandbox_service import SandboxSnapshotNotFoundError
-
-    with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.get_snapshot("snap-1")
-    with pytest.raises(SandboxSnapshotNotFoundError):
-        await service.get_snapshot("snap-2")
-
-
-@pytest.mark.asyncio
-async def test_service_apply_snapshot_batch_denied_when_filter_none(tmp_path: Path) -> None:
-    from openhands.ev2.sandbox.sandbox_schemas import SandboxSnapshotBatchDelete
-    from openhands.ev2.sandbox.sandbox_service import BatchPermissionDeniedError
-    from openhands.ev2.security.security_models import Action
-
-    service = _make_tarball_service(tmp_path / "snapshots")
-    _seed_snapshots(service.snapshot_dir, "snap-1")
-    ops = [SandboxSnapshotBatchDelete(id="snap-1")]
-    perm_filters: dict[Any, Any] = {Action.DELETE: None}
-    with pytest.raises(BatchPermissionDeniedError):
-        await service.apply_snapshot_batch(ops, perm_filters)
-
-
-@pytest.mark.asyncio
-async def test_base_service_snapshot_hooks_raise_unsupported() -> None:
-    from openhands.ev2.sandbox.sandbox_service import (
-        SandboxNotFoundError,
-        SandboxService,
-        SandboxSnapshotUnsupportedError,
-        SandboxTemplateNotFoundError,
-    )
+    snapshot_dir = str(tmp_path / "snaps")
+    source_ws = tmp_path / "src" / "sb-1"
+    source_ws.mkdir(parents=True)
+    (source_ws / "hello.txt").write_text("world")
+    snapshot_store.create_snapshot(snapshot_dir, "snap-1", source_ws)
+    dest_ws = tmp_path / "dest" / "sb-2"
+    snapshot_store.restore_snapshot(snapshot_dir, "snap-1", dest_ws)
+    assert (dest_ws / "hello.txt").read_text() == "world"
 
-    class _UnsupportedService(SandboxService):
-        async def _list_templates(self) -> list[SandboxTemplate]:
-            return []
 
-        async def _get_template(self, template_id: str) -> SandboxTemplate:
-            raise SandboxTemplateNotFoundError(template_id)
+def test_snapshot_store_list_and_size(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-        def _template_from_create(self, payload: SandboxTemplateCreate) -> SandboxTemplate:
-            raise NotImplementedError
+    snapshot_dir = str(tmp_path / "snaps")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "f").write_text("x")
+    snapshot_store.create_snapshot(snapshot_dir, "snap-1", ws)
+    assert snapshot_store.list_snapshot_ids(snapshot_dir) == ["snap-1"]
+    assert snapshot_store.snapshot_size(snapshot_dir, "snap-1") is not None
+    assert snapshot_store.snapshot_created_at(snapshot_dir, "snap-1") is not None
 
-        async def _create_template(self, template: SandboxTemplate) -> SandboxTemplate:
-            raise NotImplementedError
 
-        async def _delete_template(self, template_id: str) -> None:
-            pass
+def test_snapshot_store_list_empty_when_dir_missing(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-        async def _list_sandboxes(self) -> list[Sandbox]:
-            return []
+    assert snapshot_store.list_snapshot_ids(str(tmp_path / "nope")) == []
 
-        async def _get_sandbox(self, sandbox_id: str) -> Sandbox:
-            raise SandboxNotFoundError(sandbox_id)
 
-        def _sandbox_from_create(self, payload: SandboxCreate) -> Sandbox:
-            raise NotImplementedError
+def test_snapshot_store_size_and_created_at_missing_return_none(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-        async def _create_sandbox(self, sandbox: Sandbox) -> Sandbox:
-            raise NotImplementedError
+    snapshot_dir = str(tmp_path / "snaps")
+    assert snapshot_store.snapshot_size(snapshot_dir, "nope") is None
+    assert snapshot_store.snapshot_created_at(snapshot_dir, "nope") is None
 
-        async def _update_sandbox(self, sandbox_id: str, payload: SandboxUpdate) -> Sandbox:
-            raise NotImplementedError
 
-        async def _delete_sandbox(self, sandbox_id: str) -> None:
-            pass
+def test_snapshot_store_restore_missing_raises(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-    service = _UnsupportedService()
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._list_snapshots()
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._get_snapshot("x")
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._snapshot_from_sandbox(
-            SandboxSnapshotCreate(sandbox_id="sb"),
-            None,  # type: ignore[arg-type]
-        )
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._snapshot_from_file(SandboxSnapshotCreate(file_data=b"", schema_type="t"))
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._create_snapshot(None, None)  # type: ignore[arg-type]
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service._delete_snapshot("x")
-    with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service.stream_snapshot("x")
+    with pytest.raises(FileNotFoundError):
+        snapshot_store.restore_snapshot(str(tmp_path / "snaps"), "nope", tmp_path / "dest")
 
 
-def test_snapshot_router_exception_to_status_mapping() -> None:
-    from fastapi import status as http_status
+def test_snapshot_store_stream_roundtrip(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-    from openhands.ev2.sandbox.sandbox_service import (
-        SandboxSnapshotConflictError,
-        SandboxSnapshotNotFoundError,
-        SandboxSnapshotPermissionScopeError,
-        SandboxSnapshotUnsupportedError,
-    )
-    from openhands.ev2.sandbox.sandbox_snapshot_router import _map_exception_to_status
+    snapshot_dir = str(tmp_path / "snaps")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "f.txt").write_text("data")
+    snapshot_store.create_snapshot(snapshot_dir, "snap-1", ws)
+    chunks = b"".join(snapshot_store.stream_snapshot(snapshot_dir, "snap-1"))
+    assert chunks  # non-empty tarball bytes
 
-    assert _map_exception_to_status(SandboxSnapshotNotFoundError("x")).status_code == 404
-    assert _map_exception_to_status(SandboxSnapshotConflictError("x")).status_code == 409
-    assert _map_exception_to_status(SandboxSnapshotPermissionScopeError("x")).status_code == 403
-    assert (
-        _map_exception_to_status(SandboxSnapshotUnsupportedError("x")).status_code
-        == http_status.HTTP_501_NOT_IMPLEMENTED
-    )
-    assert (
-        _map_exception_to_status(RuntimeError("boom")).status_code
-        == http_status.HTTP_500_INTERNAL_SERVER_ERROR
-    )
 
+def test_snapshot_store_stream_missing_raises(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-# --------------------------------------------------------------------------- #
-# Edge-case coverage for helpers and sync template error paths.
-# --------------------------------------------------------------------------- #
+    with pytest.raises(FileNotFoundError):
+        list(snapshot_store.stream_snapshot(str(tmp_path / "snaps"), "nope"))
 
 
-def test_parse_created_invalid_string_returns_now() -> None:
-    result = _parse_created("not-a-date")
-    assert result.tzinfo is not None
+def test_snapshot_store_create_conflict_raises(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
+    snapshot_dir = str(tmp_path / "snaps")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "f").write_text("x")
+    snapshot_store.create_snapshot(snapshot_dir, "snap-1", ws)
+    with pytest.raises(FileExistsError):
+        snapshot_store.create_snapshot(snapshot_dir, "snap-1", ws)
 
-def test_parse_created_non_string_returns_now() -> None:
-    result = _parse_created(12345)
-    assert result.tzinfo is not None
 
+async def test_docker_create_sandbox_restores_snapshot_into_workspace(tmp_path: Path) -> None:
+    from openhands.ev2.util import snapshot_store
 
-def test_parse_created_naive_datetime_gets_utc() -> None:
-    result = _parse_created("2024-06-01T12:00:00")
-    assert result.tzinfo is not None
-    assert result.year == 2024
-
-
-def test_parse_env_skips_entries_without_equals() -> None:
-    result = _parse_env(["FOO=bar", "BADENTRY", "BAZ=qux"])
-    assert result == {"FOO": "bar", "BAZ": "qux"}
-
-
-def test_sync_get_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
-
-    service, _ = _make_snapshot_service([])
-    with pytest.raises(SandboxTemplateNotFoundError):
-        service._sync_get_template("nope")
-
-
-def test_sync_get_template_raises_when_pattern_mismatch() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
-
-    service, _ = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    service.image_name_patterns = ["docker.io/library/*"]
-    with pytest.raises(SandboxTemplateNotFoundError):
-        service._sync_get_template("ghcr.io/openhands/agent-canvas:latest")
-
-
-def test_sync_create_template_pulls_new_image() -> None:
-    service, client = _make_snapshot_service([])
-    service._sync_create_template("ghcr.io/openhands/agent-canvas:latest")
-    assert "ghcr.io/openhands/agent-canvas:latest" in client.images._images
-
-
-def test_sync_create_template_conflict_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateConflictError
-
-    service, _ = _make_snapshot_service(
-        [_FakeImageWithOps(_image_attrs("ghcr.io/openhands/agent-canvas:latest"))]
-    )
-    with pytest.raises(SandboxTemplateConflictError):
-        service._sync_create_template("ghcr.io/openhands/agent-canvas:latest")
-
-
-def test_sync_delete_template_not_found_raises() -> None:
-    from openhands.ev2.sandbox.sandbox_service import SandboxTemplateNotFoundError
-
-    service, _ = _make_snapshot_service([])
-    with pytest.raises(SandboxTemplateNotFoundError):
-        service._sync_delete_template("nope")
-
-
-def test_container_state_handles_reload_exception() -> None:
-    from openhands.ev2.sandbox.docker_sandbox_service import _container_state
-
-    class _BadContainer:
-        attrs: ClassVar[dict[str, Any]] = {}
-
-        def reload(self) -> None:
-            raise RuntimeError("reload failed")
-
-    state = _container_state(_BadContainer())
-    assert state == "unknown"
-
-
-def test_snapshot_create_validation_errors() -> None:
-    with pytest.raises(ValidationError, match="mutually exclusive"):
-        SandboxSnapshotCreate(sandbox_id="sb", file_data=b"tar", schema_type="t")
-
-    with pytest.raises(ValidationError, match="Either sandbox_id or a file"):
-        SandboxSnapshotCreate()
-
-    with pytest.raises(ValidationError, match="schema_type is required"):
-        SandboxSnapshotCreate(file_data=b"tar")
-
-
-def test_template_from_image_returns_none_for_untagged() -> None:
-    service, _ = _make_snapshot_service([])
-    image = _FakeImage({"RepoTags": [], "Config": {"Labels": {}}})
-    assert service._template_from_image(image) is None
-
-
-def test_sandbox_from_container_attrs_returns_none_on_exception() -> None:
-    class _ExplodingContainer:
-        @property
-        def attrs(self) -> dict[str, Any]:
-            raise RuntimeError("container removed")
-
-    result = _sandbox_from_container_attrs(_ExplodingContainer(), list(DEFAULT_EXPOSED_PORTS))
-    assert result is None
-
-
-def test_resolve_sandbox_id_uses_name_when_image_matches_pattern() -> None:
-    from openhands.ev2.sandbox.docker_sandbox_service import _resolve_sandbox_id
-
-    attrs = {"Name": "/my-container", "Config": {"Labels": {}}}
-    result = _resolve_sandbox_id(
-        {}, attrs, "ghcr.io/openhands/agent-canvas:latest", ["ghcr.io/openhands/*"]
-    )
-    assert result == "my-container"
-
-
-def test_resolve_sandbox_id_returns_none_when_name_empty() -> None:
-    from openhands.ev2.sandbox.docker_sandbox_service import _resolve_sandbox_id
-
-    attrs = {"Name": "", "Config": {"Labels": {}}}
-    result = _resolve_sandbox_id(
-        {}, attrs, "ghcr.io/openhands/agent-canvas:latest", ["ghcr.io/openhands/*"]
-    )
-    assert result is None
-
-
-def test_docker_status_to_sandbox_status_edge_cases() -> None:
-    from openhands.ev2.sandbox.docker_sandbox_service import _docker_status_to_sandbox_status
-
-    assert _docker_status_to_sandbox_status("created") is SandboxStatus.ACTIVATING
-    assert _docker_status_to_sandbox_status("restarting") is SandboxStatus.ACTIVATING
-    assert _docker_status_to_sandbox_status("unknown") is SandboxStatus.ERROR
-
-
-def test_exposed_urls_skips_binding_without_host_port() -> None:
-    ports_binding: dict[str, Any] = {"8000/tcp": [{}]}
-    result = _exposed_urls_from_ports(list(DEFAULT_EXPOSED_PORTS), ports_binding)
-    assert result == []
-
-
-# --------------------------------------------------------------------------- #
-# last_accessed_at + lifecycle sweep.
-# --------------------------------------------------------------------------- #
-
-
-class _MutableContainer:
-    """Fake Docker container that records pause/unpause/start/remove and labels."""
-
-    def __init__(self, attrs: dict[str, Any]) -> None:
-        self.attrs = attrs
-        self.events: list[str] = []
-
-    @property
-    def name(self) -> str:
-        return self.attrs["Name"].lstrip("/")
-
-    def reload(self) -> None:
-        return None
-
-    def pause(self) -> None:
-        self.attrs["State"]["Status"] = "paused"
-        self.events.append("pause")
-
-    def unpause(self) -> None:
-        self.attrs["State"]["Status"] = "running"
-        self.events.append("unpause")
-
-    def start(self) -> None:
-        self.attrs["State"]["Status"] = "running"
-        self.events.append("start")
-
-    def remove(self, force: bool = False) -> None:
-        self.events.append("remove")
-
-
-class _MutableContainers:
-    def __init__(self, containers: list[_MutableContainer]) -> None:
-        self._containers = {c.name: c for c in containers}
-
-    def list(self, all: bool = False) -> list[_MutableContainer]:  # noqa: A002
-        return list(self._containers.values())
-
-    def get(self, name: str) -> _MutableContainer:
-        try:
-            return self._containers[name]
-        except KeyError:
-            from docker.errors import NotFound  # type: ignore[import-untyped]
-
-            raise NotFound(name) from None
-
-
-class _FakeImageObj:
-    def __init__(self, attrs: dict[str, Any]) -> None:
-        self.attrs = attrs
-
-
-class _FakeImages:
-    def __init__(self, images: list[_FakeImageObj]) -> None:
-        self._images = {image.attrs["RepoTags"][0]: image for image in images}
-
-    def list(self) -> list[_FakeImageObj]:
-        return list(self._images.values())
-
-    def get(self, name: str) -> _FakeImageObj:
-        try:
-            return self._images[name]
-        except KeyError:
-            raise ImageNotFound(name) from None
-
-
-class _LifecycleClient:
-    """Fake Docker client with both ``containers`` and ``images``."""
-
-    def __init__(self, containers: list[_MutableContainer], images: list[_FakeImageObj]) -> None:
-        self.containers = _MutableContainers(containers)
-        self.images = _FakeImages(images)
-
-
-def _lifecycle_image_attrs(template_id: str, *, idle_pause: int | None = None) -> dict[str, Any]:
-    labels: dict[str, str] = {}
-    if idle_pause is not None:
-        labels["io.openhands.sandbox.idle_pause_seconds"] = str(idle_pause)
-    return {
-        "RepoTags": [template_id],
-        "Created": "2024-01-02T03:04:05Z",
-        "Config": {"Cmd": None, "Env": None, "WorkingDir": None, "Labels": labels},
-        "HostConfig": {},
-    }
-
-
-def _lifecycle_container_attrs(
-    name: str,
-    *,
-    template_id: str = "img",
-    status: str = "running",
-    created: str | None = None,
-    paused_at: str | None = None,
-    host_port: int = 32771,
-) -> dict[str, Any]:
-    labels: dict[str, str] = {
-        "io.openhands.sandbox.sandbox_id": name,
-        "io.openhands.sandbox.sandbox_template_id": template_id,
-    }
-    if paused_at is not None:
-        labels["io.openhands.sandbox.paused_at"] = paused_at
-    return {
-        "Name": f"/{name}",
-        "Created": created or "2024-01-02T03:04:05Z",
-        "State": {"Status": status, "Error": None},
-        "Config": {"Image": template_id, "Labels": labels},
-        "HostConfig": {"Binds": []},
-        "NetworkSettings": {"Ports": {"8000/tcp": [{"HostPort": str(host_port)}]}},
-    }
-
-
-def _service_with(client: _LifecycleClient, **fields: Any) -> DockerSandboxService:
     service = DockerSandboxService(
-        image_name_patterns=["*"],
-        sandbox_lifecycle_interval=0,
-        agent_server_probe_timeout=1.0,
-        **fields,
+        workspace_dir=str(tmp_path / "ws"), snapshot_dir=str(tmp_path / "snaps")
     )
-    service._client = client
-    return service
+    service._client = _FakeSnapshotDockerClient([])
+    # Seed a real (valid gzip-tar) snapshot from a source workspace.
+    src_ws = tmp_path / "src"
+    src_ws.mkdir()
+    (src_ws / "hello.txt").write_text("world")
+    snapshot_store.create_snapshot(service.snapshot_dir, "snap-1", src_ws)
+    sandbox = service._sandbox_from_create(SandboxCreate(sandbox_template_id="img-a"))
+    result = await service._create_sandbox(sandbox, snapshot_id="snap-1")
+    assert result.id != ""
+    assert Path(service.workspace_dir, result.id).is_dir()  # type: ignore[arg-type]
+    assert (Path(service.workspace_dir, result.id) / "hello.txt").read_text() == "world"  # type: ignore[arg-type]
 
 
-def test_sandbox_model_last_accessed_at_defaults_none() -> None:
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
+async def test_docker_update_sandbox_stop_mode_stops_container(tmp_path: Path) -> None:
+    service, _ = _make_snapshot_service([], [("sb-1", "img-a")])
+    service.deactivate_mode = "stop"
+    container = service._client.containers.get("sb-1")
+    container.attrs["State"]["Status"] = "running"
+    await service._update_sandbox("sb-1", SandboxUpdate(desired_status=SandboxStatus.INACTIVE))
+    assert container._stopped
+
+
+async def test_docker_delete_sandbox_cleans_workspace_dir(tmp_path: Path) -> None:
+    service = DockerSandboxService(
+        workspace_dir=str(tmp_path / "ws"), snapshot_dir=str(tmp_path / "snaps")
     )
-    assert sandbox.last_accessed_at is None
-
-
-def test_sandbox_read_carries_last_accessed_at() -> None:
-    accessed = datetime(2024, 6, 5, 12, tzinfo=UTC)
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        last_accessed_at=accessed,
-    )
-    read = SandboxRead.model_validate(sandbox)
-    assert read.last_accessed_at == accessed
-
-
-def test_sandbox_search_filter_last_accessed_at_gte() -> None:
-    cutoff = datetime(2024, 6, 5, 12, tzinfo=UTC)
-    young = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        last_accessed_at=datetime(2024, 6, 6, tzinfo=UTC),
-    )
-    old = DockerSandbox(
-        id="sb-2",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        last_accessed_at=datetime(2024, 6, 1, tzinfo=UTC),
-    )
-    flt = SandboxSearchFilter.model_validate({"last_accessed_at__gte": cutoff})
-    assert flt.matches(young)
-    assert not flt.matches(old)
-
-
-@respx.mock
-async def test_resolve_last_accessed_at_from_idle_time() -> None:
-    service = _service_with(_LifecycleClient([], []))
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
-    )
-    respx.get("http://localhost:32771/").mock(
-        return_value=httpx.Response(200, json={"idle_time": 30})
-    )
-    accessed = await service._resolve_last_accessed_at(sandbox)
-    assert accessed is not None
-    elapsed = (datetime.now(UTC) - accessed).total_seconds()
-    assert 29 <= elapsed <= 31
-
-
-async def test_resolve_last_accessed_at_none_when_not_active() -> None:
-    service = _service_with(_LifecycleClient([], []))
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.INACTIVE,
-        desired_status=SandboxStatus.INACTIVE,
-        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
-    )
-    assert await service._resolve_last_accessed_at(sandbox) is None
-
-
-@respx.mock
-async def test_resolve_last_accessed_at_none_on_http_error() -> None:
-    service = _service_with(_LifecycleClient([], []))
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
-    )
-    respx.get("http://localhost:32771/").mock(side_effect=httpx.ConnectError("boom"))
-    assert await service._resolve_last_accessed_at(sandbox) is None
-
-
-@respx.mock
-async def test_resolve_last_accessed_at_none_when_idle_time_missing() -> None:
-    service = _service_with(_LifecycleClient([], []))
-    sandbox = DockerSandbox(
-        id="sb-1",
-        sandbox_template_id="img",
-        status=SandboxStatus.ACTIVE,
-        desired_status=SandboxStatus.ACTIVE,
-        exposed_urls=[ExposedUrl(name="agent_server", url="http://localhost:32771", port=32771)],
-    )
-    respx.get("http://localhost:32771/").mock(return_value=httpx.Response(200, json={"other": 1}))
-    assert await service._resolve_last_accessed_at(sandbox) is None
-
-
-@respx.mock
-async def test_list_sandboxes_enriches_last_accessed_at() -> None:
-    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
-    image = _FakeImageObj(_lifecycle_image_attrs("img"))
-    service = _service_with(_LifecycleClient([container], [image]))
-    respx.get("http://localhost:32771/").mock(
-        return_value=httpx.Response(200, json={"idle_time": 5})
-    )
-    sandboxes = await service._list_sandboxes()
-    assert len(sandboxes) == 1
-    assert sandboxes[0].last_accessed_at is not None
-
-
-async def test_sweep_pauses_idle_active_sandbox() -> None:
-    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
-    image = _FakeImageObj(_lifecycle_image_attrs("img", idle_pause=10))
-    service = _service_with(_LifecycleClient([container], [image]))
-    # Pre-seed last_accessed_at so the sandbox is well past idle_pause_seconds.
-    sandbox = await service._get_sandbox("sb-1")
-    sandbox.last_accessed_at = datetime.now(UTC) - timedelta(seconds=120)
-
-    # _list_sandboxes re-probes; bypass the probe by stubbing it to keep the
-    # stale value so the sweep sees the idle sandbox.
-    async def _no_probe(sb: DockerSandbox) -> None:
-        sb.last_accessed_at = datetime.now(UTC) - timedelta(seconds=120)
-
-    service._enrich_last_accessed_at = _no_probe  # type: ignore[method-assign]
-    summary = await service.sweep_lifecycle()
-    assert summary is not None
-    assert "paused 1" in summary
-    assert container.events == ["pause"]
-    # paused_at label is stamped.
-    assert container.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_at"]
-
-
-async def test_sweep_skips_active_sandbox_under_idle_threshold() -> None:
-    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
-    image = _FakeImageObj(_lifecycle_image_attrs("img", idle_pause=600))
-    service = _service_with(_LifecycleClient([container], [image]))
-
-    async def _fresh(sb: DockerSandbox) -> None:
-        sb.last_accessed_at = datetime.now(UTC)
-
-    service._enrich_last_accessed_at = _fresh  # type: ignore[method-assign]
-    summary = await service.sweep_lifecycle()
-    assert summary is None
-    assert container.events == []
-
-
-async def test_sweep_deletes_paused_sandbox_past_paused_delete() -> None:
-    paused_at = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
-    container = _MutableContainer(
-        _lifecycle_container_attrs("sb-1", status="paused", paused_at=paused_at)
-    )
-    image = _FakeImageObj(_lifecycle_image_attrs("img"))
-    # paused_delete is a template label; add it.
-    image.attrs["Config"]["Labels"]["io.openhands.sandbox.paused_delete_seconds"] = "60"
-    service = _service_with(_LifecycleClient([container], [image]))
-    summary = await service.sweep_lifecycle()
-    assert summary is not None
-    assert "deleted 1" in summary
-    assert container.events == ["remove"]
-
-
-async def test_sweep_deletes_sandbox_past_max_age() -> None:
-    old_created = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat()
-    container = _MutableContainer(
-        _lifecycle_container_attrs("sb-1", status="running", created=old_created)
-    )
-    image = _FakeImageObj(_lifecycle_image_attrs("img"))
-    image.attrs["Config"]["Labels"]["io.openhands.sandbox.max_age_seconds"] = "60"
-    service = _service_with(_LifecycleClient([container], [image]))
-    summary = await service.sweep_lifecycle()
-    assert summary is not None
-    assert "deleted 1" in summary
-    assert container.events == ["remove"]
-
-
-async def test_sweep_no_op_when_no_thresholds_set() -> None:
-    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
-    image = _FakeImageObj(_lifecycle_image_attrs("img"))
-    service = _service_with(_LifecycleClient([container], [image]))
-    summary = await service.sweep_lifecycle()
-    assert summary is None
-    assert container.events == []
-
-
-async def test_aenter_starts_lifecycle_task() -> None:
-    service = DockerSandboxService(sandbox_lifecycle_interval=1.0)
-    service._client = _LifecycleClient([], [])
-    async with service:
-        assert service._lifecycle_task is not None
-        assert not service._lifecycle_task.done()
-    assert service._lifecycle_task is None
-
-
-async def test_aenter_skips_task_when_interval_zero() -> None:
-    service = DockerSandboxService(sandbox_lifecycle_interval=0)
-    async with service:
-        assert service._lifecycle_task is None
-
-
-async def test_aclose_cancels_lifecycle_task() -> None:
-    service = DockerSandboxService(sandbox_lifecycle_interval=1.0)
-    await service.__aenter__()
-    task = service._lifecycle_task
-    assert task is not None
-    await service.aclose()
-    assert task.cancelled()
-    assert service._lifecycle_task is None
-
-
-async def test_aclose_closes_http_client() -> None:
-    service = DockerSandboxService(sandbox_lifecycle_interval=0)
-    # Force the lazy http client to be created.
-    service._http = httpx.AsyncClient(timeout=1.0)
-    await service.aclose()
-    assert service._http is None
-
-
-async def test_lifecycle_loop_runs_one_sweep_then_cancels() -> None:
-    service = DockerSandboxService(sandbox_lifecycle_interval=0.01)
-    service._client = _LifecycleClient([], [])
-    service._start_lifecycle_loop()
-    task = service._lifecycle_task
-    assert task is not None
-    # Let at least one sleep+sweep cycle elapse, then cancel.
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    assert task.cancelled()
-
-
-async def test_deactivate_container_stamps_paused_at_label() -> None:
-    container = _MutableContainer(_lifecycle_container_attrs("sb-1", status="running"))
-    service = _service_with(_LifecycleClient([container], []))
-    service._deactivate_container(container, "running")
-    assert container.attrs["State"]["Status"] == "paused"
-    assert "io.openhands.sandbox.paused_at" in container.attrs["Config"]["Labels"]
-
-
-async def test_activate_container_clears_paused_at_label() -> None:
-    paused_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
-    container = _MutableContainer(
-        _lifecycle_container_attrs("sb-1", status="paused", paused_at=paused_at)
-    )
-    service = _service_with(_LifecycleClient([container], []))
-    service._activate_container(container, "paused")
-    assert container.attrs["State"]["Status"] == "running"
-    assert "io.openhands.sandbox.paused_at" not in container.attrs["Config"]["Labels"]
+    service._client = _FakeSnapshotDockerClient([])
+    sb_dir = Path(service.workspace_dir, "sb-1")  # type: ignore[arg-type]
+    sb_dir.mkdir(parents=True)
+    # Seed a container so delete finds it.
+    attrs = _container_attrs(name="sb-1", image="img-a", sandbox_id="sb-1")
+    attrs["Config"]["Labels"]["io.openhands.sandbox.sandbox_template_id"] = "img-a"
+    service._client.containers._containers["sb-1"] = _FakeContainerWithOps(attrs)
+    await service._delete_sandbox("sb-1")
+    assert not sb_dir.exists()
