@@ -85,10 +85,6 @@ class SandboxConfigService:
             updated_at=config.updated_at,
         )
 
-    def decrypt_session_api_key(self, config: SandboxConfig) -> str:
-        """Decrypt the session API key for the live sandbox service."""
-        return self._enc.decrypt_value(config.session_api_key)
-
     async def _get_template(self, template_id: uuid.UUID) -> SandboxTemplate:
         result = await self._session.execute(
             select(SandboxTemplate).where(SandboxTemplate.id == template_id)

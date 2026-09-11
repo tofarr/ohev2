@@ -38,6 +38,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.5",
     "mypy>=1.10",
+    "vulture>=2.10",
     "types-passlib",
     "playwright>=1.40",
     "respx>=0.21",
@@ -89,6 +90,69 @@ exclude_lines = [
     "\\.\\.\\.",
 ]
 
+[tool.vulture]
+min_confidence = 60
+paths = ["src/openhands/ev2", "vulture_whitelist.py"]
+# FastAPI route handlers — registered via decorators, never called by name.
+ignore_decorators = [
+    "@router.*",
+    "@clients_router.*",
+    "@members_router.*",
+    "@overrides_router.*",
+    "@user_overrides_router.*",
+    "@app.*",
+    # Pydantic v2 hooks + stdlib decorators vulture can't trace.
+    "@asynccontextmanager",
+    "@contextmanager",
+    "@lru_cache",
+    "@cached_property",
+    "@model_validator",
+    "@field_serializer",
+    "@field_validator",
+    "@validator",
+    "@property",
+    "@overload",
+    "@abstractmethod",
+]
+# Framework boilerplate params/attrs vulture reports as unused.
+ignore_names = [
+    "model_config",
+    "cls",
+    "exc_type",
+    "exc_value",
+    "traceback",
+    "dialect",
+    "impl",
+    "cache_ok",
+    # Pydantic validator/serializer methods (invoked by name via decorators).
+    "_strip_*",
+    "_validate_*",
+    "_resolve_child*",
+    "_enforce_id_cap",
+    # SQLAlchemy TypeDecorator hooks.
+    "process_bind_param",
+    "process_result_value",
+    # search_filter.Condition enum members (compared via .value / query params).
+    "CONTAINS",
+    "EQ",
+    "NE",
+    "LT",
+    "LTE",
+    "GT",
+    "GTE",
+    # Pydantic search-filter fields generated dynamically per attribute.
+    "*__contains",
+    "*__eq",
+    "*__gte",
+    "*__lt",
+    "*__gt",
+    "*__lte",
+    # Optional/forward-compat config knobs.
+    "role_field",
+    "refresh_path",
+    "max_ciphertext_length",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -97,6 +161,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "RUF"]
 ignore = ["E501"]
+
+# Vulture whitelist uses bare names as identifiers; ruff flags them as
+# useless/undefined expressions. They are intentional (parsed by vulture).
+[tool.ruff.lint.per-file-ignores]
+"vulture_whitelist.py" = ["B018", "F821"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["openhands.ev2"]

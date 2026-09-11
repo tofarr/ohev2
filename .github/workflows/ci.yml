@@ -40,6 +40,8 @@ jobs:
       - run: uv run mypy
       - name: McCabe complexity check
         run: uv run pylint src/openhands/ev2
+      - name: Dead code check
+        run: uv run vulture
       - name: Unit tests with coverage
         run: uv run pytest -q -n 0 --cov=openhands.ev2 --cov-fail-under=94 --cov-report=term-missing --cov-report=xml
 
