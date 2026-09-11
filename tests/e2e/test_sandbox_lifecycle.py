@@ -54,6 +54,11 @@ AGENT_SERVER_IMAGE = os.environ.get(
 
 _POLL_INTERVAL = 2.0
 _POLL_TIMEOUT = 120.0
+# The agent server inside a freshly-started container needs a few seconds to
+# accept requests after Docker reports the container as "running". Retrying
+# with backoff bridges this gap without a fragile fixed sleep.
+_PROBE_RETRIES = 15
+_PROBE_INTERVAL = 2.0
 
 
 async def test_sandbox_snapshot_lifecycle() -> None:
@@ -203,7 +208,12 @@ async def _wait_for_active(
 async def _probe_conversations(
     client: httpx.AsyncClient, headers: dict[str, str], sandbox_id: str
 ) -> None:
-    """Hit the agent-server conversations endpoint inside the sandbox container."""
+    """Hit the agent-server conversations endpoint inside the sandbox container.
+
+    Retries with backoff because the agent server process inside a
+    freshly-started container is not immediately ready to accept connections,
+    even though Docker already reports the container as ``running``.
+    """
     resp = await client.get(f"/sandbox/sandboxes/{sandbox_id}", headers=headers)
     assert resp.status_code == 200, resp.text
     sandbox = resp.json()
@@ -219,15 +229,27 @@ async def _probe_conversations(
         f"(exposed_urls={sandbox.get('exposed_urls')})"
     )
 
-    # The conversations list endpoint inside the agent server container.
-    conv_resp = await client.get(
-        f"{agent_url}/api/conversations/search",
-        headers={"X-Session-API-Key": session_api_key},
+    last_exc: Exception | None = None
+    for _ in range(_PROBE_RETRIES):
+        try:
+            conv_resp = await client.get(
+                f"{agent_url}/api/conversations/search",
+                headers={"X-Session-API-Key": session_api_key},
+            )
+            if conv_resp.status_code == 200:
+                data = conv_resp.json()
+                assert "items" in data, data
+                return
+            last_exc = AssertionError(
+                f"unexpected status {conv_resp.status_code}: {conv_resp.text[:200]}"
+            )
+        except httpx.HTTPError as exc:
+            last_exc = exc
+        await asyncio.sleep(_PROBE_INTERVAL)
+    raise AssertionError(
+        f"agent server at {agent_url} not ready after "
+        f"{_PROBE_RETRIES * _PROBE_INTERVAL:.0f}s: {last_exc}"
     )
-    assert conv_resp.status_code == 200, conv_resp.text
-    # An empty sandbox should return a valid (possibly empty) conversation page.
-    data = conv_resp.json()
-    assert "items" in data, data
 
 
 async def _capture_snapshot(
