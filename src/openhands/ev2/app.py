@@ -44,6 +44,7 @@ from openhands.ev2.mcp_server_config.mcp_server_config_router import (
 )
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
+from openhands.ev2.sandbox.sandbox_config_router import router as sandbox_config_router
 from openhands.ev2.sandbox.sandbox_router import router as sandbox_sandbox_router
 from openhands.ev2.sandbox.sandbox_snapshot_router import router as sandbox_snapshot_router
 from openhands.ev2.sandbox.sandbox_template_router import router as sandbox_template_router
@@ -279,15 +280,19 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "mcp-server-configs", "description": "MCP server configs and role access grants."},
     {
         "name": "sandbox-templates",
-        "description": "Pluggable sandbox templates (provider-backed) and role access grants.",
+        "description": "DB-backed sandbox templates (mutable, provider-neutral) and role access grants.",
+    },
+    {
+        "name": "sandbox-configs",
+        "description": "Durable sandbox intent (DB-backed source of truth) and role access grants.",
     },
     {
         "name": "sandbox-sandboxes",
-        "description": "Pluggable sandbox sandboxes (provider-backed) and role access grants.",
+        "description": "Live sandbox sandboxes (provider-backed reconciler) and role access grants.",
     },
     {
         "name": "sandbox-snapshots",
-        "description": "Pluggable sandbox snapshots (provider-backed) - create from a sandbox or import a file.",
+        "description": "DB-backed sandbox snapshots - create from a sandbox or import a file.",
     },
 ]
 
@@ -327,6 +332,7 @@ def create_app() -> FastAPI:
     app.include_router(secret_router)
     app.include_router(secret_value_router)
     app.include_router(sandbox_template_router)
+    app.include_router(sandbox_config_router)
     app.include_router(sandbox_sandbox_router)
     app.include_router(sandbox_snapshot_router)
     app.include_router(user_router)

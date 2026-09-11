@@ -8,17 +8,17 @@ drives pause/resume.
 
 Sandbox state is owned by the configured :class:`SandboxService` (a per-app
 async context manager), not by a request-scoped session, so handlers resolve
-the service from ``app.state`` and call it directly. The ``get_sandbox_service``
-dependency is shared with the template router.
+the service from ``app.state`` and call it directly.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
+from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_models import Sandbox
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchWriteRequest,
@@ -34,7 +34,7 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxNotFoundError,
     SandboxPermissionScopeError,
 )
-from openhands.ev2.sandbox.sandbox_template_router import get_sandbox_service
+from openhands.ev2.sandbox.sandbox_snapshot_router import get_sandbox_service
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
@@ -61,15 +61,15 @@ def _map_exception_to_status(exc: Exception) -> HTTPException:
 async def search_sandboxes(
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.SEARCH)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.SEARCH)),
     ],
     search_filter: SandboxSearchFilter = Depends(),  # noqa: B008
     cursor: Annotated[str | None, Query(description="Opaque id cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> SandboxSearchResult:
     service = await get_sandbox_service(request)
-    sandboxes = await service.list_sandboxes(perm_filter=perm_filter)
+    sandboxes = await service.list_sandboxes(perm_filter=cast(SearchFilter[Sandbox], perm_filter))
     if search_filter is not None:
         sandboxes = [sb for sb in sandboxes if search_filter.matches(sb)]
     sandboxes.sort(key=lambda sandbox: sandbox.id)
@@ -88,13 +88,13 @@ async def search_sandboxes(
 async def count_sandboxes(
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.SEARCH)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.SEARCH)),
     ],
     search_filter: SandboxSearchFilter = Depends(),  # noqa: B008
 ) -> CountResult:
     service = await get_sandbox_service(request)
-    sandboxes = await service.list_sandboxes(perm_filter=perm_filter)
+    sandboxes = await service.list_sandboxes(perm_filter=cast(SearchFilter[Sandbox], perm_filter))
     if search_filter is not None:
         sandboxes = [sb for sb in sandboxes if search_filter.matches(sb)]
     return CountResult(count=len(sandboxes))
@@ -105,13 +105,15 @@ async def create_sandbox(
     payload: SandboxCreate,
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.CREATE)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.CREATE)),
     ],
 ) -> SandboxRead:
     service = await get_sandbox_service(request)
     try:
-        sandbox = await service.create_sandbox(payload, perm_filter=perm_filter)
+        sandbox = await service.create_sandbox(
+            payload, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+        )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
     return SandboxRead.model_validate(sandbox)
@@ -121,8 +123,8 @@ async def create_sandbox(
 async def get_sandboxes_batch(
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.READ)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.READ)),
     ],
     ids: Annotated[list[str], Query(default_factory=list)],
 ) -> BatchReadResult[SandboxRead]:
@@ -132,7 +134,9 @@ async def get_sandboxes_batch(
             detail="ids: at most 100 ids are allowed per batch read.",
         )
     service = await get_sandbox_service(request)
-    sandboxes = await service.get_sandboxes(ids, perm_filter=perm_filter)
+    sandboxes = await service.get_sandboxes(
+        ids, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+    )
     return BatchReadResult(
         items=[SandboxRead.model_validate(sb) if sb is not None else None for sb in sandboxes],
     )
@@ -143,19 +147,19 @@ async def write_sandboxes_batch(
     payload: SandboxBatchWriteRequest,
     request: Request,
     create_filter: Annotated[
-        SearchFilter[Sandbox] | None,
-        Depends(depends_permissions_or_none(Sandbox, Action.CREATE)),
+        SearchFilter[SandboxConfig] | None,
+        Depends(depends_permissions_or_none(SandboxConfig, Action.CREATE)),
     ],
     delete_filter: Annotated[
-        SearchFilter[Sandbox] | None,
-        Depends(depends_permissions_or_none(Sandbox, Action.DELETE)),
+        SearchFilter[SandboxConfig] | None,
+        Depends(depends_permissions_or_none(SandboxConfig, Action.DELETE)),
     ],
 ) -> BatchWriteResult[SandboxRead]:
     service = await get_sandbox_service(request)
-    perm_filters = {
-        Action.CREATE: create_filter,
-        Action.DELETE: delete_filter,
-    }
+    perm_filters = cast(
+        dict[Action, SearchFilter[Sandbox] | None],
+        {Action.CREATE: create_filter, Action.DELETE: delete_filter},
+    )
     try:
         results = await service.apply_sandbox_batch(payload.operations, perm_filters)
     except Exception as exc:
@@ -170,13 +174,15 @@ async def get_sandbox(
     sandbox_id: str,
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.READ)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.READ)),
     ],
 ) -> SandboxRead:
     service = await get_sandbox_service(request)
     try:
-        sandbox = await service.get_sandbox(sandbox_id, perm_filter=perm_filter)
+        sandbox = await service.get_sandbox(
+            sandbox_id, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+        )
     except SandboxNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc
     return SandboxRead.model_validate(sandbox)
@@ -188,13 +194,15 @@ async def update_sandbox(
     payload: SandboxUpdate,
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.UPDATE)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.UPDATE)),
     ],
 ) -> SandboxRead:
     service = await get_sandbox_service(request)
     try:
-        sandbox = await service.update_sandbox(sandbox_id, payload, perm_filter=perm_filter)
+        sandbox = await service.update_sandbox(
+            sandbox_id, payload, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+        )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
     return SandboxRead.model_validate(sandbox)
@@ -205,12 +213,14 @@ async def delete_sandbox(
     sandbox_id: str,
     request: Request,
     perm_filter: Annotated[
-        SearchFilter[Sandbox],
-        Depends(depends_permissions(Sandbox, Action.DELETE)),
+        SearchFilter[SandboxConfig],
+        Depends(depends_permissions(SandboxConfig, Action.DELETE)),
     ],
 ) -> None:
     service = await get_sandbox_service(request)
     try:
-        await service.delete_sandbox(sandbox_id, perm_filter=perm_filter)
+        await service.delete_sandbox(
+            sandbox_id, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+        )
     except SandboxNotFoundError as exc:
         raise _map_exception_to_status(exc) from exc

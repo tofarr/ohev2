@@ -583,13 +583,13 @@ from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: E402
 )
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
-    Sandbox as _SandboxSandbox,
+from openhands.ev2.sandbox.sandbox_config_models import (  # noqa: E402
+    SandboxConfig as _SandboxConfig,
 )
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+from openhands.ev2.sandbox.sandbox_snapshot_models import (  # noqa: E402
     SandboxSnapshot as _SandboxSnapshot,
 )
-from openhands.ev2.sandbox.sandbox_models import (  # noqa: E402
+from openhands.ev2.sandbox.sandbox_template_models import (  # noqa: E402
     SandboxTemplate as _SandboxTemplate,
 )
 from openhands.ev2.secret import (  # noqa: E402,F401
@@ -614,15 +614,12 @@ register_resource_policy(_FeatureFlag, "feature_flag_permission")
 register_resource_policy(_FeatureFlagRoleAssignment, "feature_flag_role_assignment_permission")
 register_resource_policy(_FeatureFlagUserAssignment, "feature_flag_user_assignment_permission")
 register_resource_policy(_SandboxTemplate, "sandbox_template_permission")
-# The sandbox sandbox model is a separate governed entity. It reuses the
-# existing ``sandbox_permission`` Role column: the sandbox sandboxes are the
-# successor surface for the same logical resource, and the per-resource grant
-# table already keys on the sandbox id string.
-register_resource_policy(_SandboxSandbox, "sandbox_permission")
-# The sandbox snapshot model is a separate governed entity. It reuses the
-# existing ``sandbox_snapshot_permission`` Role column: the sandbox snapshots
-# are the successor surface for the same logical resource, and the per-resource
-# grant table already keys on the snapshot id string.
+# SandboxConfig is the durable governed resource for sandboxes. It reuses the
+# existing ``sandbox_permission`` Role column: the config is the DB-backed source
+# of truth; the live Sandbox is a read-only enrichment resolved by the service.
+register_resource_policy(_SandboxConfig, "sandbox_permission")
+# SandboxSnapshot is a DB-backed governed entity. It reuses the existing
+# ``sandbox_snapshot_permission`` Role column.
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
 register_resource_policy(_Group, "group_permission")
 register_resource_policy(_GroupUser, "group_user_permission")
