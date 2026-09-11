@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
@@ -100,8 +101,11 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
     # ------------------------------------------------------------------ #
     # Async context manager (server lifecycle). Concrete subclasses hold
     # provider clients; ``__aenter__`` acquires them and ``aclose`` releases.
+    # ``__aenter__`` also refreshes provider-side template state so the service
+    # is consistent with the durable templates at startup.
     # ------------------------------------------------------------------ #
     async def __aenter__(self) -> SandboxService:
+        await self.refresh_templates()
         return self
 
     async def __aexit__(
@@ -114,6 +118,18 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
 
     async def aclose(self) -> None:
         """Release any provider resources. Default is a no-op."""
+        return None
+
+    async def refresh_templates(self, image_tags: Iterable[str] = ()) -> None:
+        """Refresh provider-side template state for the given image tags.
+
+        Called by the lifespan ``__aenter__`` and by the template service after
+        any template mutation so the provider reconciles its image inventory
+        (e.g. the Docker backend pulls missing images in the background). The
+        default implementation is a no-op; providers that maintain an image
+        inventory override this. *image_tags* are the template image references
+        the provider should ensure are available; an empty iterable is a no-op.
+        """
         return None
 
     # ------------------------------------------------------------------ #

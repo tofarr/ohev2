@@ -9,8 +9,67 @@ user so all permission filters resolve to ``ALL``.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
+from typing import Any
 
 from httpx import AsyncClient
+from pydantic import PrivateAttr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from openhands.ev2.sandbox.sandbox_service import SandboxService
+from openhands.ev2.sandbox.sandbox_template_schemas import SandboxTemplateCreate
+from openhands.ev2.sandbox.sandbox_template_service import SandboxTemplateService
+
+
+async def _seed_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+    await session.execute(
+        text(
+            "INSERT INTO users (id, email, username, enabled) "
+            "VALUES (:id, :email, :username, true) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {"id": user_id, "email": f"{user_id}@example.com", "username": str(user_id)},
+    )
+
+
+class _RecordingSandboxService(SandboxService):
+    """A SandboxService stub that records refresh_templates invocations.
+
+    The abstract CRUD hooks are not exercised by these tests, so they raise to
+    catch any accidental invocation.
+    """
+
+    _refresh_calls: list[list[str]] = PrivateAttr(default_factory=list)
+
+    @property
+    def refresh_calls(self) -> list[list[str]]:
+        return self._refresh_calls
+
+    async def refresh_templates(self, image_tags: Iterable[str] = ()) -> None:
+        self._refresh_calls.append(list(image_tags))
+
+    async def _list_sandboxes(self) -> Any:  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    async def _get_sandbox(self, sandbox_id: str) -> Any:  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    def _sandbox_from_create(self, payload: Any) -> Any:  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    async def _create_sandbox(
+        self, sandbox: Any, *, snapshot_id: str | None = None
+    ) -> Any:  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    async def _update_sandbox(
+        self, sandbox_id: str, payload: Any
+    ) -> Any:  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    async def _delete_sandbox(self, sandbox_id: str) -> None:  # pragma: no cover - not used here
+        raise NotImplementedError
 
 
 def _template_payload(
@@ -158,3 +217,69 @@ class TestSandboxTemplateRoutes:
 
         delete_resp = await client.delete(f"/sandbox/sandbox-templates/{template_id}")
         assert delete_resp.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# SandboxService refresh_templates integration on template mutation.
+# --------------------------------------------------------------------------- #
+
+
+class TestTemplateServiceRefresh:
+    async def test_create_invokes_refresh_with_all_tags(
+        self, session: AsyncSession, user_id: uuid.UUID
+    ) -> None:
+        await _seed_user(session, user_id)
+        sandbox_service = _RecordingSandboxService()
+        service = SandboxTemplateService(session, sandbox_service=sandbox_service)
+        tag = f"refresh-create-{uuid.uuid4()}"
+        await service.create(
+            SandboxTemplateCreate(docker_image_tag=tag, working_dir="/home/openhands"),
+            creator_id=user_id,
+        )
+        assert sandbox_service.refresh_calls
+        assert tag in sandbox_service.refresh_calls[-1]
+
+    async def test_update_invokes_refresh(self, session: AsyncSession, user_id: uuid.UUID) -> None:
+        await _seed_user(session, user_id)
+        sandbox_service = _RecordingSandboxService()
+        service = SandboxTemplateService(session, sandbox_service=sandbox_service)
+        tag = f"refresh-update-{uuid.uuid4()}"
+        template = await service.create(
+            SandboxTemplateCreate(docker_image_tag=tag, working_dir="/home/openhands"),
+            creator_id=user_id,
+        )
+        sandbox_service.refresh_calls.clear()
+        from openhands.ev2.sandbox.sandbox_template_schemas import SandboxTemplateUpdate
+
+        new_tag = f"refresh-updated-{uuid.uuid4()}"
+        await service.update(template.id, SandboxTemplateUpdate(docker_image_tag=new_tag))
+        assert sandbox_service.refresh_calls
+        assert new_tag in sandbox_service.refresh_calls[-1]
+
+    async def test_delete_invokes_refresh(self, session: AsyncSession, user_id: uuid.UUID) -> None:
+        await _seed_user(session, user_id)
+        sandbox_service = _RecordingSandboxService()
+        service = SandboxTemplateService(session, sandbox_service=sandbox_service)
+        template = await service.create(
+            SandboxTemplateCreate(
+                docker_image_tag=f"refresh-delete-{uuid.uuid4()}",
+                working_dir="/home/openhands",
+            ),
+            creator_id=user_id,
+        )
+        sandbox_service.refresh_calls.clear()
+        await service.delete(template.id)
+        assert sandbox_service.refresh_calls
+
+    async def test_no_refresh_when_sandbox_service_absent(
+        self, session: AsyncSession, user_id: uuid.UUID
+    ) -> None:
+        await _seed_user(session, user_id)
+        service = SandboxTemplateService(session)
+        tag = f"no-refresh-{uuid.uuid4()}"
+        await service.create(
+            SandboxTemplateCreate(docker_image_tag=tag, working_dir="/home/openhands"),
+            creator_id=user_id,
+        )
+        # _refresh_sandbox_templates is a no-op when sandbox_service is None.
+        await service._refresh_sandbox_templates()

@@ -22,6 +22,7 @@ import logging
 import re
 import secrets
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -226,8 +227,10 @@ class DockerSandboxService(SandboxService):
         self._client: Any = None
         self._http: httpx.AsyncClient | None = None
         self._lifecycle_task: asyncio.Task[None] | None = None
+        self._pull_tasks: set[asyncio.Task[None]] = set()
 
     async def __aenter__(self) -> DockerSandboxService:
+        await self.refresh_templates()
         self._start_lifecycle_loop()
         return self
 
@@ -238,6 +241,12 @@ class DockerSandboxService(SandboxService):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        for pull_task in list(self._pull_tasks):
+            pull_task.cancel()
+        for pull_task in list(self._pull_tasks):
+            with contextlib.suppress(asyncio.CancelledError):
+                await pull_task
+        self._pull_tasks.clear()
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -256,6 +265,56 @@ class DockerSandboxService(SandboxService):
         if self._client is None:
             self._client = docker.from_env()
         return self._client.containers
+
+    # ------------------------------------------------------------------ #
+    # Template refresh — kick off background image pulls so every template
+    # image referenced by a durable :class:`SandboxTemplate` is available
+    # locally before a sandbox is created from it. Pulling is best-effort:
+    # failures are logged and never raised to the caller, since a missing
+    # image at refresh time is surfaced (with a clear error) at create time.
+    # ------------------------------------------------------------------ #
+    async def refresh_templates(self, image_tags: Iterable[str] = ()) -> None:
+        """Ensure every template image in *image_tags* is pulled locally.
+
+        Spawns a background :class:`asyncio.Task` per image that is not already
+        present locally; tasks self-remove from ``_pull_tasks`` on completion.
+        Idempotent — an image already local and an in-flight pull for the same
+        tag are skipped.
+        """
+        for tag in image_tags:
+            tag = tag.strip()
+            if not tag:
+                continue
+            if self._has_pending_pull(tag):
+                continue
+            task = asyncio.create_task(self._pull_image_task(tag), name=f"docker-pull:{tag}")
+            self._pull_tasks.add(task)
+            task.add_done_callback(self._pull_tasks.discard)
+
+    def _has_pending_pull(self, tag: str) -> bool:
+        """True iff a background pull is already in flight for *tag*."""
+        return any(
+            task.get_name() == f"docker-pull:{tag}" and not task.done() for task in self._pull_tasks
+        )
+
+    async def _pull_image_task(self, tag: str) -> None:
+        """Pull *tag* in a worker thread when it is not already local.
+
+        Skips the (potentially slow) registry pull when the image is present,
+        so repeated refresh calls are cheap. Errors are logged, not raised.
+        """
+        try:
+            await asyncio.to_thread(self._images.get, tag)
+            return  # already present locally
+        except ImageNotFound:
+            pass
+        except Exception:
+            logger.debug("docker image lookup failed for %s; will attempt pull", tag, exc_info=True)
+        try:
+            await asyncio.to_thread(self._images.pull, tag)
+            logger.info("docker pulled sandbox template image %s", tag)
+        except Exception:
+            logger.warning("docker pull failed for sandbox template image %s", tag, exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Provider hooks — sandboxes.

@@ -10,7 +10,7 @@ from functools import lru_cache
 from typing import Any, Literal, Self, cast
 
 from openhands.agent_server.env_parser import from_env
-from pydantic import BaseModel, Field, SecretStr, field_serializer, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, SecretStr, field_serializer, model_validator
 
 from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
@@ -313,6 +313,12 @@ class AppConfig(BaseModel):
     The encryption_key is automatically included in decryption_keys.
     """
 
+    # Cached SandboxService built by ``get_sandbox_service``. A private
+    # attribute (not a field) so it is excluded from validation, serialization,
+    # and equality — it is a mutable, side-effectful handle to a long-lived
+    # async context manager, not configuration.
+    _sandbox_service: SandboxService | None = PrivateAttr(default=None)
+
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
     idp: IdpConfig = Field(
@@ -421,10 +427,18 @@ class AppConfig(BaseModel):
 
         Resolves ``sandbox_service_class`` then instantiates that concrete class
         by parsing environment variables under the ``OHE_SANDBOX`` prefix onto
-        it (so each implementation can read its own provider-specific knobs).
+        it (so each implementation can read its own provider-specific knobs). The
+        built service is cached on this config so callers reuse the same
+        instance — the service is a long-lived async context manager tied to the
+        app lifespan, not a per-request value.
         """
+        cached = self._sandbox_service
+        if cached is not None:
+            return cached
         service_class = resolve_sandbox_service_class(self.sandbox_service_class)
-        return cast(SandboxService, from_env(service_class, "OHE_SANDBOX"))
+        service = cast(SandboxService, from_env(service_class, "OHE_SANDBOX"))
+        self._sandbox_service = service
+        return service
 
 
 @lru_cache(maxsize=1)

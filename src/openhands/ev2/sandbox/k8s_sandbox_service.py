@@ -226,6 +226,7 @@ class K8sSandboxService(SandboxService):
         self._lifecycle_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> K8sSandboxService:
+        await self.refresh_templates()
         self._start_lifecycle_loop()
         return self
 
