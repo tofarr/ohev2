@@ -59,8 +59,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.db import create_engine, create_session_factory
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.sandbox.sandbox_models import ExposedPort
-from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
 from openhands.ev2.security.security_models import Permission, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
