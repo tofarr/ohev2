@@ -11,12 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
-from openhands.ev2.scripts.seed_db import _assign_role, _parse_args, seed_admin, seed_db
+from openhands.ev2.sandbox.sandbox_models import ExposedPort
+from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
+from openhands.ev2.scripts.seed_db import (
+    _assign_role,
+    _parse_args,
+    _pick_latest_tag,
+    seed_admin,
+    seed_db,
+)
 from openhands.ev2.security.security_models import Action, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
 
 _ADMIN_COLUMNS = ROLE_ENTITY_COLUMNS
+_SEEDED_TAG = (
+    "ghcr.io/openhands/agent-server:v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
+)
 
 
 class TestSeedAdmin:
@@ -405,3 +416,144 @@ class TestParseArgs:
         monkeypatch.setenv("OHE_SEED_ADMIN_USERNAME", "envadmin")
         args = _parse_args([])
         assert args.admin_username == "envadmin"
+
+    def test_sandbox_template_tag_flag(self) -> None:
+        args = _parse_args(["--sandbox-template-tag", _SEEDED_TAG])
+        assert args.sandbox_template_tag == _SEEDED_TAG
+        assert args.skip_sandbox_template is False
+
+    def test_skip_sandbox_template_flag(self) -> None:
+        args = _parse_args(["--skip-sandbox-template"])
+        assert args.skip_sandbox_template is True
+
+    def test_skip_sandbox_template_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OHE_SEED_SKIP_SANDBOX_TEMPLATE", "1")
+        assert _parse_args([]).skip_sandbox_template is True
+
+
+class TestPickLatestTag:
+    def test_prefers_highest_version(self) -> None:
+        tags = [
+            "v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12-nodejs22_binary",
+            "v1.1.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+            "main-python",
+            "9f0aa47-python",
+        ]
+        assert _pick_latest_tag(tags) == (
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
+        )
+
+    def test_prefers_python_nodejs_variant(self) -> None:
+        tags = [
+            "v1.3.0_eclipse-temurin_tag_17-jdk-amd64",
+            "v1.3.0_golang_tag_1.21-bookworm-amd64",
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+        ]
+        picked = _pick_latest_tag(tags)
+        assert picked is not None
+        assert picked.startswith("v1.3.0_nikolaik_s_python-nodejs")
+
+    def test_prefers_arch_agnostic_when_available(self) -> None:
+        tags = [
+            "v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12-nodejs22_binary",
+            "v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+        ]
+        assert _pick_latest_tag(tags) == (
+            "v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12-nodejs22_binary"
+        )
+
+    def test_falls_back_to_amd64_when_no_arch_agnostic(self) -> None:
+        tags = [
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-arm64",
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+        ]
+        assert _pick_latest_tag(tags) == (
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
+        )
+
+    def test_pre_release_ranks_below_stable(self) -> None:
+        tags = [
+            "v1.0.0a6_nikolaik_s_python-nodejs_tag_python3.12-nodejs22_binary",
+            "v1.0.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+        ]
+        assert _pick_latest_tag(tags) == (
+            "v1.0.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
+        )
+
+    def test_no_version_tags_returns_none(self) -> None:
+        assert _pick_latest_tag(["main-python", "9f0aa47-python", "foo"]) is None
+
+    def test_empty_returns_none(self) -> None:
+        assert _pick_latest_tag([]) is None
+
+
+async def _seeded_template(session: AsyncSession) -> SandboxTemplate | None:
+    return await session.scalar(select(SandboxTemplate))
+
+
+class TestSeedDefaultSandboxTemplate:
+    async def test_seeds_template_with_expected_fields(self, session: AsyncSession) -> None:
+        admin, _regular = await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            sandbox_template_tag=_SEEDED_TAG,
+        )
+        template = await _seeded_template(session)
+        assert template is not None
+        assert template.creator_id == admin.id
+        assert template.docker_image_tag == _SEEDED_TAG
+        assert template.working_dir == "/home/openhands"
+        assert template.env_vars == {}
+        assert template.snapshot_dirs == ["/home/openhands"]
+        assert template.snapshot_on_deactivate is True
+        assert [ExposedPort(**p) for p in template.exposed_ports] == [
+            ExposedPort(
+                name="agent_server",
+                description="The port on which the agent server runs within the container",
+                container_port=8000,
+            ),
+            ExposedPort(
+                name="vscode",
+                description="The port on which the VSCode server runs within the container",
+                container_port=8001,
+            ),
+        ]
+        assert template.meta == {
+            "directives": {
+                "extra_hosts": {"host.docker.internal": "host-gateway"},
+                "detach": True,
+                "init": True,
+            }
+        }
+
+    async def test_no_tag_seeds_no_template(self, session: AsyncSession) -> None:
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        assert await _seeded_template(session) is None
+
+    async def test_rerun_updates_tag_idempotently(self, session: AsyncSession) -> None:
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            sandbox_template_tag=_SEEDED_TAG,
+        )
+        new_tag = "ghcr.io/openhands/agent-server:v1.4.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            sandbox_template_tag=new_tag,
+        )
+        templates = list((await session.scalars(select(SandboxTemplate))).all())
+        assert len(templates) == 1
+        assert templates[0].docker_image_tag == new_tag
