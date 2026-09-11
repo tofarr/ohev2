@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
@@ -24,6 +24,7 @@ from openhands.ev2.auth.auth_dependencies import (
 from openhands.ev2.db import SessionDep
 from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError,
+    SandboxService,
     SandboxTemplateConflictError,
     SandboxTemplateNotFoundError,
     SandboxTemplatePermissionScopeError,
@@ -46,6 +47,18 @@ from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountR
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(prefix="/sandbox/sandbox-templates", tags=["sandbox-templates"])
+
+
+async def get_optional_sandbox_service(request: Request) -> SandboxService | None:
+    """Resolve the app-scoped sandbox service, or ``None`` when unavailable.
+
+    The sandbox service is started in the app lifespan and stashed on
+    ``app.state``. It is absent when the lifespan has not run (e.g. some test
+    setups); in that case template mutations skip the provider refresh rather
+    than failing the request.
+    """
+    service = getattr(request.app.state, "sandbox_service", None)
+    return service if isinstance(service, SandboxService) else None
 
 
 def _cursor(value: str) -> uuid.UUID:
@@ -122,13 +135,14 @@ async def create_sandbox_template(
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.CREATE)),
     ],
+    sandbox_service: Annotated[SandboxService | None, Depends(get_optional_sandbox_service)],
 ) -> SandboxTemplateRead:
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required.",
         )
-    service = SandboxTemplateService(session, perm_filter)
+    service = SandboxTemplateService(session, perm_filter, sandbox_service=sandbox_service)
     try:
         template = await service.create(payload, creator_id=user_id)
     except SandboxTemplatePermissionScopeError as exc:
@@ -175,13 +189,14 @@ async def write_sandbox_templates_batch(
         SearchFilter[SandboxTemplate] | None,
         Depends(depends_permissions_or_none(SandboxTemplate, Action.DELETE)),
     ],
+    sandbox_service: Annotated[SandboxService | None, Depends(get_optional_sandbox_service)],
 ) -> BatchWriteResult[SandboxTemplateRead]:
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required.",
         )
-    service = SandboxTemplateService(session)
+    service = SandboxTemplateService(session, sandbox_service=sandbox_service)
     perm_filters = {
         Action.CREATE: create_filter,
         Action.UPDATE: update_filter,
@@ -223,8 +238,9 @@ async def update_sandbox_template(
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.UPDATE)),
     ],
+    sandbox_service: Annotated[SandboxService | None, Depends(get_optional_sandbox_service)],
 ) -> SandboxTemplateRead:
-    service = SandboxTemplateService(session, perm_filter)
+    service = SandboxTemplateService(session, perm_filter, sandbox_service=sandbox_service)
     try:
         template = await service.update(template_id, payload)
     except SandboxTemplateNotFoundError as exc:
@@ -241,8 +257,9 @@ async def delete_sandbox_template(
         SearchFilter[SandboxTemplate],
         Depends(depends_permissions(SandboxTemplate, Action.DELETE)),
     ],
+    sandbox_service: Annotated[SandboxService | None, Depends(get_optional_sandbox_service)],
 ) -> None:
-    service = SandboxTemplateService(session, perm_filter)
+    service = SandboxTemplateService(session, perm_filter, sandbox_service=sandbox_service)
     try:
         await service.delete(template_id)
     except (SandboxTemplateNotFoundError, SandboxTemplateInUseError) as exc:

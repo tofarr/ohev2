@@ -1312,3 +1312,119 @@ async def test_docker_delete_sandbox_cleans_workspace_dir(tmp_path: Path) -> Non
     service._client.containers._containers["sb-1"] = _FakeContainerWithOps(attrs)
     await service._delete_sandbox("sb-1")
     assert not sb_dir.exists()
+
+
+# --------------------------------------------------------------------------- #
+# refresh_templates — background image pull coordination.
+# --------------------------------------------------------------------------- #
+
+
+async def test_refresh_templates_pulls_missing_images_in_background() -> None:
+    service = DockerSandboxService()
+    client = _FakeSnapshotDockerClient([])
+    service._client = client
+    # None of these images are present locally.
+    await service.refresh_templates(["img-a", "img-b"])
+    # Each tag spawns a background pull task.
+    assert len(service._pull_tasks) == 2
+    # Let the background pulls complete.
+    await asyncio.gather(*service._pull_tasks)
+    assert not service._pull_tasks
+    # Both images were pulled into the fake image store.
+    assert isinstance(client.images.get("img-a"), _FakeImageWithOps)
+    assert isinstance(client.images.get("img-b"), _FakeImageWithOps)
+
+
+async def test_refresh_templates_skips_images_already_present() -> None:
+    service = DockerSandboxService()
+    present = _FakeImageWithOps(
+        {"RepoTags": ["img-present"], "Created": "2024-01-02T03:04:05Z", "Config": {"Labels": {}}}
+    )
+    client = _FakeSnapshotDockerClient([present])
+    service._client = client
+    await service.refresh_templates(["img-present", "img-missing"])
+    tasks = list(service._pull_tasks)
+    assert len(tasks) == 2
+    await asyncio.gather(*tasks)
+    # img-present was not re-pulled; img-missing was.
+    assert "img-missing" in client.images._images
+    assert client.images._images["img-present"] is present
+
+
+async def test_refresh_templates_dedupes_in_flight_pulls() -> None:
+    service = DockerSandboxService()
+    service._client = _FakeSnapshotDockerClient([])
+
+    # Make the image pull slow so the task stays in flight.
+    original_pull = service._client.images.pull
+
+    def slow_pull(repository: str) -> None:
+        import time
+
+        time.sleep(0.05)
+        original_pull(repository)
+
+    service._client.images.pull = slow_pull
+    await service.refresh_templates(["img-a"])
+    first = next(iter(service._pull_tasks))
+    await service.refresh_templates(["img-a"])
+    # No duplicate task spawned while the first is in flight.
+    assert len(service._pull_tasks) == 1
+    assert first in service._pull_tasks
+    await first
+
+
+async def test_refresh_templates_noop_for_empty_tags() -> None:
+    service = DockerSandboxService()
+    service._client = _FakeSnapshotDockerClient([])
+    await service.refresh_templates([])
+    await service.refresh_templates(["", "  "])
+    assert not service._pull_tasks
+
+
+async def test_aenter_invokes_refresh_templates() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class _RefreshSpy(DockerSandboxService):
+        async def refresh_templates(self, image_tags: object = ()) -> None:
+            calls.append(tuple(image_tags))  # type: ignore[arg-type]
+
+    service = _RefreshSpy(sandbox_lifecycle_interval=0)
+    service._client = _FakeDockerClient()
+    async with service:
+        assert calls == [()]
+
+
+async def test_aclose_cancels_pending_pull_tasks() -> None:
+    service = DockerSandboxService()
+
+    def hang(repository: str) -> None:
+        import time
+
+        time.sleep(10)
+
+    client = _FakeSnapshotDockerClient([])
+    client.images.pull = hang  # type: ignore[method-assign]
+    service._client = client
+    await service.__aenter__()
+    await service.refresh_templates(["img-a"])
+    assert service._pull_tasks
+    await service.__aexit__(None, None, None)
+    assert not service._pull_tasks
+
+
+# --------------------------------------------------------------------------- #
+# AppConfig.get_sandbox_service caching.
+# --------------------------------------------------------------------------- #
+
+
+def test_get_sandbox_service_caches_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openhands.ev2.config import AppConfig
+
+    config = AppConfig(
+        idp={"url": "https://idp.example.com", "client_id": "c", "client_secret": "s"},  # type: ignore[arg-type]
+        encryption_key={"id": "primary", "value": "test-secret-at-least-32-bytes-long!!"},  # type: ignore[arg-type]
+    )
+    first = config.get_sandbox_service()
+    second = config.get_sandbox_service()
+    assert first is second

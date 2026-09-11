@@ -8,6 +8,7 @@ session is injected per-request.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -17,6 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.sandbox.sandbox_service import (
     BatchPermissionDeniedError as _BatchPermissionDeniedError,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxService,
 )
 from openhands.ev2.sandbox.sandbox_service import (
     SandboxTemplateNotFoundError as _SandboxTemplateNotFoundError,
@@ -37,6 +41,8 @@ from openhands.ev2.sandbox.sandbox_template_schemas import (
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxTemplateNotFoundError(_SandboxTemplateNotFoundError):
@@ -64,15 +70,25 @@ def _dicts_to_exposed_ports(data: list[dict[str, Any]]) -> list[ExposedPort]:
 
 
 class SandboxTemplateService:
-    """CRUD over :class:`SandboxTemplate`."""
+    """CRUD over :class:`SandboxTemplate`.
+
+    When *sandbox_service* is provided, every mutation (create/update/delete,
+    including batch) notifies the live sandbox service via
+    :meth:`SandboxService.refresh_templates` with the full current set of
+    template image tags, so the provider reconciles its image inventory (e.g.
+    the Docker backend pulls newly-referenced images in the background).
+    """
 
     def __init__(
         self,
         session: AsyncSession,
         perm_filter: SearchFilter[SandboxTemplate] = ALL,
+        *,
+        sandbox_service: SandboxService | None = None,
     ) -> None:
         self._session = session
         self._perm_filter = perm_filter
+        self._sandbox_service = sandbox_service
 
     def to_read(self, template: SandboxTemplate) -> SandboxTemplateRead:
         """Build the API read model from an ORM row."""
@@ -120,6 +136,7 @@ class SandboxTemplateService:
         self._session.add(template)
         await self._session.flush()
         await self._session.refresh(template)
+        await self._refresh_sandbox_templates()
         return template
 
     async def get(self, template_id: uuid.UUID) -> SandboxTemplate:
@@ -203,6 +220,7 @@ class SandboxTemplateService:
             template.meta = payload.meta
         await self._session.flush()
         await self._session.refresh(template)
+        await self._refresh_sandbox_templates()
         return template
 
     async def delete(self, template_id: uuid.UUID) -> None:
@@ -213,6 +231,7 @@ class SandboxTemplateService:
             await self._session.flush()
         except IntegrityError as exc:
             raise SandboxTemplateInUseError(str(template_id)) from exc
+        await self._refresh_sandbox_templates()
 
     async def apply_batch(
         self,
@@ -243,9 +262,9 @@ class SandboxTemplateService:
         filt = perm_filters.get(Action.CREATE)
         if filt is None:
             raise BatchPermissionDeniedError("create")
-        return await SandboxTemplateService(self._session, filt).create(
-            op.data, creator_id=creator_id
-        )
+        return await SandboxTemplateService(
+            self._session, filt, sandbox_service=self._sandbox_service
+        ).create(op.data, creator_id=creator_id)
 
     async def _batch_update(
         self,
@@ -255,7 +274,9 @@ class SandboxTemplateService:
         filt = perm_filters.get(Action.UPDATE)
         if filt is None:
             raise BatchPermissionDeniedError("update")
-        return await SandboxTemplateService(self._session, filt).update(op.id, op.data)
+        return await SandboxTemplateService(
+            self._session, filt, sandbox_service=self._sandbox_service
+        ).update(op.id, op.data)
 
     async def _batch_delete(
         self,
@@ -265,4 +286,26 @@ class SandboxTemplateService:
         filt = perm_filters.get(Action.DELETE)
         if filt is None:
             raise BatchPermissionDeniedError("delete")
-        await SandboxTemplateService(self._session, filt).delete(op.id)
+        await SandboxTemplateService(
+            self._session, filt, sandbox_service=self._sandbox_service
+        ).delete(op.id)
+
+    async def _refresh_sandbox_templates(self) -> None:
+        """Notify the live sandbox service of the current template image tags.
+
+        Best-effort: a refresh failure is logged by the provider and never
+        raised here, since the durable template mutation already succeeded and
+        the provider surfaces a missing image at sandbox-create time.
+        """
+        if self._sandbox_service is None:
+            return
+        tags = await self._all_image_tags()
+        try:
+            await self._sandbox_service.refresh_templates(tags)
+        except Exception:
+            logger.debug("sandbox service refresh_templates failed", exc_info=True)
+
+    async def _all_image_tags(self) -> list[str]:
+        """Return every template image tag visible to this service's session."""
+        result = await self._session.execute(select(SandboxTemplate.docker_image_tag))
+        return [row[0] for row in result.all() if row[0]]
