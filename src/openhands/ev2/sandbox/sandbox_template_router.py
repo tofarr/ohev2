@@ -22,6 +22,12 @@ from openhands.ev2.auth.auth_dependencies import (
     depends_user_id,
 )
 from openhands.ev2.db import SessionDep
+from openhands.ev2.sandbox.sandbox_service import (
+    BatchPermissionDeniedError,
+    SandboxTemplateConflictError,
+    SandboxTemplateNotFoundError,
+    SandboxTemplatePermissionScopeError,
+)
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.sandbox.sandbox_template_schemas import (
     SandboxTemplateBatchWriteRequest,
@@ -32,10 +38,7 @@ from openhands.ev2.sandbox.sandbox_template_schemas import (
     SandboxTemplateUpdate,
 )
 from openhands.ev2.sandbox.sandbox_template_service import (
-    BatchPermissionDeniedError,
     SandboxTemplateInUseError,
-    SandboxTemplateNotFoundError,
-    SandboxTemplatePermissionScopeError,
     SandboxTemplateService,
 )
 from openhands.ev2.security.security_models import Action
@@ -58,6 +61,7 @@ def _cursor(value: str) -> uuid.UUID:
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (SandboxTemplateNotFoundError, status.HTTP_404_NOT_FOUND),
     (SandboxTemplatePermissionScopeError, status.HTTP_403_FORBIDDEN),
+    (SandboxTemplateConflictError, status.HTTP_409_CONFLICT),
     (SandboxTemplateInUseError, status.HTTP_409_CONFLICT),
     (BatchPermissionDeniedError, status.HTTP_403_FORBIDDEN),
 )

@@ -14,6 +14,15 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.sandbox.sandbox_service import (
+    BatchPermissionDeniedError as _BatchPermissionDeniedError,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxSnapshotNotFoundError as _SandboxSnapshotNotFoundError,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxSnapshotPermissionScopeError as _SandboxSnapshotPermissionScopeError,
+)
 from openhands.ev2.sandbox.sandbox_snapshot_models import SandboxSnapshot
 from openhands.ev2.sandbox.sandbox_snapshot_schemas import (
     SandboxSnapshotBatchDelete,
@@ -26,15 +35,15 @@ from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
-class SandboxSnapshotNotFoundError(Exception):
+class SandboxSnapshotNotFoundError(_SandboxSnapshotNotFoundError):
     """Raised when a sandbox snapshot does not exist or is out of scope."""
 
 
-class SandboxSnapshotPermissionScopeError(Exception):
+class SandboxSnapshotPermissionScopeError(_SandboxSnapshotPermissionScopeError):
     """Raised when a snapshot create payload falls outside the principal's scope."""
 
 
-class BatchPermissionDeniedError(Exception):
+class BatchPermissionDeniedError(_BatchPermissionDeniedError):
     """Raised when a batch operation's action is not granted."""
 
 

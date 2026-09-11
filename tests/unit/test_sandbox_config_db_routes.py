@@ -150,3 +150,52 @@ class TestSandboxConfigRoutes:
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["expires_at"] is not None
+
+    async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.get(f"/sandbox/sandbox-configs/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_patch_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(
+            f"/sandbox/sandbox-configs/{uuid.uuid4()}",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/sandbox/sandbox-configs/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_batch_read_too_many_returns_422(self, client: AsyncClient) -> None:
+        ids = [str(uuid.uuid4()) for _ in range(101)]
+        resp = await client.get("/sandbox/sandbox-configs/batch", params={"ids": ids})
+        assert resp.status_code == 422
+
+    async def test_batch_write_empty_ops_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/sandbox/sandbox-configs/batch", json={"operations": []})
+        assert resp.status_code == 422
+
+    async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/sandbox/sandbox-configs", params={"cursor": "not-a-uuid"})
+        assert resp.status_code == 400
+
+    async def test_batch_read_empty(self, client: AsyncClient) -> None:
+        resp = await client.get("/sandbox/sandbox-configs/batch")
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    async def test_batch_write_delete_missing_maps_to_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/sandbox/sandbox-configs/batch",
+            json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_write_update_missing_maps_to_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/sandbox/sandbox-configs/batch",
+            json={
+                "operations": [{"op": "update", "id": str(uuid.uuid4()), "data": {"enabled": True}}]
+            },
+        )
+        assert resp.status_code == 404

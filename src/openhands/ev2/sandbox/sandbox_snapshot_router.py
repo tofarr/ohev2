@@ -37,8 +37,12 @@ from openhands.ev2.auth.auth_dependencies import (
 from openhands.ev2.db import SessionDep
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_service import (
+    BatchPermissionDeniedError,
     SandboxNotFoundError,
     SandboxService,
+    SandboxSnapshotConflictError,
+    SandboxSnapshotNotFoundError,
+    SandboxSnapshotPermissionScopeError,
     SandboxSnapshotUnsupportedError,
 )
 from openhands.ev2.sandbox.sandbox_snapshot_models import SandboxSnapshot
@@ -50,9 +54,6 @@ from openhands.ev2.sandbox.sandbox_snapshot_schemas import (
     SandboxSnapshotSearchResult,
 )
 from openhands.ev2.sandbox.sandbox_snapshot_service import (
-    BatchPermissionDeniedError,
-    SandboxSnapshotNotFoundError,
-    SandboxSnapshotPermissionScopeError,
     SandboxSnapshotService,
 )
 from openhands.ev2.security.security_models import Action
@@ -86,6 +87,7 @@ def _cursor(value: str) -> uuid.UUID:
 _ERROR_STATUS: tuple[tuple[type[Exception], int], ...] = (
     (SandboxSnapshotNotFoundError, status.HTTP_404_NOT_FOUND),
     (SandboxSnapshotPermissionScopeError, status.HTTP_403_FORBIDDEN),
+    (SandboxSnapshotConflictError, status.HTTP_409_CONFLICT),
     (SandboxSnapshotUnsupportedError, status.HTTP_501_NOT_IMPLEMENTED),
     (SandboxNotFoundError, status.HTTP_404_NOT_FOUND),
     (BatchPermissionDeniedError, status.HTTP_403_FORBIDDEN),

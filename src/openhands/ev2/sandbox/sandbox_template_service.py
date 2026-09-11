@@ -16,6 +16,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.sandbox.sandbox_models import ExposedPort
+from openhands.ev2.sandbox.sandbox_service import (
+    BatchPermissionDeniedError as _BatchPermissionDeniedError,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxTemplateNotFoundError as _SandboxTemplateNotFoundError,
+)
+from openhands.ev2.sandbox.sandbox_service import (
+    SandboxTemplatePermissionScopeError as _SandboxTemplatePermissionScopeError,
+)
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.sandbox.sandbox_template_schemas import (
     SandboxTemplateBatchCreate,
@@ -31,11 +40,11 @@ from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
-class SandboxTemplateNotFoundError(Exception):
+class SandboxTemplateNotFoundError(_SandboxTemplateNotFoundError):
     """Raised when a sandbox template does not exist or is out of scope."""
 
 
-class SandboxTemplatePermissionScopeError(Exception):
+class SandboxTemplatePermissionScopeError(_SandboxTemplatePermissionScopeError):
     """Raised when a create payload falls outside the principal's scope."""
 
 
@@ -43,7 +52,7 @@ class SandboxTemplateInUseError(Exception):
     """Raised when deleting a template referenced by a sandbox config (FK RESTRICT)."""
 
 
-class BatchPermissionDeniedError(Exception):
+class BatchPermissionDeniedError(_BatchPermissionDeniedError):
     """Raised when a batch operation's action is not granted."""
 
 
