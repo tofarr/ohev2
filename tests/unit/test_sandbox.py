@@ -12,6 +12,7 @@ owned by :class:`DockerSandboxService`.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -30,7 +31,6 @@ from openhands.ev2.sandbox.docker_sandbox_service import (
     _docker_status_to_sandbox_status,
     _exposed_urls_from_ports,
     _generate_sandbox_id,
-    _generate_snapshot_id,
     _label_int,
     _lifespan_knobs_from_image,
     _ohe_name,
@@ -255,11 +255,6 @@ def test_generate_sandbox_id_is_unique() -> None:
     assert all("-" in s and "_" not in s for s in ids)
 
 
-def test_generate_snapshot_id_is_unique() -> None:
-    ids = {_generate_snapshot_id() for _ in range(100)}
-    assert len(ids) == 100
-
-
 # --------------------------------------------------------------------------- #
 # Container attribute mapping -> DockerSandbox.
 # --------------------------------------------------------------------------- #
@@ -284,6 +279,7 @@ def _container_attrs(
     ports: dict[str, Any] | None = None,
     binds: list[str] | None = None,
     labels: dict[str, str] | None = None,
+    env: list[str] | None = None,
 ) -> dict[str, Any]:
     # Build the container name following the OHE_ convention.
     # When sandbox_id is set but config_id is not, it's a warm container.
@@ -301,7 +297,7 @@ def _container_attrs(
         "Name": f"/{container_name}",
         "Created": created,
         "State": {"Status": status, "Error": None},
-        "Config": {"Image": image, "Labels": template_label},
+        "Config": {"Image": image, "Labels": template_label, "Env": env or []},
         "HostConfig": {"Binds": binds or []},
         "NetworkSettings": {"Ports": ports or {}},
     }
@@ -314,6 +310,7 @@ def test_sandbox_from_container_attrs_running() -> None:
             sandbox_id="sb-1",
             config_id="cfg-1",
             ports={"8000/tcp": [{"HostPort": "32771"}]},
+            env=["SESSION_API_KEY=test-key-123", "PATH=/usr/bin"],
         )
     )
     sandbox = _sandbox_from_container_attrs(container, _PORTS)
@@ -324,6 +321,22 @@ def test_sandbox_from_container_attrs_running() -> None:
     assert sandbox.desired_status is SandboxStatus.ACTIVE
     assert sandbox.exposed_urls is not None
     assert [u.name for u in sandbox.exposed_urls] == ["agent_server"]
+    assert sandbox.session_api_key == "test-key-123"
+
+
+def test_sandbox_from_container_attrs_running_no_session_key() -> None:
+    """When SESSION_API_KEY is absent from Env, session_api_key is None."""
+    container = _FakeContainer(
+        _container_attrs(
+            status="running",
+            sandbox_id="sb-1",
+            config_id="cfg-1",
+            env=["PATH=/usr/bin"],
+        )
+    )
+    sandbox = _sandbox_from_container_attrs(container, _PORTS)
+    assert sandbox is not None
+    assert sandbox.session_api_key is None
 
 
 def test_sandbox_from_container_attrs_paused_is_inactive() -> None:
@@ -582,26 +595,35 @@ async def test_service_capture_snapshot_from_sandbox(tmp_path: Path) -> None:
     ws = Path(service.workspace_dir) / sandbox_id
     ws.mkdir(parents=True)
     (ws / "f.txt").write_text("data")
-    snapshot_id, size = await service.capture_snapshot(sandbox_id)
-    assert snapshot_id
+    snapshot_id = uuid.uuid4()
+    size = await service.capture_snapshot(snapshot_id, sandbox_id)
     assert size is not None and size > 0
+    from openhands.ev2.util import snapshot_store
+
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, str(snapshot_id))
 
 
 async def test_service_import_snapshot_from_file(tmp_path: Path) -> None:
     service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
-    snapshot_id, size = await service.import_snapshot_file(b"tarball-bytes")
-    assert snapshot_id
+    snapshot_id = uuid.uuid4()
+    size = await service.import_snapshot_file(snapshot_id, b"tarball-bytes")
     assert size is not None and size > 0
+    from openhands.ev2.util import snapshot_store
+
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, str(snapshot_id))
 
 
 async def test_service_delete_snapshot(tmp_path: Path) -> None:
     service = DockerSandboxService(snapshot_dir=str(tmp_path / "snaps"))
-    await service.import_snapshot_file(b"tarball-bytes")
-    snapshot_id = (await service.import_snapshot_file(b"more"))[0]
-    await service.delete_snapshot_artifact(snapshot_id)
+    sid1 = uuid.uuid4()
+    sid2 = uuid.uuid4()
+    await service.import_snapshot_file(sid1, b"tarball-bytes")
+    await service.import_snapshot_file(sid2, b"more")
+    await service.delete_snapshot_artifact(str(sid2))
     from openhands.ev2.util import snapshot_store
 
-    assert not snapshot_store.snapshot_exists(service.snapshot_dir, snapshot_id)
+    assert not snapshot_store.snapshot_exists(service.snapshot_dir, str(sid2))
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, str(sid1))
 
 
 async def test_service_delete_snapshot_not_found_raises(tmp_path: Path) -> None:

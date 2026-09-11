@@ -56,10 +56,11 @@ class SandboxSnapshot(Base):
         String(2048),
         comment="URL to stream the snapshot artifact.",
     )
-    sandbox_id: Mapped[uuid.UUID | None] = mapped_column(
+    sandbox_id: Mapped[str | None] = mapped_column(
+        String(255),
         nullable=True,
         default=None,
-        comment="Source sandbox the snapshot was created from; null for file imports.",
+        comment="Source sandbox id (container name) the snapshot was created from; null for file imports.",
     )
     size_bytes: Mapped[int | None] = mapped_column(
         BigInteger,

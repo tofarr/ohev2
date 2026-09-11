@@ -363,31 +363,32 @@ class K8sSandboxService(SandboxService):
 
     async def capture_snapshot(
         self,
+        snapshot_id: uuid.UUID,
         sandbox_id: str,
         *,
         sandbox_perm_filter: SearchFilter[Any] = ALL,
-    ) -> tuple[str, int | None]:
+    ) -> int | None:
         """Capture a workspace tarball from a live sandbox's PVC.
 
-        Returns ``(snapshot_id, size_bytes)``.
+        *snapshot_id* is the DB row id and doubles as the tarball filename
+        stem. Returns the tarball size in bytes.
         """
-        snapshot_id = uuid.uuid4().hex
-        await asyncio.to_thread(self._sync_capture_snapshot, snapshot_id, sandbox_id)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_capture_snapshot, artifact_id, sandbox_id)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def import_snapshot_file(
         self,
+        snapshot_id: uuid.UUID,
         file_data: bytes | None,
         *,
         schema_type: str | None = None,
-    ) -> tuple[str, int | None]:
-        """Store an uploaded tarball and return ``(snapshot_id, size_bytes)``."""
+    ) -> int | None:
+        """Store an uploaded tarball and return its size in bytes."""
         assert file_data is not None
-        snapshot_id = uuid.uuid4().hex
-        await asyncio.to_thread(self._sync_import_snapshot, snapshot_id, file_data)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_import_snapshot, artifact_id, file_data)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
         """Delete the stored tarball for a snapshot."""

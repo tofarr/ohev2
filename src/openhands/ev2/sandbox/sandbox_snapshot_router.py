@@ -154,7 +154,7 @@ async def create_sandbox_snapshot(
         Depends(depends_permissions(SandboxConfig, Action.USE)),
     ],
     sandbox_template_id: Annotated[uuid.UUID, Form()],
-    sandbox_id: Annotated[uuid.UUID | None, Form()] = None,
+    sandbox_id: Annotated[str | None, Form()] = None,
     schema_type: Annotated[str | None, Form(max_length=255)] = None,
     file: Annotated[UploadFile | None, File()] = None,
 ) -> SandboxSnapshotRead:
@@ -178,27 +178,32 @@ async def create_sandbox_snapshot(
         ) from exc
     sandbox_service = await get_sandbox_service(request)
     snapshot_service = SandboxSnapshotService(session, perm_filter)
+    # Pre-generate the snapshot id so the artifact filename and DB row id match:
+    # restore (SandboxCreate.snapshot_id) uses the DB id to locate the tarball.
+    snapshot_id = uuid.uuid4()
     try:
         if payload.sandbox_id is not None:
-            download_url, size_bytes = await sandbox_service.capture_snapshot(
-                str(payload.sandbox_id),
+            size_bytes = await sandbox_service.capture_snapshot(
+                snapshot_id,
+                payload.sandbox_id,
                 sandbox_perm_filter=sandbox_perm_filter,
             )
             snapshot = await snapshot_service.create_from_sandbox(
                 payload,
                 creator_id=user_id,
-                download_url=download_url,
+                snapshot_id=snapshot_id,
                 size_bytes=size_bytes,
             )
         else:
-            download_url, size_bytes = await sandbox_service.import_snapshot_file(
+            size_bytes = await sandbox_service.import_snapshot_file(
+                snapshot_id,
                 payload.file_data,
                 schema_type=payload.schema_type,
             )
             snapshot = await snapshot_service.create_from_file(
                 payload,
                 creator_id=user_id,
-                download_url=download_url,
+                snapshot_id=snapshot_id,
                 size_bytes=size_bytes,
             )
     except Exception as exc:

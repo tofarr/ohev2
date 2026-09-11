@@ -30,9 +30,9 @@ class SandboxSnapshotCreate(BaseModel):
     sandbox_template_id: uuid.UUID = Field(
         description="Template the snapshot is scoped to (for restore compatibility).",
     )
-    sandbox_id: uuid.UUID | None = Field(
+    sandbox_id: str | None = Field(
         default=None,
-        description="Source sandbox to snapshot. Mutually exclusive with file import.",
+        description="Source sandbox id (container name) to snapshot. Mutually exclusive with file import.",
     )
     schema_type: str | None = Field(
         default=None,
@@ -63,7 +63,7 @@ class SandboxSnapshotRead(BaseModel):
     id: uuid.UUID
     creator_id: uuid.UUID
     sandbox_template_id: uuid.UUID
-    sandbox_id: uuid.UUID | None
+    sandbox_id: str | None
     schema_type: str = Field(
         alias="schema",
         description="Compatibility tag (e.g. docker-workspace-tar-v1).",
@@ -77,7 +77,7 @@ class SandboxSnapshotSearchFilter(BaseSearchFilter[SandboxSnapshot]):
     """Optional filters for ``GET /sandbox/sandbox-snapshots``."""
 
     sandbox_template_id__eq: uuid.UUID | None = Field(default=None)
-    sandbox_id__eq: uuid.UUID | None = Field(default=None)
+    sandbox_id__eq: str | None = Field(default=None)
     schema__eq: str | None = Field(default=None)
     creator_id__eq: uuid.UUID | None = Field(default=None)
     created_at__gte: datetime | None = Field(default=None)

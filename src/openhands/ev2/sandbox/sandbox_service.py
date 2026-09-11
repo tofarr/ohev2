@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Any
@@ -387,27 +388,33 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
 
     async def capture_snapshot(
         self,
+        snapshot_id: uuid.UUID,
         sandbox_id: str,
         *,
         sandbox_perm_filter: SearchFilter[Any] = ALL,
-    ) -> tuple[str, int | None]:
+    ) -> int | None:
         """Capture a snapshot artifact from a live sandbox.
 
-        Returns ``(download_url, size_bytes)``. The DB index row is persisted by
-        the caller (:class:`SandboxSnapshotService`). Raises
+        *snapshot_id* is the DB row id the caller will persist; the provider
+        uses it as the artifact identifier so restore can look it up by the
+        same id. Returns ``size_bytes``. The DB index row is persisted by the
+        caller (:class:`SandboxSnapshotService`). Raises
         :class:`SandboxSnapshotUnsupportedError` when the provider cannot capture.
         """
         raise SandboxSnapshotUnsupportedError("snapshot capture is not supported")
 
     async def import_snapshot_file(
         self,
+        snapshot_id: uuid.UUID,
         file_data: bytes | None,
         *,
         schema_type: str | None = None,
-    ) -> tuple[str, int | None]:
-        """Store an uploaded snapshot artifact and return ``(download_url, size_bytes)``.
+    ) -> int | None:
+        """Store an uploaded snapshot artifact and return ``size_bytes``.
 
-        Raises :class:`SandboxSnapshotUnsupportedError` when the provider cannot
+        *snapshot_id* is the DB row id the caller will persist; the provider
+        uses it as the artifact identifier. Raises
+        :class:`SandboxSnapshotUnsupportedError` when the provider cannot
         import files.
         """
         raise SandboxSnapshotUnsupportedError("snapshot file import is not supported")

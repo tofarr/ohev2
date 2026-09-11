@@ -1272,7 +1272,7 @@ def upgrade() -> None:
         sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
         sa.Column("schema", sa.String(length=255), nullable=False),
         sa.Column("download_url", sa.String(length=2048), nullable=False),
-        sa.Column("sandbox_id", sa.Uuid(), nullable=True),
+        sa.Column("sandbox_id", sa.String(length=255), nullable=True),
         sa.Column("size_bytes", sa.BigInteger(), nullable=True),
         sa.Column(
             "created_at",
