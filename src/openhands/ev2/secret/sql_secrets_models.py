@@ -11,20 +11,17 @@ the ACL-prune sweep, which resolves the canonical id space for the
 
 Tables:
 
-* :class:`SqlSecret` — the umbrella table carrying a type discriminator
-  (``static`` or ``oauth``) and metadata only. It never stores a value itself;
-  the sensitive payload lives in a type-specific detail table. ``code`` is
-  unique and matches ``[A-Za-z0-9_]+`` (validated in the schema), so a secret
-  can be referenced by a stable human-readable key as well as by id. The
-  optional ``creator_id`` records the creating user for ownership-based access
-  control.
-* :class:`SqlStaticSecretDetail` — the encrypted plaintext for a
-  ``type='static'`` secret (1:1 with :class:`SqlSecret`).
+* :class:`SqlSecret` — the metadata row. It never stores a value itself; the
+  sensitive payload lives in :class:`SqlSecretDetail`. ``code`` is unique and
+  matches ``[A-Za-z0-9_]+`` (validated in the schema), so a secret can be
+  referenced by a stable human-readable key as well as by id. The optional
+  ``creator_id`` records the creating user for ownership-based access control.
+* :class:`SqlSecretDetail` — the encrypted plaintext (1:1 with
+  :class:`SqlSecret`).
 
-The typed secret tables never expose their sensitive values through the
-``/secrets`` CRUD endpoints; the only reveal path is the ``/secret-values``
-projection, governed by the separate ``secret_value_permission`` column
-(AGENTS.md §12).
+The secret tables never expose their sensitive values through the ``/secrets``
+CRUD endpoints; the only reveal path is the ``/secret-values`` projection,
+governed by the separate ``secret_value_permission`` column (AGENTS.md §12).
 """
 
 from __future__ import annotations
@@ -42,7 +39,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.ev2.db import Base
-from openhands.ev2.secret.secret_models import SecretType
 
 # All secret timestamps are timezone-aware (TIMESTAMPTZ) so comparisons against
 # datetime.now(UTC) never mix naive and aware values (mirrors auth_models).
@@ -50,10 +46,10 @@ _TZ = DateTime(timezone=True)
 
 
 class SqlSecret(Base):
-    """The umbrella secret row, carrying a type discriminator and metadata.
+    """The secret's metadata row.
 
-    The sensitive payload is NOT on this table — it lives in a type-specific
-    detail table (e.g. :class:`SqlStaticSecretDetail`).
+    The sensitive payload is NOT on this table — it lives in
+    :class:`SqlSecretDetail`.
     """
 
     __tablename__ = "secrets"
@@ -64,12 +60,6 @@ class SqlSecret(Base):
         server_default=func.gen_random_uuid(),
     )
     code: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    type: Mapped[SecretType] = mapped_column(
-        String(16),
-        default=SecretType.STATIC,
-        server_default=SecretType.STATIC.value,
-        nullable=False,
-    )
     description: Mapped[str | None] = mapped_column(
         Text,
         default=None,
@@ -95,17 +85,17 @@ class SqlSecret(Base):
     )
 
 
-class SqlStaticSecretDetail(Base):
-    """The encrypted plaintext for a ``type='static'`` secret. 1:1 with SqlSecret.
+class SqlSecretDetail(Base):
+    """The encrypted plaintext for a secret. 1:1 with SqlSecret.
 
     The ``value`` column stores the secret payload encrypted at rest (JWE
     ciphertext); the plaintext is never persisted. ``secret_id`` is unique so
-    each static secret has at most one detail row, and deleting the parent
+    each secret has at most one detail row, and deleting the parent
     :class:`SqlSecret` cascades to the detail row.
     """
 
-    __tablename__ = "static_secret_details"
-    __table_args__ = ({"comment": "Encrypted plaintext for static secrets"},)
+    __tablename__ = "secret_details"
+    __table_args__ = ({"comment": "Encrypted plaintext for secrets"},)
 
     id: Mapped[uuid.UUID] = mapped_column(
         init=False,

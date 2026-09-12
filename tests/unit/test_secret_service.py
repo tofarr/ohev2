@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import Secret, SecretType
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
@@ -33,10 +33,9 @@ from openhands.ev2.secret.secret_service import (
     SecretNotFoundError,
     SecretPermissionScopeError,
     SecretValueNotFoundError,
-    SecretValueTypeError,
     resolve_secrets_service_class,
 )
-from openhands.ev2.secret.sql_secrets_models import SqlSecret, SqlStaticSecretDetail
+from openhands.ev2.secret.sql_secrets_models import SqlSecret, SqlSecretDetail
 from openhands.ev2.secret.sql_secrets_service import SqlSecretsService
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
@@ -67,14 +66,12 @@ async def _seed_user(session: AsyncSession, *, n: int = 0) -> User:
     return user
 
 
-async def _static_detail(
-    session: AsyncSession, secret_id: uuid.UUID
-) -> SqlStaticSecretDetail | None:
+async def _detail(session: AsyncSession, secret_id: uuid.UUID) -> SqlSecretDetail | None:
     # populate_existing: the service writes through its own session, so this
     # session's identity map may hold a stale copy of the detail row.
     result = await session.execute(
-        select(SqlStaticSecretDetail)
-        .where(SqlStaticSecretDetail.secret_id == secret_id)
+        select(SqlSecretDetail)
+        .where(SqlSecretDetail.secret_id == secret_id)
         .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
@@ -90,9 +87,8 @@ class TestCreate:
             creator_id=user.id,
         )
         assert secret.code == "API_KEY"
-        assert secret.type == SecretType.STATIC
         # The persisted ciphertext lives in the detail row, never on the secret.
-        detail = await _static_detail(session, secret.id)
+        detail = await _detail(session, secret.id)
         assert detail is not None
         assert detail.value != "hunter2"
         assert enc.decrypt_value(detail.value) == "hunter2"
@@ -168,7 +164,6 @@ class TestRead:
         )
         read = SecretRead.model_validate(secret)
         assert read.code == "R"
-        assert read.type == SecretType.STATIC
         # SecretRead must not carry a value field at all.
         assert "value" not in SecretRead.model_fields
 
@@ -181,11 +176,11 @@ class TestUpdate:
         secret = await service.create_secret(
             SecretCreate(code="U", value=SecretStr("old")), creator_id=user.id
         )
-        detail = await _static_detail(session, secret.id)
+        detail = await _detail(session, secret.id)
         assert detail is not None
         old_cipher = detail.value
         await service.update_secret(secret.id, SecretUpdate(value=SecretStr("new")))
-        refreshed = await _static_detail(session, secret.id)
+        refreshed = await _detail(session, secret.id)
         assert refreshed is not None
         assert refreshed.value != old_cipher
         assert enc.decrypt_value(refreshed.value) == "new"
@@ -207,30 +202,20 @@ class TestUpdate:
         with pytest.raises(SecretNotFoundError):
             await service.update_secret(uuid.uuid4(), SecretUpdate(code="x"))
 
-    async def test_update_value_on_oauth_raises_type_error(
-        self, service: SqlSecretsService, session: AsyncSession
-    ) -> None:
-        secret = SqlSecret(code="OAUTH_SECRET", type="oauth")  # type: ignore[arg-type]
-        session.add(secret)
-        await session.flush()
-        await session.refresh(secret)
-        with pytest.raises(SecretValueTypeError):
-            await service.update_secret(secret.id, SecretUpdate(value=SecretStr("v")))
-
     async def test_update_value_recreates_missing_detail(
         self, service: SqlSecretsService, session: AsyncSession, enc: EncryptionService
     ) -> None:
-        """A static secret whose detail row vanished gets a fresh one on value update."""
+        """A secret whose detail row vanished gets a fresh one on value update."""
         user = await _seed_user(session)
         secret = await service.create_secret(
             SecretCreate(code="READD", value=SecretStr("v")), creator_id=user.id
         )
-        detail = await _static_detail(session, secret.id)
+        detail = await _detail(session, secret.id)
         assert detail is not None
         await session.delete(detail)
         await session.flush()
         await service.update_secret(secret.id, SecretUpdate(value=SecretStr("v2")))
-        recreated = await _static_detail(session, secret.id)
+        recreated = await _detail(session, secret.id)
         assert recreated is not None
         assert enc.decrypt_value(recreated.value) == "v2"
 
@@ -337,7 +322,6 @@ class TestValueReveal:
         read = await service.get_secret_value(secret.id, read_filter=ALL, value_filter=ALL)
         assert read.value == "reveal-me"
         assert read.code == "RV"
-        assert read.type.value == "static"
 
     async def test_reveal_denied_without_read_access(
         self, service: SqlSecretsService, session: AsyncSession
@@ -362,18 +346,8 @@ class TestValueReveal:
     async def test_reveal_missing_detail_raises(
         self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
-        # A static secret with no detail row is a data integrity break.
+        # A secret with no detail row is a data integrity break.
         secret = SqlSecret(code="NO_DETAIL")
-        session.add(secret)
-        await session.flush()
-        await session.refresh(secret)
-        with pytest.raises(SecretValueNotFoundError):
-            await service.get_secret_value(secret.id, read_filter=ALL, value_filter=ALL)
-
-    async def test_reveal_oauth_has_no_value(
-        self, service: SqlSecretsService, session: AsyncSession
-    ) -> None:
-        secret = SqlSecret(code="OAUTH_ND", type="oauth")  # type: ignore[arg-type]
         session.add(secret)
         await session.flush()
         await session.refresh(secret)
@@ -405,8 +379,8 @@ class TestValueReveal:
         await service.create_secret(
             SecretCreate(code="SV1", value=SecretStr("one")), creator_id=user.id
         )
-        oauth = SqlSecret(code="SV_OAUTH", type="oauth")  # type: ignore[arg-type]
-        session.add(oauth)
+        # A secret with no detail row has no revealable value and is skipped.
+        session.add(SqlSecret(code="SV_ND"))
         await session.flush()
         items, next_cursor = await service.search_secret_values(read_filter=ALL, value_filter=ALL)
         assert next_cursor is None
@@ -442,17 +416,9 @@ class TestSecretSchemaValidation:
         with pytest.raises(ValidationError):
             SecretCreate(code="   ", value=SecretStr("v"))
 
-    def test_create_requires_value_for_static(self) -> None:
-        with pytest.raises(ValidationError, match="value is required when type is static"):
-            SecretCreate(code="S", type="static")  # type: ignore[arg-type]
-
-    def test_create_rejects_value_for_oauth(self) -> None:
-        with pytest.raises(ValidationError, match="value is not allowed for type oauth"):
-            SecretCreate(code="O", type="oauth", value=SecretStr("v"))  # type: ignore[arg-type]
-
-    def test_create_oauth_without_value_succeeds(self) -> None:
-        payload = SecretCreate(code="O", type="oauth")  # type: ignore[arg-type]
-        assert payload.value is None
+    def test_create_requires_value(self) -> None:
+        with pytest.raises(ValidationError, match="Field required"):
+            SecretCreate(code="S")  # type: ignore[call-arg]
 
     def test_update_none_code_passes_through(self) -> None:
         assert SecretUpdate().code is None

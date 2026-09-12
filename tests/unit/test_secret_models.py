@@ -1,4 +1,4 @@
-"""Unit tests for the SqlSecret and SqlStaticSecretDetail ORM models (DB-backed).
+"""Unit tests for the SqlSecret and SqlSecretDetail ORM models (DB-backed).
 
 These are the internal models of the default ``SqlSecretsService``; the
 service surface exchanges the Pydantic ``Secret`` instead.
@@ -13,10 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.secret.secret_models import SecretType
 from openhands.ev2.secret.sql_secrets_models import (
     SqlSecret,
-    SqlStaticSecretDetail,
+    SqlSecretDetail,
 )
 from openhands.ev2.user.user_models import User
 
@@ -38,7 +37,6 @@ class TestSqlSecretModel:
         await session.refresh(secret)
         assert isinstance(secret.id, uuid.UUID)
         assert secret.code == "API_KEY"
-        assert secret.type == SecretType.STATIC
         assert secret.description is None
         assert secret.creator_id is None
         assert secret.created_at is not None
@@ -83,14 +81,14 @@ class TestSqlSecretModel:
         assert found.creator_id is None
 
 
-class TestSqlStaticSecretDetailModel:
+class TestSqlSecretDetailModel:
     async def test_detail_is_one_to_one(self, session: AsyncSession) -> None:
         secret = SqlSecret(code="DET_UNIQ")
         session.add(secret)
         await session.flush()
-        session.add(SqlStaticSecretDetail(secret_id=secret.id, value="enc-ciphertext"))
+        session.add(SqlSecretDetail(secret_id=secret.id, value="enc-ciphertext"))
         await session.flush()
-        session.add(SqlStaticSecretDetail(secret_id=secret.id, value="enc-ciphertext-2"))
+        session.add(SqlSecretDetail(secret_id=secret.id, value="enc-ciphertext-2"))
         with pytest.raises(IntegrityError):
             await session.flush()
         await session.rollback()
@@ -99,15 +97,13 @@ class TestSqlStaticSecretDetailModel:
         secret = SqlSecret(code="DET_CASC")
         session.add(secret)
         await session.flush()
-        detail = SqlStaticSecretDetail(secret_id=secret.id, value="enc-ciphertext")
+        detail = SqlSecretDetail(secret_id=secret.id, value="enc-ciphertext")
         session.add(detail)
         await session.flush()
         detail_id = detail.id
         await session.delete(secret)
         await session.flush()
         found = (
-            await session.execute(
-                select(SqlStaticSecretDetail).where(SqlStaticSecretDetail.id == detail_id)
-            )
+            await session.execute(select(SqlSecretDetail).where(SqlSecretDetail.id == detail_id))
         ).scalar_one_or_none()
         assert found is None

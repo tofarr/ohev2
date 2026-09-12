@@ -31,7 +31,6 @@ class TestCreateSecretRoute:
         body = resp.json()
         assert body["code"] == "MY_KEY"
         assert uuid.UUID(body["id"])
-        assert body["type"] == "static"
         # /secrets returns metadata only — value is never present.
         assert "value" not in body
         assert body["description"] == "the api key"
@@ -106,13 +105,6 @@ class TestUpdateSecretRoute:
         sid = (await client.post("/secrets", json=_create_payload("FREE"))).json()["id"]
         resp = await client.patch(f"/secrets/{sid}", json={"code": "TAKEN"})
         assert resp.status_code == 409
-
-    async def test_update_value_on_oauth_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.post("/secrets", json={"code": "OA_SECRET", "type": "oauth"})
-        assert resp.status_code == 201
-        sid = resp.json()["id"]
-        resp = await client.patch(f"/secrets/{sid}", json={"value": "x"})
-        assert resp.status_code == 422
 
 
 class TestDeleteSecretRoute:
@@ -207,7 +199,6 @@ class TestSecretValueRoute:
         body = resp.json()
         assert body["id"] == sid
         assert body["code"] == "RV"
-        assert body["type"] == "static"
         assert body["value"] == "hunter2"
 
     async def test_reveal_missing_returns_404(self, client: AsyncClient) -> None:

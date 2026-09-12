@@ -45,7 +45,6 @@ from openhands.ev2.secret.secret_service import (
     SecretNotFoundError,
     SecretPermissionScopeError,
     SecretsService,
-    SecretValueTypeError,
 )
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
@@ -220,11 +219,6 @@ async def write_secrets_batch(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Secret with code already exists: {exc}",
         ) from exc
-    except SecretValueTypeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Value is not allowed for this secret type: {exc}",
-        ) from exc
     return BatchWriteResult(
         items=[SecretRead.model_validate(s) if s is not None else None for s in results],
     )
@@ -268,11 +262,6 @@ async def update_secret(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Secret with code already exists: {exc}",
-        ) from exc
-    except SecretValueTypeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Value is not allowed for this secret type: {exc}",
         ) from exc
     return SecretRead.model_validate(secret)
 

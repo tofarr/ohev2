@@ -45,7 +45,7 @@ from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.secret.secret_models import Secret, SecretType
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
@@ -74,14 +74,6 @@ class SecretPermissionScopeError(Exception):
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted to the principal."""
-
-
-class SecretValueTypeError(Exception):
-    """Raised when a value is supplied for a secret whose type cannot hold one.
-
-    ``value`` is allowed only for ``type='static'`` secrets; supplying it on an
-    oauth secret (which has no value storage yet) is a 422 client error.
-    """
 
 
 class SecretValueNotFoundError(Exception):
@@ -221,7 +213,6 @@ class SecretsService(DiscriminatedUnionMixin, ABC):
         """
         return Secret(
             code=payload.code,
-            type=payload.type,
             description=payload.description,
             creator_id=creator_id,
         )
@@ -236,12 +227,8 @@ class SecretsService(DiscriminatedUnionMixin, ABC):
         """Partially update a secret, scoped by ``perm_filter``.
 
         Raises :class:`SecretNotFoundError` when missing or out of scope.
-        Supplying ``payload.value`` for an oauth secret raises
-        :class:`SecretValueTypeError` (422) — the type cannot hold a value.
         """
         secret = await self.get_secret(secret_id, perm_filter=perm_filter)
-        if payload.value is not None and secret.type == SecretType.OAUTH:
-            raise SecretValueTypeError(str(secret_id))
         return await self._update_secret(secret, payload)
 
     async def delete_secret(
@@ -396,11 +383,8 @@ class SecretsService(DiscriminatedUnionMixin, ABC):
     async def _reveal_plaintext(self, secret: Secret) -> str | None:
         """Plaintext for *secret*, or ``None`` when it has no revealable value.
 
-        Oauth secrets have no value storage yet, so they never reveal; the
-        decrypt step itself is the provider hook.
+        The decrypt step itself is the provider hook.
         """
-        if secret.type == SecretType.OAUTH:
-            return None
         return await self._decrypt_value(secret)
 
     @staticmethod
@@ -408,7 +392,6 @@ class SecretsService(DiscriminatedUnionMixin, ABC):
         return SecretValueRead(
             id=secret.id,
             code=secret.code,
-            type=secret.type,
             value=plaintext,
         )
 

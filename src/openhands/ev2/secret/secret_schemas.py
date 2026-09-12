@@ -1,17 +1,16 @@
-"""Pydantic schemas for the typed secret feature.
+"""Pydantic schemas for the secret feature.
 
 Resources:
 
 * ``/secrets`` — full CRUD (GET paginated, POST, GET/PATCH/DELETE /{id}) plus
   batch read/write. Responses return metadata only — the ``value`` is never
   exposed here. The ``value`` is received as a :class:`SecretStr` on create
-  /update (so it is never logged carelessly) and stored encrypted in a
-  type-specific detail table by the service.
-* ``/secret-values`` — read-only projection that reveals decrypted plaintext.
-  It aggregates across secret types and is governed by the separate
-  ``secret_value_permission`` column; a secret is revealed only when the
-  principal has both read access to the secret and the value-reveal permission
-  (defense in depth, AGENTS.md §12).
+  /update (so it is never logged carelessly) and stored encrypted in a detail
+  table by the service.
+* ``/secret-values`` — read-only projection that reveals decrypted plaintext,
+  governed by the separate ``secret_value_permission`` column; a secret is
+  revealed only when the principal has both read access to the secret and the
+  value-reveal permission (defense in depth, AGENTS.md §12).
 """
 
 from __future__ import annotations
@@ -21,9 +20,9 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from openhands.ev2.secret.secret_models import Secret, SecretType
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 # A secret code is letters, digits, and underscores only (like a feature-flag
@@ -39,20 +38,15 @@ _CODE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 class SecretCreate(BaseModel):
     """Payload to create a secret.
 
-    ``type`` defaults to ``static``. ``value`` is a :class:`SecretStr` so the
-    plaintext is treated as sensitive in transit (it is not repr'd/logged by
-    default) and is required when ``type == static``; it must be omitted when
-    ``type == oauth`` (no oauth detail table exists yet). The value is
-    encrypted at rest by the service before persistence.
+    ``value`` is a :class:`SecretStr` so the plaintext is treated as sensitive
+    in transit (it is not repr'd/logged by default); it is encrypted at rest
+    by the service before persistence.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     code: str = Field(min_length=1, max_length=255, description="Letters, digits, underscores.")
-    type: SecretType = Field(default=SecretType.STATIC, description="Secret type discriminator.")
-    value: SecretStr | None = Field(
-        default=None, min_length=1, description="The secret payload (plaintext in transit)."
-    )
+    value: SecretStr = Field(min_length=1, description="The secret payload (plaintext in transit).")
     description: str | None = Field(default=None, max_length=4096)
 
     @field_validator("code")
@@ -65,22 +59,9 @@ class SecretCreate(BaseModel):
             raise ValueError("code may only contain letters, digits, and underscores")
         return v
 
-    @model_validator(mode="after")
-    def _validate_value_for_type(self) -> SecretCreate:
-        if self.type == SecretType.STATIC and self.value is None:
-            raise ValueError("value is required when type is static")
-        if self.type == SecretType.OAUTH and self.value is not None:
-            raise ValueError("value is not allowed for type oauth")
-        return self
-
 
 class SecretUpdate(BaseModel):
-    """Partial update of a secret. All fields optional.
-
-    ``value`` is allowed only when the secret's type is ``static``; the service
-    enforces this and raises :class:`SecretValueTypeError` for oauth. ``type``
-    itself is immutable after create and therefore absent here.
-    """
+    """Partial update of a secret. All fields optional."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -112,7 +93,6 @@ class SecretRead(BaseModel):
 
     id: uuid.UUID
     code: str
-    type: SecretType
     description: str | None
     creator_id: uuid.UUID | None
     created_at: datetime
@@ -164,7 +144,6 @@ class SecretValueRead(BaseModel):
 
     id: uuid.UUID
     code: str
-    type: SecretType
     value: str
 
 

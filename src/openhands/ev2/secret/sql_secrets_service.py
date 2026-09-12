@@ -9,7 +9,7 @@ own modules and are wired via the ``secrets_service_class`` config).
 and translates rows to the provider-neutral Pydantic
 :class:`openhands.ev2.secret.secret_models.Secret` before returning. Values
 are encrypted at rest via the encryption service (AGENTS.md §9) in the
-``static_secret_details`` table.
+``secret_details`` table.
 
 Session scoping: every operation runs in a session from
 :func:`get_session_factory`. A contextvar carries the in-flight session so an
@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.db import get_session_factory
 from openhands.ev2.encryption.encryption_service import get_encryption_service
-from openhands.ev2.secret.secret_models import Secret, SecretType
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchOp,
     SecretCreate,
@@ -43,7 +43,7 @@ from openhands.ev2.secret.secret_service import (
     SecretNotFoundError,
     SecretsService,
 )
-from openhands.ev2.secret.sql_secrets_models import SqlSecret, SqlStaticSecretDetail
+from openhands.ev2.secret.sql_secrets_models import SqlSecret, SqlSecretDetail
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
@@ -133,7 +133,6 @@ class SqlSecretsService(SecretsService):
         async with self._session_scope() as session:
             row = SqlSecret(
                 code=secret.code,
-                type=secret.type,
                 description=secret.description,
                 creator_id=secret.creator_id,
             )
@@ -145,9 +144,8 @@ class SqlSecretsService(SecretsService):
             session.add(row)
             try:
                 await session.flush()
-                if payload.type == SecretType.STATIC:
-                    session.add(self._static_detail(secret.id, payload))
-                    await session.flush()
+                session.add(self._detail(secret.id, payload))
+                await session.flush()
             except IntegrityError as exc:
                 raise _classify_integrity_error(exc, payload.code) from exc
             return secret
@@ -163,9 +161,7 @@ class SqlSecretsService(SecretsService):
             if payload.description is not None:
                 row.description = payload.description
             if payload.value is not None:
-                await self._upsert_static_detail(
-                    session, secret.id, payload.value.get_secret_value()
-                )
+                await self._upsert_detail(session, secret.id, payload.value.get_secret_value())
             try:
                 await session.flush()
             except IntegrityError as exc:
@@ -183,7 +179,7 @@ class SqlSecretsService(SecretsService):
 
     async def _decrypt_value(self, secret: Secret) -> str | None:
         async with self._session_scope() as session:
-            detail = await self._load_static_detail(session, secret.id)
+            detail = await self._load_detail(session, secret.id)
             if detail is None:
                 return None
             return get_encryption_service().decrypt_value(detail.value)
@@ -196,7 +192,6 @@ class SqlSecretsService(SecretsService):
         return Secret(
             id=row.id,
             code=row.code,
-            type=row.type,
             description=row.description,
             creator_id=row.creator_id,
             created_at=row.created_at,
@@ -204,29 +199,26 @@ class SqlSecretsService(SecretsService):
         )
 
     @staticmethod
-    def _static_detail(secret_id: uuid.UUID, payload: SecretCreate) -> SqlStaticSecretDetail:
-        value = payload.value.get_secret_value() if payload.value is not None else ""
-        return SqlStaticSecretDetail(
+    def _detail(secret_id: uuid.UUID, payload: SecretCreate) -> SqlSecretDetail:
+        return SqlSecretDetail(
             secret_id=secret_id,
-            value=get_encryption_service().encrypt_value(value),
+            value=get_encryption_service().encrypt_value(payload.value.get_secret_value()),
         )
 
     @staticmethod
-    async def _load_static_detail(
-        session: AsyncSession, secret_id: uuid.UUID
-    ) -> SqlStaticSecretDetail | None:
+    async def _load_detail(session: AsyncSession, secret_id: uuid.UUID) -> SqlSecretDetail | None:
         result = await session.execute(
-            select(SqlStaticSecretDetail).where(SqlStaticSecretDetail.secret_id == secret_id)
+            select(SqlSecretDetail).where(SqlSecretDetail.secret_id == secret_id)
         )
         return result.scalar_one_or_none()
 
-    async def _upsert_static_detail(
+    async def _upsert_detail(
         self, session: AsyncSession, secret_id: uuid.UUID, plaintext: str
     ) -> None:
         ciphertext = get_encryption_service().encrypt_value(plaintext)
-        detail = await self._load_static_detail(session, secret_id)
+        detail = await self._load_detail(session, secret_id)
         if detail is None:
-            session.add(SqlStaticSecretDetail(secret_id=secret_id, value=ciphertext))
+            session.add(SqlSecretDetail(secret_id=secret_id, value=ciphertext))
         else:
             detail.value = ciphertext
 
