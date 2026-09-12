@@ -51,6 +51,7 @@ from openhands.ev2.sandbox.sandbox_service import (
 )
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 from openhands.ev2.util import snapshot_store
+from openhands.ev2.util.random_id import generate_random_id
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 logger = logging.getLogger(__name__)
@@ -654,9 +655,9 @@ class DockerSandboxService(SandboxService):
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
             environment={
-                # This is a temporary measure. The agent server does not start with --host 0.0.0.0
-                # by default unless a session api key is set.
-                "SESSION_API_KEY": "changeme"
+                # The agent server does not start with --host 0.0.0.0 by default
+                # unless a session api key is set; mint a random one per sandbox.
+                "SESSION_API_KEY": generate_random_id()
             },
         )
         return container_name
@@ -736,7 +737,7 @@ class DockerSandboxService(SandboxService):
             if self.extra_hosts and not self.use_host_network
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
-            environment={"SESSION_API_KEY": "changeme"},
+            environment={"SESSION_API_KEY": generate_random_id()},
         )
         container.pause()
 
@@ -1003,13 +1004,15 @@ def _generate_snapshot_id() -> str:
 
 
 def _generate_sandbox_id() -> str:
-    """Generate a unique sandbox id (UUID).
+    """Generate a unique sandbox id (22-char lowercase alphanumeric).
 
     The id is encoded in the container name (``OHE_<sid>`` or
     ``OHE_<sid>_<cid>``) and used as the workspace bind-mount directory key.
-    UUIDs use dashes (not underscores), so the name splits unambiguously on ``_``.
+    The id is ``[a-z0-9]`` only, so it contains neither the ``_`` separator used
+    by the ``OHE_`` name grammar nor the ``-`` used by derived K8s names, and
+    the Docker name splits unambiguously on ``_``.
     """
-    return str(uuid.uuid4())
+    return generate_random_id()
 
 
 def _ohe_name(sandbox_id: str, config_id: str | None = None) -> str:
