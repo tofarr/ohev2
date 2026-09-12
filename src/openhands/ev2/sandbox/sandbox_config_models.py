@@ -56,20 +56,14 @@ class SandboxConfig(Base):
         ForeignKey("sandbox_templates.id", ondelete="RESTRICT"),
         index=True,
     )
-    # Encrypted JWE ciphertext of the session API key; never exposed in plaintext
-    # through the API (SandboxConfigRead omits it; the live Sandbox carries it).
+    # Encrypted JWE ciphertext of the raw ``oh_...`` API key minted for this
+    # config at create time (a system ApiKey row named
+    # "Sandbox {config id} API Key"; see sandbox_session.py). Never exposed in
+    # plaintext through the API (SandboxConfigRead omits it; the live Sandbox
+    # carries it).
     session_api_key: Mapped[str] = mapped_column(
         String(8192),
         comment="Encrypted session API key for the sandbox (JWE ciphertext).",
-    )
-    # Non-secret SHA-256 of the plaintext session API key. The ingestion path
-    # resolves an inbound ``X-Session-API-Key`` header to this config by hash
-    # (see sandbox_session.py) without ever storing the plaintext.
-    session_api_key_hash: Mapped[str] = mapped_column(
-        String(64),
-        unique=True,
-        index=True,
-        comment="SHA-256 hex of the plaintext session API key (lookup hash).",
     )
     enabled: Mapped[bool] = mapped_column(
         Boolean,

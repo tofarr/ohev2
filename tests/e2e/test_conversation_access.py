@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from openhands.ev2.conversation.conversation_models import Conversation
 from openhands.ev2.role.role_models import UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
-from openhands.ev2.sandbox.sandbox_session import hash_session_api_key
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.scripts.seed_db import seed_db
 from openhands.ev2.user.user_models import User
@@ -74,7 +73,6 @@ async def _make_sandbox_config(session: AsyncSession, creator_id: uuid.UUID) -> 
         creator_id=creator_id,
         sandbox_template_id=template.id,
         session_api_key="encrypted-session-key",
-        session_api_key_hash=hash_session_api_key(f"session-key-{creator_id}"),
     )
     session.add(config)
     await session.flush()

@@ -5,9 +5,10 @@
 // shares with PATCH /conversations/{id} and POST /conversations/{id}/events.
 // Invariants checked here:
 //
-//   - a sandbox authenticates with its session API key; the key resolves by
-//     its stored hash to at most one sandbox config, and an unknown key is
-//     rejected (401) — auth fails closed
+//   - a sandbox authenticates with its session API key, a regular ApiKey row
+//     (system) linked to its sandbox config; the key resolves by its stored
+//     hash to at most one config, and an unknown key is rejected (401) —
+//     auth fails closed
 //   - the resolved credential scopes every mutation to conversations whose
 //     sandboxConfigId equals the credential's own config: cross-sandbox
 //     conversation upserts and event appends are rejected (404), so the
@@ -25,11 +26,14 @@
 // endpoints is covered by those specs' access policies.
 
 module webhook {
-  // Only the fields the ingestion rules depend on are modeled.
+  // Only the fields the ingestion rules depend on are modeled. The linked
+  // ApiKey (system=true, sandbox_config_id FK) is modeled here just by its
+  // hash - the link is what scopes resolutions; uniqueness holds as in the
+  // api_keys.key_hash unique index.
   type SandboxConfig = {
     id: str,
-    // The stored SHA-256 lookup hash of the config's session API key.
-    // Two configs never share one (unique index).
+    // The stored SHA-256 lookup hash (of the linked ApiKey's raw value).
+    // Two configs never share one (unique index on api_keys.key_hash).
     keyHash: str,
   }
 

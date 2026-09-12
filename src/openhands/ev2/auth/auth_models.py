@@ -34,7 +34,7 @@ import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.ev2.db import Base
@@ -138,6 +138,19 @@ class ApiKey(Base):
     # baseline permissions rather than orphaning it.
     role_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("roles.id", ondelete="SET NULL"),
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    # True for keys minted by the system, not by a user action (e.g. the
+    # per-sandbox-config session key used on the webhook ingestion path).
+    # Never settable via the public CRUD surface.
+    system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # The sandbox config whose webhook-ingestion session key this is (see
+    # sandbox/sandbox_session.py). SET NULL when the config is deleted; a null
+    # link means the key carries no sandbox scoping.
+    sandbox_config_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sandbox_configs.id", ondelete="SET NULL"),
         default=None,
         nullable=True,
         index=True,

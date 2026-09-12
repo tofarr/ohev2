@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 
 import pytest
@@ -17,13 +16,14 @@ from tests.unit._auth_helpers import (
     make_sandbox_config as _make_sandbox_config,
 )
 
+from openhands.ev2.auth.auth_models import ApiKey
+from openhands.ev2.auth.auth_tokens import hash_api_key_value
 from openhands.ev2.conversation.conversation_models import Conversation
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.sandbox.sandbox_session import (
     SandboxConversationScopeFilter,
     SandboxEventScopeFilter,
     depends_sandbox_config,
-    hash_session_api_key,
     resolve_sandbox_config_by_session_key,
     sandbox_scope_filter,
 )
@@ -49,14 +49,6 @@ def _conversation(conversation_id: uuid.UUID, sandbox_config_id: uuid.UUID) -> C
     return conversation
 
 
-class TestHashSessionApiKey:
-    def test_deterministic_sha256_hex(self) -> None:
-        assert hash_session_api_key("abc") == hashlib.sha256(b"abc").hexdigest()
-
-    def test_distinct_keys_distinct_hashes(self) -> None:
-        assert hash_session_api_key("a") != hash_session_api_key("b")
-
-
 class TestResolveSandboxConfig:
     async def test_resolves_by_plaintext_key(
         self, session: AsyncSession, principal_id: uuid.UUID
@@ -73,6 +65,31 @@ class TestResolveSandboxConfig:
     ) -> None:
         await _make_sandbox_config(session, creator_id=principal_id)
         assert await resolve_sandbox_config_by_session_key(session, "nope") is None
+
+    async def test_disabled_key_resolves_to_none(
+        self, session: AsyncSession, principal_id: uuid.UUID
+    ) -> None:
+        """Revoking (disabling) the sandbox's ApiKey closes the ingestion path."""
+        await _make_sandbox_config(session, creator_id=principal_id, session_key="k-off")
+        stmt = select(ApiKey).where(ApiKey.key_hash == hash_api_key_value("k-off"))
+        api_key = (await session.execute(stmt)).scalar_one()
+        api_key.enabled = False
+        await session.flush()
+        assert await resolve_sandbox_config_by_session_key(session, "k-off") is None
+
+    async def test_unlinked_key_resolves_to_none(
+        self, session: AsyncSession, principal_id: uuid.UUID
+    ) -> None:
+        """A regular (user-minted) ApiKey without a sandbox link scopes nothing."""
+        session.add(
+            ApiKey(
+                key_hash=hash_api_key_value("k-plain"),
+                prefix="k-plain",
+                creator_id=principal_id,
+            )
+        )
+        await session.flush()
+        assert await resolve_sandbox_config_by_session_key(session, "k-plain") is None
 
 
 class TestDependsSandboxConfig:

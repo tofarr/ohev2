@@ -107,6 +107,10 @@ class ApiKeyRead(BaseModel):
     enabled: bool
     expires_at: datetime | None
     role_id: uuid.UUID | None
+    system: bool = Field(
+        description="True for system-minted keys (e.g. per-sandbox-config session keys)."
+    )
+    sandbox_config_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 

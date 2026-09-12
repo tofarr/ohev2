@@ -32,11 +32,12 @@ from openhands.sdk.workspace import LocalWorkspace
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from openhands.ev2.auth.auth_models import ApiKey
+from openhands.ev2.auth.auth_tokens import hash_api_key_value
 from openhands.ev2.conversation.conversation_models import Conversation
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.role.role_models import UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
-from openhands.ev2.sandbox.sandbox_session import hash_session_api_key
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.scripts.seed_db import seed_db
 from openhands.ev2.user.user_models import User
@@ -104,9 +105,19 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
         creator_id=admin.id,
         sandbox_template_id=template.id,
         session_api_key="encrypted-session-key",
-        session_api_key_hash=hash_session_api_key(SESSION_KEY),
     )
     session.add(config)
+    await session.flush()
+    session.add(
+        ApiKey(
+            key_hash=hash_api_key_value(SESSION_KEY),
+            prefix=SESSION_KEY[:7],
+            creator_id=admin.id,
+            name=f"Sandbox {config.id} API Key",
+            system=True,
+            sandbox_config_id=config.id,
+        )
+    )
     await session.flush()
     await session.commit()
     return admin.id, config.id

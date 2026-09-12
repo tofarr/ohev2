@@ -2,12 +2,14 @@
 
 A running sandbox authenticates to ohev2 with the session API key minted for
 its :class:`SandboxConfig` (sent as the ``X-Session-API-Key`` header, matching
-the legacy agent-server webhook convention). The plaintext key is never
-stored — :class:`SandboxConfig` carries its JWE ciphertext plus a non-secret
-SHA-256 ``session_api_key_hash`` — so the inbound key is looked up by hash
-and resolves to exactly one config. Every mutation is then scoped to the
-conversation(s) whose ``sandbox_config_id`` matches the resolved config: the
-sandbox token is never the creator's user session.
+the legacy agent-server webhook convention). The key is a regular
+:class:`~openhands.ev2.auth.auth_models.ApiKey` row — minted at sandbox-config
+create time with ``system=True`` and linked to the config via
+``sandbox_config_id`` (see :class:`SandboxConfigService`). The presented raw
+key is resolved through the standard ApiKey hash lookup
+(:func:`hash_api_key_value`), never compared in the clear. Every mutation is
+then scoped to the conversation(s) whose ``sandbox_config_id`` matches the
+linked config: the sandbox token is never the creator's user session.
 
 The scope is expressed as ordinary :class:`SearchFilter` instances so the
 conversation/event services enforce it exactly like a role-derived filter
@@ -16,7 +18,6 @@ conversation/event services enforce it exactly like a role-derived filter
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from typing import Annotated, overload
 
@@ -26,6 +27,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from openhands.ev2.auth.auth_models import ApiKey
+from openhands.ev2.auth.auth_tokens import hash_api_key_value
 from openhands.ev2.conversation.conversation_models import Conversation
 from openhands.ev2.db import SessionDep
 from openhands.ev2.event.event_models import Event
@@ -42,25 +45,27 @@ _sandbox_session_scheme = APIKeyHeader(
 )
 
 
-def hash_session_api_key(plaintext_key: str) -> str:
-    """The non-secret SHA-256 lookup hash of a plaintext session API key."""
-    return hashlib.sha256(plaintext_key.encode("utf-8")).hexdigest()
-
-
 async def resolve_sandbox_config_by_session_key(
     session: AsyncSession,
     plaintext_key: str,
 ) -> SandboxConfig | None:
     """Resolve a plaintext session API key to its :class:`SandboxConfig`.
 
-    The lookup is by the indexed SHA-256 hash; ``None`` means the key is
-    unknown (the caller answers 401).
+    The key is a regular :class:`ApiKey` row; resolve it through the standard
+    hash lookup and follow its ``sandbox_config_id`` link. Disabled keys,
+    keys without a linked config, and unknown hashes all resolve to ``None``
+    (the caller answers 401).
     """
-    stmt = select(SandboxConfig).where(
-        SandboxConfig.session_api_key_hash == hash_session_api_key(plaintext_key)
+    key_stmt = select(ApiKey).where(
+        ApiKey.key_hash == hash_api_key_value(plaintext_key),
+        ApiKey.enabled,
+        ApiKey.sandbox_config_id.is_not(None),
     )
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    api_key = (await session.execute(key_stmt)).scalar_one_or_none()
+    if api_key is None:
+        return None
+    config_stmt = select(SandboxConfig).where(SandboxConfig.id == api_key.sandbox_config_id)
+    return (await session.execute(config_stmt)).scalar_one_or_none()
 
 
 async def depends_sandbox_config(

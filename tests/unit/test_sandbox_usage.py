@@ -14,7 +14,6 @@ from tests.unit._auth_helpers import make_principal as _make_principal
 from openhands.ev2.sandbox.docker_sandbox_models import DockerSandbox
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_models import SandboxStatus
-from openhands.ev2.sandbox.sandbox_session import hash_session_api_key
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.sandbox.sandbox_usage_models import SandboxUsage
 from openhands.ev2.sandbox.sandbox_usage_service import SandboxUsageService
@@ -31,7 +30,6 @@ async def _seed_config(session: AsyncSession, *, username: str) -> tuple[uuid.UU
         creator_id=user.id,
         sandbox_template_id=template.id,
         session_api_key="jwe-ciphertext",
-        session_api_key_hash=hash_session_api_key(f"key-{username}"),
     )
     session.add(config)
     await session.flush()

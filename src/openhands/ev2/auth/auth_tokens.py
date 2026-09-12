@@ -112,8 +112,12 @@ def _generate_api_key_value() -> str:
     return _API_KEY_PREFIX + _base52_encode(raw)
 
 
-def _hash_api_key(raw: str) -> str:
-    """SHA-256 hex digest of the raw key value (stored for auth-time lookup)."""
+def hash_api_key_value(raw: str) -> str:
+    """SHA-256 hex digest of the raw key value (stored for auth-time lookup).
+
+    Public so non-auth lookups (e.g. the sandbox-session ingestion path)
+    resolve a presented raw key without duplicating the hash convention.
+    """
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -204,6 +208,8 @@ class TokenService:
         enabled: bool = True,
         expires_at: datetime | None = None,
         role_id: uuid.UUID | None = None,
+        system: bool = False,
+        sandbox_config_id: uuid.UUID | None = None,
     ) -> tuple[str, ApiKey]:
         """Mint a long-lived API key and persist its backing row.
 
@@ -214,16 +220,21 @@ class TokenService:
         are the one credential whose lifetime is *not* IdP-synced: they are
         user-managed service credentials. An optional ``role_id`` restricts the
         key's effective permissions (ANDed with the user's roles at authz time).
+        ``system`` marks a key minted by the system rather than a user action
+        (e.g. a per-sandbox-config session key); ``sandbox_config_id`` links a
+        key to the sandbox config it scopes (webhook ingestion path).
         """
         raw_key = _generate_api_key_value()
         row = ApiKey(
-            key_hash=_hash_api_key(raw_key),
+            key_hash=hash_api_key_value(raw_key),
             prefix=_api_key_display_prefix(raw_key),
             creator_id=user_id,
             name=name,
             enabled=enabled,
             expires_at=expires_at,
             role_id=role_id,
+            system=system,
+            sandbox_config_id=sandbox_config_id,
         )
         self._session.add(row)
         await self._session.flush()
@@ -297,7 +308,7 @@ class TokenService:
         whether the key exists. The token's ``exp`` mirrors the row's
         ``expires_at`` (or ``datetime.max`` for a no-expiry key).
         """
-        row = await self._load_api_key_row(_hash_api_key(raw_key))
+        row = await self._load_api_key_row(hash_api_key_value(raw_key))
         if row is None:
             raise InvalidTokenError("unknown api key")
         now = _now()

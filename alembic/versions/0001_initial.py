@@ -107,6 +107,8 @@ def upgrade() -> None:
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("role_id", sa.Uuid(), nullable=True),
+        sa.Column("system", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("sandbox_config_id", sa.Uuid(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -121,14 +123,24 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
-        # roles is created later in this migration; defer the FK so it is
-        # emitted as a separate ALTER TABLE after roles exists.
+        # roles and sandbox_configs are created later in this migration; defer
+        # the FKs so they are emitted as separate ALTER TABLE statements after
+        # those tables exist.
         sa.ForeignKeyConstraint(["role_id"], ["roles.id"], ondelete="SET NULL", use_alter=True),
+        sa.ForeignKeyConstraint(
+            ["sandbox_config_id"],
+            ["sandbox_configs.id"],
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
         sa.UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
     )
     op.create_index("ix_api_keys_key_hash", "api_keys", ["key_hash"], unique=True)
     op.create_index("ix_api_keys_creator_id", "api_keys", ["creator_id"])
     op.create_index("ix_api_keys_role_id", "api_keys", ["role_id"], unique=False)
+    op.create_index(
+        "ix_api_keys_sandbox_config_id", "api_keys", ["sandbox_config_id"], unique=False
+    )
 
     # ------------------------------------------------------------------ #
     # refresh_tokens
@@ -1181,7 +1193,6 @@ def upgrade() -> None:
         sa.Column("max_memory", sa.BigInteger(), nullable=True),
         sa.Column("exposed_ports", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("env_vars", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("callback_url", sa.String(length=2048), nullable=True),
         sa.Column("working_dir", sa.String(length=1024), nullable=False),
         sa.Column("snapshot_dirs", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("snapshot_on_deactivate", sa.Boolean(), server_default="false", nullable=False),
@@ -1227,7 +1238,6 @@ def upgrade() -> None:
         sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
         sa.Column("session_api_key", sa.String(length=8192), nullable=False),
-        sa.Column("session_api_key_hash", sa.String(length=64), nullable=False),
         sa.Column("enabled", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("sandbox_snapshot_id", sa.Uuid(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -1269,13 +1279,6 @@ def upgrade() -> None:
         ["sandbox_template_id"],
         unique=False,
     )
-    op.create_index(
-        "ix_sandbox_configs_session_api_key_hash",
-        "sandbox_configs",
-        ["session_api_key_hash"],
-        unique=True,
-    )
-
     # ------------------------------------------------------------------ #
     # sandbox_snapshots
     # ------------------------------------------------------------------ #
@@ -1470,7 +1473,6 @@ def downgrade() -> None:
     op.drop_index("ix_sandbox_snapshots_sandbox_template_id", table_name="sandbox_snapshots")
     op.drop_index("ix_sandbox_snapshots_creator_id", table_name="sandbox_snapshots")
     op.drop_table("sandbox_snapshots")
-    op.drop_index("ix_sandbox_configs_session_api_key_hash", table_name="sandbox_configs")
     op.drop_index("ix_sandbox_configs_sandbox_template_id", table_name="sandbox_configs")
     op.drop_index("ix_sandbox_configs_creator_id", table_name="sandbox_configs")
     op.drop_table("sandbox_configs")
@@ -1556,6 +1558,7 @@ def downgrade() -> None:
     op.drop_table("refresh_tokens")
     op.drop_index("ix_api_keys_creator_id", table_name="api_keys")
     op.drop_index("ix_api_keys_key_hash", table_name="api_keys")
+    op.drop_index("ix_api_keys_sandbox_config_id", table_name="api_keys")
     op.drop_table("api_keys")
     op.drop_index("ix_users_idp_user_id", table_name="users")
     op.drop_index("ix_users_username", table_name="users")
