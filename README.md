@@ -417,6 +417,23 @@ as `llm.usage`:
 A `DEFAULT` partition is created by the initial migration so inserts never
 fail before the manager's first sweep (or for out-of-range timestamps).
 
+## Sandbox usage logging
+
+A background poll records one `sandbox_usage` row per sandbox known to the
+configured `SandboxService` each interval (raw, append-only, **not** exposed
+over REST). Each row captures the provider-assigned `sandbox_id` and two
+nullable stat columns, `cpu` and `disk`, which are left `NULL` until the
+provider-neutral `Sandbox` model carries resource stats and the sandbox
+services populate them. Unlike `llm_usage` / `mcp_usage` the table is not
+daily-partitioned — rows are periodic snapshots, not request records.
+
+* `sandbox_usage_interval` (`OHE_SANDBOX_USAGE_INTERVAL`, default `60`):
+  seconds between polls. **Non-zero** runs an `asyncio` loop in the FastAPI
+  lifespan.
+* `sandbox_usage_interval = 0` **disables** the in-process loop; drive
+  recording with an external scheduler listing sandboxes from the configured
+  `SandboxService` and calling `SandboxUsageService.record_usage`.
+
 ## Sandbox lifecycle
 
 Each sandbox carries a nullable `last_accessed_at` timestamp derived from the

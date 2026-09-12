@@ -420,6 +420,17 @@ class AppConfig(BaseModel):
             "'Warm sandboxes'."
         ),
     )
+    sandbox_usage_interval: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds between background sweeps that record a sandbox_usage "
+            "row per sandbox known to the configured SandboxService. When 0 "
+            "the in-process loop is disabled and recording must be driven by "
+            "an external scheduler calling SandboxUsageService.record_usage; "
+            "see README 'Sandbox usage logging'."
+        ),
+    )
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:

@@ -225,6 +225,14 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
   `SandboxStatus` covers the quiescent capture window
   (`inactive -> snapshotting -> inactive`). The shared tar/untar logic
   lives in `util/snapshot_store.py`.
+* **Usage polling.** A background lifespan loop (config
+  `sandbox_usage_interval`, env `OHE_SANDBOX_USAGE_INTERVAL`, default 60s;
+  `= 0` disables with the external-scheduler fallback) lists sandboxes from
+  the configured `SandboxService` and records one `sandbox_usage` row per
+  sandbox via `SandboxUsageService.record_usage`. The table mirrors the
+  llm/mcp usage pattern but is unpartitioned and not exposed over REST;
+  `cpu`/`disk` are nullable floats left NULL until `Sandbox` carries
+  resource stats and the providers populate them.
 
 ## 9. Auth
 
