@@ -8,6 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.role.role_models import Role, UserRole
+from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
+from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.security.security_models import Permission
 from openhands.ev2.user.user_models import User
 from openhands.ev2.user.user_schemas import UserCreate
@@ -56,3 +58,28 @@ async def roles_for(session: AsyncSession, user_id: uuid.UUID) -> list[Role]:
         select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def make_sandbox_config(
+    session: AsyncSession,
+    *,
+    creator_id: uuid.UUID,
+    docker_image_tag: str = "example/agent-server:latest",
+) -> SandboxConfig:
+    """Create a minimal template + sandbox config owned by *creator_id*.
+
+    Writes ORM rows directly so tests for resources that reference
+    ``sandbox_configs`` (e.g. conversations) do not depend on the
+    permission-guarded sandbox APIs or a live provider.
+    """
+    template = SandboxTemplate(creator_id=creator_id, docker_image_tag=docker_image_tag)
+    session.add(template)
+    await session.flush()
+    config = SandboxConfig(
+        creator_id=creator_id,
+        sandbox_template_id=template.id,
+        session_api_key="encrypted-session-key",
+    )
+    session.add(config)
+    await session.flush()
+    return config

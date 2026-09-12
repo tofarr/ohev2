@@ -160,7 +160,9 @@ Seed an admin user (credentials default from `OHE_SEED_ADMIN_*` env vars, or dev
 defaults). Idempotent — re-running upserts the user and ensures the `admin` role
 grants unrestricted access to every resource type. Also seeds a `user` role
 (granting `ApiKeyAccess` on `api_key_permission` so a regular user can manage
-their own API keys) and, by default, a regular user account
+their own API keys, and `ConversationAccess` on `conversation_permission` so
+they can read the conversations backed by the sandbox configs they created)
+and, by default, a regular user account
 (`OHE_SEED_USER_*` env vars):
 
 ```bash

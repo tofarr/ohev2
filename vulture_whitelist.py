@@ -47,12 +47,14 @@ sandbox_template
 session_api_key
 sse_read_timeout
 status_detail
+total_tokens
 total_duration_ms
 transport
 user_overrides
 
 # ---- Role per-entity permission columns (AGENTS.md §11; copied generically) ----
 api_key_permission
+conversation_permission
 cors_origin_permission
 feature_flag_permission
 feature_flag_role_assignment_permission

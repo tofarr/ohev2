@@ -36,6 +36,7 @@ Tables:
 * ``sandbox_configs``        — durable sandbox intent (DB-backed source of truth).
 * ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
 * ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (daily-partitioned, cpu/disk nullable).
+* ``conversations``          — agent conversations backed by sandbox configs.
 """
 
 from __future__ import annotations
@@ -456,6 +457,12 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for group_user resources; null = deny.",
+        ),
+        sa.Column(
+            "conversation_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for conversation resources; null = deny.",
         ),
         sa.Column(
             "created_at",
@@ -1337,8 +1344,76 @@ def upgrade() -> None:
     # day). Created with raw SQL: op.create_table does not emit PARTITION OF.
     op.execute("CREATE TABLE sandbox_usage_default PARTITION OF sandbox_usage DEFAULT")
 
+    # ------------------------------------------------------------------ #
+    # conversations
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "conversations",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("sandbox_config_id", sa.Uuid(), nullable=False),
+        sa.Column("llm_model", sa.Text(), nullable=False),
+        sa.Column("agent_kind", sa.Text(), nullable=False),
+        sa.Column("selected_repository", sa.Text(), nullable=True),
+        sa.Column("selected_branch", sa.Text(), nullable=True),
+        sa.Column("trigger", sa.Text(), nullable=False),
+        sa.Column(
+            "accumulated_cost",
+            sa.Float(),
+            server_default=sa.text("0"),
+            nullable=False,
+            comment="Accumulated cost in USD; updated as events arrive.",
+        ),
+        sa.Column(
+            "prompt_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "completion_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "total_tokens",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["sandbox_config_id"],
+            ["sandbox_configs.id"],
+            ondelete="CASCADE",
+            name="fk_conversations_sandbox_config_id_sandbox_configs",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Agent conversations backed by sandbox configs",
+    )
+    op.create_index(
+        "ix_conversations_sandbox_config_id",
+        "conversations",
+        ["sandbox_config_id"],
+        unique=False,
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_conversations_sandbox_config_id", table_name="conversations")
+    op.drop_table("conversations")
     op.drop_index("ix_sandbox_usage_sandbox_config_id", table_name="sandbox_usage")
     op.drop_index("ix_sandbox_usage_created_at", table_name="sandbox_usage")
     op.drop_table("sandbox_usage")

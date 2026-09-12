@@ -114,6 +114,10 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for group_user resources; null = deny.",
     )
+    conversation_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for conversation resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -218,6 +222,10 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for group_user resources; null = deny.",
     )
+    conversation_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for conversation resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -258,6 +266,7 @@ class RoleRead(BaseModel):
     sandbox_snapshot_permission: Permission | None
     group_permission: Permission | None
     group_user_permission: Permission | None
+    conversation_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 

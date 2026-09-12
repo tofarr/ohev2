@@ -10,6 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
+from openhands.ev2.conversation.conversation_security import (
+    ConversationAccess,
+    ConversationAccessFilter,
+)
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
@@ -164,9 +168,15 @@ class TestSeedDbRegularUser:
         assert isinstance(user_role.sandbox_permission, CreatorPermission)
         assert isinstance(user_role.sandbox_permission.on_match, Permitted)
         assert isinstance(user_role.sandbox_permission.on_create, Permitted)
+        assert isinstance(user_role.conversation_permission, ConversationAccess)
         # Every other entity column is denied (None).
+        granted_cols = (
+            "api_key_permission",
+            "sandbox_permission",
+            "conversation_permission",
+        )
         for col in _ADMIN_COLUMNS:
-            if col in ("api_key_permission", "sandbox_permission"):
+            if col in granted_cols:
                 continue
             assert getattr(user_role, col) is None
         # The regular user is a member of the user role.
@@ -255,6 +265,31 @@ class TestSeedDbRegularUser:
         assert filt.creator_id == uid
         # Anonymous is denied (NoneSearchFilter, not None).
         assert policy.to_search_filter(None, Action.CREATE) is not None
+
+    async def test_user_role_conversation_policy_is_scoped_read_only(
+        self, session: AsyncSession
+    ) -> None:
+        """The seeded user role's ConversationAccess scopes reads to sandbox configs the
+        principal created and denies all writes."""
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+            user_username="joe",
+            user_email="joe@example.com",
+            user_password="pw",
+        )
+        user_role = await _named_role(session, "user")
+        policy = user_role.conversation_permission
+        assert isinstance(policy, ConversationAccess)
+        uid = uuid.uuid4()
+        filt = policy.to_search_filter(uid, Action.READ)
+        assert isinstance(filt, ConversationAccessFilter)
+        assert filt.user_id == uid
+        assert policy.to_search_filter(uid, Action.UPDATE) is not None
+        # Anonymous is denied (NoneSearchFilter, not None).
+        assert policy.to_search_filter(None, Action.READ) is not None
 
 
 async def _admin_role(session: AsyncSession, user_id: uuid.UUID) -> Role:

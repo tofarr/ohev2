@@ -7,11 +7,13 @@ Seeds two roles:
   resource type. Assigned to the seeded admin user.
 * ``user`` — a regular-user role granting :class:`ApiKeyAccess` on
   ``api_key_permission`` so a non-admin user can manage their own API keys
-  (create/read/update/delete keys scoped to their own ``user_id``), and a
-  :class:`CreatorPermission` on ``sandbox_permission`` granting full access to
-  the sandbox configs the user created plus create permission
-  (``on_match=Permitted``, ``on_create=Permitted``). All other entity columns
-  are ``NULL`` (deny). Assigned to the optional seeded regular user.
+  (scoped to their own ``user_id``), a :class:`CreatorPermission` on
+  ``sandbox_permission`` granting full access to the sandbox configs the user
+  created plus create permission (``on_match=Permitted``,
+  ``on_create=Permitted``), and :class:`ConversationAccess` on
+  ``conversation_permission`` so they can search/read conversations backed by
+  sandbox configs they created. All other entity columns are ``NULL`` (deny).
+  Assigned to the optional seeded regular user.
 
 Also seeds a default :class:`Group` and adds every seeded user (the admin and,
 when provided, the regular user) to it.
@@ -59,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess
 from openhands.ev2.config import get_config
+from openhands.ev2.conversation.conversation_security import ConversationAccess
 from openhands.ev2.db import create_engine, create_session_factory
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
@@ -145,11 +148,12 @@ def _is_valid_email(email: str) -> bool:
 def _user_role_permissions() -> dict[str, Permission | None]:
     """Per-entity ``Permission`` columns for the regular-user role.
 
-    Sets ``api_key_permission`` to :class:`ApiKeyAccess` so a regular user can
-    manage their own API keys, and ``sandbox_permission`` to a
-    :class:`CreatorPermission` granting full access to the sandbox configs the
-    user created and allowing them to create new ones (``on_match=Permitted``,
-    ``on_create=Permitted``). Every other governed entity stays ``None`` (deny).
+    Sets ``api_key_permission`` to :class:`ApiKeyAccess`, ``sandbox_permission``
+    to a :class:`CreatorPermission` granting full access to the sandbox
+    configs the user created (``on_match=Permitted``, ``on_create=Permitted``),
+    and ``conversation_permission`` to :class:`ConversationAccess`
+    (search/read conversations backed by sandbox configs the user created).
+    Every other governed entity stays ``None`` (deny).
     """
     return {
         "api_key_permission": ApiKeyAccess(),
@@ -157,6 +161,7 @@ def _user_role_permissions() -> dict[str, Permission | None]:
             on_match=Permitted(),
             on_create=Permitted(),
         ),
+        "conversation_permission": ConversationAccess(),
     }
 
 
@@ -513,11 +518,12 @@ async def _ensure_admin_role(session: AsyncSession, user: User) -> None:
 
 
 async def _ensure_user_role(session: AsyncSession) -> Role:
-    """Upsert the regular-user role (ApiKeyAccess on api_key_permission).
+    """Upsert the regular-user role (ApiKeyAccess + ConversationAccess).
 
-    The ``api_key_permission`` column is set to :class:`ApiKeyAccess`; every
-    other governed entity stays ``None`` (deny). Re-running refreshes the
-    ``api_key_permission`` column if it was changed.
+    ``api_key_permission`` is set to :class:`ApiKeyAccess` and
+    ``conversation_permission`` to :class:`ConversationAccess`; every other
+    governed entity stays ``None`` (deny). Re-running refreshes both columns
+    if they were changed.
     """
     return await _upsert_role(session, _USER_ROLE_NAME, _user_role_permissions())
 

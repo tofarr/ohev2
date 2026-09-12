@@ -21,6 +21,7 @@ from openhands.ev2.auth.auth_discovery import router as auth_discovery_router
 from openhands.ev2.auth.auth_router import clients_router as auth_clients_router
 from openhands.ev2.auth.auth_router import router as auth_router
 from openhands.ev2.config import get_config
+from openhands.ev2.conversation.conversation_router import router as conversation_router
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
@@ -347,6 +348,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "Role-to-user assignments (link table governed by its own permission).",
     },
     {"name": "api-keys", "description": "API keys for programmatic access."},
+    {
+        "name": "conversations",
+        "description": "Agent conversations backed by sandbox configs.",
+    },
     {"name": "cors-origins", "description": "CORS allow-list origins."},
     {"name": "secrets", "description": "Secrets and role/user secret-access grants."},
     {
@@ -396,6 +401,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_clients_router)
     app.include_router(auth_discovery_router)
     app.include_router(api_key_router)
+    app.include_router(conversation_router)
     app.include_router(cors_router)
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)
