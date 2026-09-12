@@ -248,6 +248,51 @@ async def _warm_sandbox_loop() -> None:
     await _background_sweep(interval, "sandbox warm refresh", _sweep_warm_sandboxes)
 
 
+async def _sweep_sandbox_usage() -> str | None:
+    """Record one ``sandbox_usage`` row per sandbox and return a summary."""
+    from openhands.ev2.sandbox.sandbox_usage_service import SandboxUsageService
+
+    sandbox_service = get_config().get_sandbox_service()
+    sandboxes = await sandbox_service.list_sandboxes()
+    factory = get_session_factory()
+    async with factory() as session:
+        count = await SandboxUsageService(session).record_usage(sandboxes)
+    return f"recorded {count} sandbox usage rows" if count else None
+
+
+async def _sandbox_usage_loop() -> None:
+    """Background sweep that records per-sandbox usage snapshots."""
+    cfg = get_config()
+    interval = cfg.sandbox_usage_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "sandbox usage", _sweep_sandbox_usage)
+
+
+async def _sweep_sandbox_partitions() -> str | None:
+    """Manage daily ``sandbox_usage`` partitions and return a summary message."""
+    from openhands.ev2.sandbox.sandbox_usage_service import SandboxUsageService
+
+    cfg = get_config()
+    factory = get_session_factory()
+    async with factory() as session:
+        service = SandboxUsageService(session)
+        created, dropped = await service.ensure_partitions(
+            preallocate_days=cfg.sandbox_usage_preallocate_days,
+            retention_days=cfg.sandbox_usage_retention_days,
+        )
+    return _partition_message(created, dropped)
+
+
+async def _sandbox_usage_partition_loop() -> None:
+    """Background sweep that manages daily ``sandbox_usage`` partitions."""
+    cfg = get_config()
+    interval = cfg.sandbox_usage_partition_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "sandbox_usage partition manager", _sweep_sandbox_partitions)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
@@ -265,6 +310,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
         asyncio.create_task(_acl_prune_loop(), name="acl-prune"),
         asyncio.create_task(_warm_sandbox_loop(), name="sandbox-warm-refresh"),
+        asyncio.create_task(_sandbox_usage_loop(), name="sandbox-usage"),
+        asyncio.create_task(_sandbox_usage_partition_loop(), name="sandbox-usage-partition"),
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()

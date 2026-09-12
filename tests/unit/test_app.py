@@ -15,11 +15,15 @@ from openhands.ev2.app import (
     _mcp_usage_aggregate_loop,
     _mcp_usage_partition_loop,
     _partition_message,
+    _sandbox_usage_loop,
+    _sandbox_usage_partition_loop,
     _sweep_expired_tokens,
     _sweep_llm_aggregate,
     _sweep_llm_partitions,
     _sweep_mcp_aggregate,
     _sweep_mcp_partitions,
+    _sweep_sandbox_partitions,
+    _sweep_sandbox_usage,
     create_app,
     lifespan,
 )
@@ -440,6 +444,167 @@ class TestSweepFunctions:
             result = await _sweep_mcp_aggregate()
             assert result is None
 
+    async def test_sweep_sandbox_usage(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.sandbox.sandbox_usage_service.SandboxUsageService"
+            ) as mock_service_cls,
+        ):
+            mock_sandbox_service = AsyncMock()
+            mock_sandbox_service.list_sandboxes.return_value = [object(), object(), object()]
+            mock_cfg.return_value.get_sandbox_service.return_value = mock_sandbox_service
+
+            mock_service = AsyncMock()
+            mock_service.record_usage.return_value = 3
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_sandbox_usage()
+            assert result is not None
+            assert "3" in result
+            mock_service.record_usage.assert_awaited_once()
+
+    async def test_sweep_sandbox_usage_none(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.sandbox.sandbox_usage_service.SandboxUsageService"
+            ) as mock_service_cls,
+        ):
+            mock_sandbox_service = AsyncMock()
+            mock_sandbox_service.list_sandboxes.return_value = []
+            mock_cfg.return_value.get_sandbox_service.return_value = mock_sandbox_service
+
+            mock_service = AsyncMock()
+            mock_service.record_usage.return_value = 0
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_sandbox_usage()
+            assert result is None
+
+    async def test_sweep_sandbox_partitions(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.sandbox.sandbox_usage_service.SandboxUsageService"
+            ) as mock_service_cls,
+        ):
+            mock_cfg.return_value.sandbox_usage_preallocate_days = 3
+            mock_cfg.return_value.sandbox_usage_retention_days = 30
+
+            mock_service = AsyncMock()
+            mock_service.ensure_partitions.return_value = (["p1", "p2"], ["old"])
+            mock_service_cls.return_value = mock_service
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_sandbox_partitions()
+            assert result is not None
+            assert "2" in result and "1" in result
+
+
+class TestSandboxUsageLoop:
+    async def test_interval_zero_returns_immediately(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.sandbox_usage_interval = 0
+            await _sandbox_usage_loop()
+
+    async def test_sweep_records_usage(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.sandbox_usage_interval = 0.01
+            mock_sandbox_service = AsyncMock()
+            mock_sandbox_service.list_sandboxes.return_value = [object(), object()]
+            mock_cfg.return_value.get_sandbox_service.return_value = mock_sandbox_service
+
+            class FakeService:
+                def __init__(self, session):
+                    pass
+
+                async def record_usage(self, sandboxes):
+                    return len(list(sandboxes))
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            with patch(
+                "openhands.ev2.sandbox.sandbox_usage_service.SandboxUsageService", FakeService
+            ):
+                task = asyncio.create_task(_sandbox_usage_loop())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            mock_sandbox_service.list_sandboxes.assert_awaited()
+
+    async def test_sweep_logs_exception_and_continues(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.sandbox_usage_interval = 0.01
+            mock_cfg.return_value.get_sandbox_service.side_effect = RuntimeError("no provider")
+
+            task = asyncio.create_task(_sandbox_usage_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+class TestSandboxUsagePartitionLoop:
+    async def test_interval_zero_returns_immediately(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.sandbox_usage_partition_interval = 0
+            await _sandbox_usage_partition_loop()
+
+    async def test_sweep_manages_partitions(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.sandbox_usage_partition_interval = 0.01
+            mock_cfg.return_value.sandbox_usage_preallocate_days = 2
+            mock_cfg.return_value.sandbox_usage_retention_days = 30
+
+            class FakeService:
+                def __init__(self, session):
+                    pass
+
+                async def ensure_partitions(self, *, preallocate_days, retention_days):
+                    return (["sandbox_usage_20990101"], [])
+
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            with patch(
+                "openhands.ev2.sandbox.sandbox_usage_service.SandboxUsageService", FakeService
+            ):
+                task = asyncio.create_task(_sandbox_usage_partition_loop())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
 
 class TestPartitionMessage:
     def test_both_created_and_dropped(self) -> None:
@@ -486,6 +651,7 @@ class TestLifespan:
         monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
         monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
         monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
+        monkeypatch.setenv("OHE_SANDBOX_USAGE_INTERVAL", "0")
 
         app = FastAPI()
         async with lifespan(app):

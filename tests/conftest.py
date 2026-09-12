@@ -65,6 +65,7 @@ from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig  # noqa: F401
 from openhands.ev2.sandbox.sandbox_snapshot_models import SandboxSnapshot  # noqa: F401
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate  # noqa: F401
+from openhands.ev2.sandbox.sandbox_usage_models import SandboxUsage  # noqa: F401
 from openhands.ev2.secret.sql_secrets_models import (  # noqa: F401
     SqlSecret,
 )
@@ -97,6 +98,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.sandbox.sandbox_config_models
     import openhands.ev2.sandbox.sandbox_snapshot_models
     import openhands.ev2.sandbox.sandbox_template_models
+    import openhands.ev2.sandbox.sandbox_usage_models
     import openhands.ev2.secret.sql_secrets_models
     import openhands.ev2.user.user_models  # noqa: F401
     from openhands.ev2.db import Base
@@ -118,6 +120,12 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
                     text(
                         "CREATE TABLE IF NOT EXISTS mcp_usage_default "
                         "PARTITION OF mcp_usage DEFAULT"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS sandbox_usage_default "
+                        "PARTITION OF sandbox_usage DEFAULT"
                     )
                 )
         finally:

@@ -25,7 +25,9 @@ cache_read_tokens
 cache_write_tokens
 completion_tokens
 context_window
+cpu
 cwd
+disk
 email_verified
 feature_flag
 icon

@@ -177,7 +177,7 @@ class LlmUsageService:
         created: list[str] = []
         # Allocate today + the next ``preallocate_days - 1`` days.
         for offset in range(preallocate_days):
-            day = (now - timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+            day = (now + timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
             name = await self._ensure_partition(day)
             if name is not None:
                 created.append(name)

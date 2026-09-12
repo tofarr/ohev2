@@ -225,6 +225,26 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
   `SandboxStatus` covers the quiescent capture window
   (`inactive -> snapshotting -> inactive`). The shared tar/untar logic
   lives in `util/snapshot_store.py`.
+* **Usage polling.** A background lifespan loop (config
+  `sandbox_usage_interval`, env `OHE_SANDBOX_USAGE_INTERVAL`, default 60s;
+  `= 0` disables with the external-scheduler fallback) lists sandboxes from
+  the configured `SandboxService` and records one `sandbox_usage` row per
+  claimed sandbox via `SandboxUsageService.record_usage`. Rows are keyed by
+  `sandbox_config_id` (FK `ON DELETE RESTRICT` — a config with usage rows
+  cannot be deleted; usage history outlives the sandbox) — the DB-backed
+  config, not the provider sandbox id — so usage associates with the owning
+  user and their groups through `sandbox_configs`; unclaimed warm-pool
+  sandboxes are skipped. The table mirrors the llm/mcp usage pattern: it is
+  range-partitioned by day on `created_at` (with a `DEFAULT` partition) and
+  managed by a second lifespan loop (config `sandbox_usage_partition_interval`,
+  env `OHE_SANDBOX_USAGE_PARTITION_INTERVAL`, default 300s) calling
+  `SandboxUsageService.ensure_partitions`, which pre-creates
+  `sandbox_usage_preallocate_days` (default 7) future daily partitions and
+  drops partitions older than `sandbox_usage_retention_days` (default 365).
+  Unlike llm/mcp there is no aggregated projection / aggregator loop, and
+  the table is not exposed over REST; `cpu`/`disk` are nullable floats left
+  NULL until `Sandbox` carries resource stats and the providers populate
+  them.
 
 ## 9. Auth
 
