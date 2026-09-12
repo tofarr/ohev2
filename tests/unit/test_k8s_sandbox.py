@@ -912,7 +912,7 @@ def test_sync_create_sandbox_creates_objects() -> None:
             desired_status=SandboxStatus.INACTIVE,
         )
     )
-    assert sandbox_id.startswith("sandbox-")
+    assert len(sandbox_id) == 22 and sandbox_id.islower() and sandbox_id.isalnum()
     dep = fake.apps.deployments[sandbox_id]
     assert dep.spec.replicas == 1
     container = dep.spec.template.spec.containers[0]
@@ -948,6 +948,43 @@ def test_sync_create_sandbox_applies_memory_limit() -> None:
     container = fake.apps.deployments[sandbox_id].spec.template.spec.containers[0]
     assert container.resources is not None
     assert container.resources.limits == {"memory": "536870912"}
+
+
+def test_sync_create_sandbox_mints_random_session_api_key() -> None:
+    fake = _FakeKube()
+    _add_template_cm(fake, "img:1")
+    service = _make_k8s_service(fake)
+    sandbox_id = service._sync_create_sandbox(
+        K8sSandbox(
+            sandbox_template_id="img:1",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    container = fake.apps.deployments[sandbox_id].spec.template.spec.containers[0]
+    env = {e.name: e.value for e in container.env}
+    key = env["SESSION_API_KEY"]
+    # Minted randomly per sandbox, never the old "changeme".
+    assert key != "changeme"
+    assert len(key) == 22 and key.islower() and key.isalnum()
+
+
+def test_build_env_preserves_template_session_api_key() -> None:
+    from openhands.ev2.sandbox.k8s_sandbox_service import _K8sTemplateSpec
+
+    spec = _K8sTemplateSpec(
+        id="img:1",
+        command=None,
+        initial_env={"SESSION_API_KEY": "preset-key"},
+        working_dir="/work",
+        idle_pause_seconds=None,
+        paused_delete_seconds=None,
+        max_age_seconds=None,
+        max_memory=None,
+    )
+    env = {e.name: e.value for e in K8sSandboxService._build_env(spec)}
+    # A template-supplied key is preserved, not overwritten with a random one.
+    assert env["SESSION_API_KEY"] == "preset-key"
 
 
 def test_sync_update_sandbox_scales_down() -> None:
@@ -1030,7 +1067,7 @@ async def test_async_create_and_get_sandbox() -> None:
     sandbox = await service.create_sandbox(
         SandboxCreate(sandbox_template_id="img:1", sandbox_config_id="cfg-1")
     )
-    assert sandbox.id.startswith("sandbox-")
+    assert len(sandbox.id) == 22 and sandbox.id.islower() and sandbox.id.isalnum()
     fetched = await service.get_sandbox(sandbox.id)
     assert fetched.id == sandbox.id
 

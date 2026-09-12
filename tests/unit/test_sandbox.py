@@ -251,8 +251,11 @@ def test_docker_status_to_sandbox_status_edge_cases() -> None:
 def test_generate_sandbox_id_is_unique() -> None:
     ids = {_generate_sandbox_id() for _ in range(100)}
     assert len(ids) == 100
-    # UUIDs contain dashes, not underscores, so OHE_ name splitting is safe.
-    assert all("-" in s and "_" not in s for s in ids)
+    # 22-char lowercase alphanumeric ids contain no ``_`` (the OHE_ name
+    # separator) and no ``-`` (the K8s derived-name separator), so both name
+    # grammars split unambiguously.
+    assert all(len(s) == 22 and s.islower() and s.isalnum() for s in ids)
+    assert all("-" not in s and "_" not in s for s in ids)
 
 
 # --------------------------------------------------------------------------- #
@@ -1606,6 +1609,7 @@ class _FakeContainerWarm:
         self._paused = False
         self._unpaused = False
         self._removed = False
+        self.environment: dict[str, str] = {}
 
     def reload(self) -> None:
         pass
@@ -1682,6 +1686,7 @@ class _FakeContainersWarm:
             "NetworkSettings": {"Ports": ports or {}},
         }
         container = _FakeContainerWarm(attrs)
+        container.environment = environment or {}
         self._containers[name] = container
         self._created.append(container)
         return container
@@ -1726,6 +1731,10 @@ def test_sync_create_warm_creates_paused_container() -> None:
     assert c._paused
     parsed = _parse_ohe_name(c.attrs["Name"].lstrip("/"))
     assert parsed is not None and parsed[1] is None
+    # SESSION_API_KEY is minted randomly per sandbox, never the old "changeme".
+    key = c.environment["SESSION_API_KEY"]
+    assert key != "changeme"
+    assert len(key) == 22 and key.islower() and key.isalnum()
 
 
 def test_sync_count_warm_counts_unclaimed() -> None:
