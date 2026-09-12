@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 
+from openhands.ev2.secret.secret_security import SecretValueAccess
 from openhands.ev2.security.security_models import (
     AclPermission,
     Action,
@@ -49,3 +50,12 @@ class TestSecretPermissionReduction:
         policy = AclPermission(item_ids=[uuid.uuid4()], on_match=Permitted())
         filt = policy.to_search_filter(uuid.uuid4(), Action.CREATE)
         assert isinstance(filt, NoneSearchFilter)
+
+
+class TestSecretValueAccess:
+    """The value-reveal policy reduces every action to the read-grant shape."""
+
+    def test_every_action_yields_all_filter(self) -> None:
+        policy = SecretValueAccess()
+        for action in (Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH, Action.CREATE):
+            assert isinstance(policy.to_search_filter(uuid.uuid4(), action), AllSearchFilter)

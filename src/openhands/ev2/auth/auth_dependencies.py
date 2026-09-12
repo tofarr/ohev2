@@ -520,9 +520,12 @@ async def _stream_roles(session: AsyncSession, user_id: uuid.UUID) -> AsyncItera
 # Permissions (policy-based search filter).
 # ---------------------------------------------------------------------- #
 
-# Maps a resource's ORM model class to the per-entity ``Permission`` column name
+# Maps a resource's model class to the per-entity ``Permission`` column name
 # on :class:`Role` that governs it (e.g. ``"user_permission"``,
-# ``"api_key_permission"``). Resources without an entry default to deny. New
+# ``"api_key_permission"``). The model is a lookup token: for DB-backed
+# resources it is the ORM class; for provider-backed resources (secrets) it is
+# the provider-neutral Pydantic model the service surface exchanges. Resources
+# without an entry default to deny. New
 # resources register here (or call ``register_resource_policy``) — and add a
 # matching column to :class:`Role` (see AGENTS.md §11) — so
 # depends_permissions can find their policy without editing the function body.
@@ -532,7 +535,9 @@ _RESOURCE_POLICY: dict[type, str] = {}
 def register_resource_policy(model: type, column: str) -> None:
     """Register the Role ``Permission`` column name that governs *model*.
 
-    Resources register their ORM model class against the per-entity ``Permission``
+    Resources register their model class — the ORM class for DB-backed
+    resources, the provider-neutral Pydantic model for provider-backed ones —
+    against the per-entity ``Permission``
     column on :class:`Role` (e.g. ``"user_permission"``, ``"api_key_permission"``).
     Adding a governed entity is a two-step change: add the column to
     :class:`Role` (and ``ROLE_ENTITY_COLUMNS``) and register it here. See

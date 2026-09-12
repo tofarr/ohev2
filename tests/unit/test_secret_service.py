@@ -1,23 +1,27 @@
-"""Unit tests for the SecretService and SecretValueService (DB-backed)."""
+"""Unit tests for the SecretsService ABC and its default SqlSecretsService.
+
+The service is app-scoped and provider-neutral: tests construct
+``SqlSecretsService()`` directly and pass permission filters per call. DB
+access goes through ``get_session_factory()``, which the ``engine`` fixture
+binds to the per-test savepoint transaction.
+"""
 
 from __future__ import annotations
 
 import uuid
 
 import pytest
+import pytest_asyncio
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import (
-    Secret,
-    SecretType,
-    StaticSecretDetail,
-)
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
+    SecretBatchOp,
     SecretBatchUpdate,
     SecretCreate,
     SecretRead,
@@ -28,14 +32,14 @@ from openhands.ev2.secret.secret_service import (
     SecretCodeConflictError,
     SecretNotFoundError,
     SecretPermissionScopeError,
-    SecretService,
     SecretValueNotFoundError,
-    SecretValueService,
-    SecretValueTypeError,
+    resolve_secrets_service_class,
 )
+from openhands.ev2.secret.sql_secrets_models import SqlSecret, SqlSecretDetail
+from openhands.ev2.secret.sql_secrets_service import SqlSecretsService
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.user.user_models import User
-from openhands.ev2.util.search_filter import AllSearchFilter, NoneSearchFilter
+from openhands.ev2.util.search_filter import ALL, NONE, SearchFilter
 
 
 @pytest.fixture
@@ -43,9 +47,16 @@ def enc() -> EncryptionService:
     return get_encryption_service()
 
 
-@pytest.fixture
-def service(session: AsyncSession, enc: EncryptionService) -> SecretService:
-    return SecretService(session, AllSearchFilter[Secret](), encryption_service=enc)
+@pytest_asyncio.fixture
+async def service(session: AsyncSession) -> SqlSecretsService:
+    """The default SQL-backed service, bound to the per-test savepoint harness.
+
+    The service manages its own sessions via ``get_session_factory()``; the
+    ``session`` fixture dependency ensures the test env + savepoint
+    transaction are in place even for tests that never touch ``session``
+    directly.
+    """
+    return SqlSecretsService()
 
 
 async def _seed_user(session: AsyncSession, *, n: int = 0) -> User:
@@ -55,177 +66,238 @@ async def _seed_user(session: AsyncSession, *, n: int = 0) -> User:
     return user
 
 
-async def _static_detail(session: AsyncSession, secret_id: uuid.UUID) -> StaticSecretDetail | None:
+async def _detail(session: AsyncSession, secret_id: uuid.UUID) -> SqlSecretDetail | None:
+    # populate_existing: the service writes through its own session, so this
+    # session's identity map may hold a stale copy of the detail row.
     result = await session.execute(
-        select(StaticSecretDetail).where(StaticSecretDetail.secret_id == secret_id)
+        select(SqlSecretDetail)
+        .where(SqlSecretDetail.secret_id == secret_id)
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
 
 class TestCreate:
     async def test_create_encrypts_value(
-        self, service: SecretService, session: AsyncSession, enc: EncryptionService
+        self, service: SqlSecretsService, session: AsyncSession, enc: EncryptionService
     ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="API_KEY", value=SecretStr("hunter2")),
             creator_id=user.id,
         )
         assert secret.code == "API_KEY"
-        assert secret.type == SecretType.STATIC
         # The persisted ciphertext lives in the detail row, never on the secret.
-        detail = await _static_detail(session, secret.id)
+        detail = await _detail(session, secret.id)
         assert detail is not None
         assert detail.value != "hunter2"
         assert enc.decrypt_value(detail.value) == "hunter2"
         assert secret.creator_id == user.id
 
     async def test_create_duplicate_code_conflicts(
-        self, service: SecretService, session: AsyncSession
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        await service.create(SecretCreate(code="DUP", value=SecretStr("v")), creator_id=user.id)
+        await service.create_secret(
+            SecretCreate(code="DUP", value=SecretStr("v")), creator_id=user.id
+        )
         with pytest.raises(SecretCodeConflictError):
-            await service.create(
+            await service.create_secret(
                 SecretCreate(code="DUP", value=SecretStr("v2")), creator_id=user.id
             )
 
-    async def test_create_scope_denied(self, session: AsyncSession, enc: EncryptionService) -> None:
+    async def test_create_scope_denied(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
         user = await _seed_user(session)
-        svc = SecretService(session, NoneSearchFilter[Secret](), encryption_service=enc)
         with pytest.raises(SecretPermissionScopeError):
-            await svc.create(SecretCreate(code="X", value=SecretStr("v")), creator_id=user.id)
+            await service.create_secret(
+                SecretCreate(code="X", value=SecretStr("v")),
+                creator_id=user.id,
+                perm_filter=NONE,
+            )
 
 
 class TestRead:
-    async def test_get_returns_secret(self, service: SecretService, session: AsyncSession) -> None:
-        user = await _seed_user(session)
-        secret = await service.create(
-            SecretCreate(code="G", value=SecretStr("plain")), creator_id=user.id
-        )
-        fetched = await service.get(secret.id)
-        assert fetched.id == secret.id
-
-    async def test_get_missing_raises(self, service: SecretService) -> None:
-        with pytest.raises(SecretNotFoundError):
-            await service.get(uuid.uuid4())
-
-    async def test_get_out_of_scope_raises(
-        self, session: AsyncSession, enc: EncryptionService
+    async def test_get_returns_secret(
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        admin = SecretService(session, AllSearchFilter[Secret](), encryption_service=enc)
-        secret = await admin.create(
+        secret = await service.create_secret(
+            SecretCreate(code="G", value=SecretStr("plain")), creator_id=user.id
+        )
+        fetched = await service.get_secret(secret.id)
+        assert fetched.id == secret.id
+
+    async def test_get_missing_raises(self, service: SqlSecretsService) -> None:
+        with pytest.raises(SecretNotFoundError):
+            await service.get_secret(uuid.uuid4())
+
+    async def test_get_out_of_scope_raises(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
+        user = await _seed_user(session)
+        secret = await service.create_secret(
             SecretCreate(code="OOS", value=SecretStr("v")), creator_id=user.id
         )
-        scoped = SecretService(session, NoneSearchFilter[Secret](), encryption_service=enc)
         with pytest.raises(SecretNotFoundError):
-            await scoped.get(secret.id)
+            await service.get_secret(secret.id, perm_filter=NONE)
 
-    async def test_to_read_omits_value(self, service: SecretService, session: AsyncSession) -> None:
+    async def test_get_secrets_positional(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        a = await service.create_secret(
+            SecretCreate(code="P_A", value=SecretStr("a")), creator_id=user.id
+        )
+        results = await service.get_secrets([a.id, uuid.uuid4()])
+        assert results[0] is not None and results[0].code == "P_A"
+        assert results[1] is None
+        assert await service.get_secrets([]) == []
+
+    async def test_secret_read_omits_value(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
+        user = await _seed_user(session)
+        secret = await service.create_secret(
             SecretCreate(code="R", value=SecretStr("reveal-me")), creator_id=user.id
         )
-        read = service.to_read(secret)
+        read = SecretRead.model_validate(secret)
         assert read.code == "R"
-        assert read.type == SecretType.STATIC
         # SecretRead must not carry a value field at all.
         assert "value" not in SecretRead.model_fields
 
 
 class TestUpdate:
     async def test_update_value_re_encrypts(
-        self, service: SecretService, session: AsyncSession, enc: EncryptionService
+        self, service: SqlSecretsService, session: AsyncSession, enc: EncryptionService
     ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="U", value=SecretStr("old")), creator_id=user.id
         )
-        detail = await _static_detail(session, secret.id)
+        detail = await _detail(session, secret.id)
         assert detail is not None
         old_cipher = detail.value
-        await service.update(secret.id, SecretUpdate(value=SecretStr("new")))
-        refreshed = await _static_detail(session, secret.id)
+        await service.update_secret(secret.id, SecretUpdate(value=SecretStr("new")))
+        refreshed = await _detail(session, secret.id)
         assert refreshed is not None
         assert refreshed.value != old_cipher
         assert enc.decrypt_value(refreshed.value) == "new"
 
     async def test_update_code_conflict(
-        self, service: SecretService, session: AsyncSession
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        await service.create(SecretCreate(code="KEEP", value=SecretStr("v")), creator_id=user.id)
-        other = await service.create(
+        await service.create_secret(
+            SecretCreate(code="KEEP", value=SecretStr("v")), creator_id=user.id
+        )
+        other = await service.create_secret(
             SecretCreate(code="ORIG", value=SecretStr("v")), creator_id=user.id
         )
         with pytest.raises(SecretCodeConflictError):
-            await service.update(other.id, SecretUpdate(code="KEEP"))
+            await service.update_secret(other.id, SecretUpdate(code="KEEP"))
 
-    async def test_update_missing_raises(self, service: SecretService) -> None:
+    async def test_update_missing_raises(self, service: SqlSecretsService) -> None:
         with pytest.raises(SecretNotFoundError):
-            await service.update(uuid.uuid4(), SecretUpdate(code="x"))
+            await service.update_secret(uuid.uuid4(), SecretUpdate(code="x"))
 
-    async def test_update_value_on_oauth_raises_type_error(
-        self, service: SecretService, session: AsyncSession
+    async def test_update_value_recreates_missing_detail(
+        self, service: SqlSecretsService, session: AsyncSession, enc: EncryptionService
     ) -> None:
-        secret = Secret(code="OAUTH_SECRET", type="oauth")  # type: ignore[arg-type]
-        session.add(secret)
+        """A secret whose detail row vanished gets a fresh one on value update."""
+        user = await _seed_user(session)
+        secret = await service.create_secret(
+            SecretCreate(code="READD", value=SecretStr("v")), creator_id=user.id
+        )
+        detail = await _detail(session, secret.id)
+        assert detail is not None
+        await session.delete(detail)
         await session.flush()
-        with pytest.raises(SecretValueTypeError):
-            await service.update(secret.id, SecretUpdate(value=SecretStr("v")))
+        await service.update_secret(secret.id, SecretUpdate(value=SecretStr("v2")))
+        recreated = await _detail(session, secret.id)
+        assert recreated is not None
+        assert enc.decrypt_value(recreated.value) == "v2"
 
 
 class TestDelete:
-    async def test_delete_removes(self, service: SecretService, session: AsyncSession) -> None:
+    async def test_delete_removes(self, service: SqlSecretsService, session: AsyncSession) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="DEL", value=SecretStr("v")), creator_id=user.id
         )
-        await service.delete(secret.id)
+        await service.delete_secret(secret.id)
         with pytest.raises(SecretNotFoundError):
-            await service.get(secret.id)
+            await service.get_secret(secret.id)
 
-    async def test_delete_missing_raises(self, service: SecretService) -> None:
+    async def test_delete_missing_raises(self, service: SqlSecretsService) -> None:
         with pytest.raises(SecretNotFoundError):
-            await service.delete(uuid.uuid4())
+            await service.delete_secret(uuid.uuid4())
+
+
+def _all_actions() -> dict[Action, SearchFilter[Secret]]:
+    """Grant filters for every batch action."""
+    return dict.fromkeys((Action.CREATE, Action.UPDATE, Action.DELETE), ALL)
 
 
 class TestBatch:
-    async def test_batch_mixed_ops(
-        self, service: SecretService, session: AsyncSession, enc: EncryptionService
-    ) -> None:
+    async def test_batch_mixed_ops(self, service: SqlSecretsService, session: AsyncSession) -> None:
         user = await _seed_user(session)
-        created = await service.create(
+        created = await service.create_secret(
             SecretCreate(code="B1", value=SecretStr("v")), creator_id=user.id
         )
-        ops = [
+        ops: list[SecretBatchOp] = [
             SecretBatchCreate(data=SecretCreate(code="B2", value=SecretStr("v2"))),
             SecretBatchUpdate(id=created.id, data=SecretUpdate(description="updated")),
             SecretBatchDelete(id=created.id),
         ]
-        filters = {
-            a: AllSearchFilter[Secret]() for a in (Action.CREATE, Action.UPDATE, Action.DELETE)
-        }
+        filters = _all_actions()
         results = await service.apply_batch(ops, filters, creator_id=user.id)
         assert results[0] is not None and results[0].code == "B2"
         assert results[1] is not None and results[1].description == "updated"
         assert results[2] is None
 
     async def test_batch_denied_when_action_filter_none(
-        self, service: SecretService, session: AsyncSession
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        ops = [SecretBatchCreate(data=SecretCreate(code="BD", value=SecretStr("v")))]
+        ops: list[SecretBatchOp] = [
+            SecretBatchCreate(data=SecretCreate(code="BD", value=SecretStr("v")))
+        ]
+        filters: dict[Action, SearchFilter[Secret] | None] = {Action.CREATE: None}
         with pytest.raises(BatchPermissionDeniedError):
-            await service.apply_batch(ops, {Action.CREATE: None}, creator_id=user.id)
+            await service.apply_batch(ops, filters, creator_id=user.id)
+
+    async def test_batch_rolls_back_on_failure(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
+        """A failing op rolls back the whole batch (atomic, no partial application)."""
+        user = await _seed_user(session)
+        existing = await service.create_secret(
+            SecretCreate(code="TAKEN", value=SecretStr("v")), creator_id=user.id
+        )
+        ops: list[SecretBatchOp] = [
+            SecretBatchCreate(data=SecretCreate(code="FIRST", value=SecretStr("v"))),
+            SecretBatchCreate(data=SecretCreate(code="TAKEN", value=SecretStr("v"))),
+        ]
+        with pytest.raises(SecretCodeConflictError):
+            await service.apply_batch(ops, _all_actions(), creator_id=user.id)
+        # The first op in the batch must not survive the second op's failure.
+        codes = {s.code for s in await service.list_secrets()}
+        assert codes == {existing.code}
+
+    async def test_batch_unknown_op_raises(self, service: SqlSecretsService) -> None:
+        with pytest.raises(TypeError, match="Unknown secret batch op"):
+            await service.apply_batch([object()], _all_actions(), creator_id=uuid.uuid4())  # type: ignore[list-item]
 
 
 class TestCountAndSearch:
-    async def test_count_and_search(self, service: SecretService, session: AsyncSession) -> None:
+    async def test_count_and_search(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
         user = await _seed_user(session)
         for i in range(3):
-            await service.create(
+            await service.create_secret(
                 SecretCreate(code=f"C{i}", value=SecretStr("v")), creator_id=user.id
             )
         assert await service.count() == 3
@@ -237,107 +309,104 @@ class TestCountAndSearch:
         assert nxt2 is None
 
 
-class TestSecretValueService:
+class TestValueReveal:
     """Reveal requires both read-access and value-reveal filters."""
 
-    @pytest.fixture
-    def value_service(self, session: AsyncSession, enc: EncryptionService) -> SecretValueService:
-        return SecretValueService(
-            session,
-            AllSearchFilter[Secret](),
-            AllSearchFilter[Secret](),
-            encryption_service=enc,
-        )
-
     async def test_reveal_returns_plaintext(
-        self, value_service: SecretValueService, service: SecretService, session: AsyncSession
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="RV", value=SecretStr("reveal-me")), creator_id=user.id
         )
-        read = await value_service.get(secret.id)
+        read = await service.get_secret_value(secret.id, read_filter=ALL, value_filter=ALL)
         assert read.value == "reveal-me"
         assert read.code == "RV"
-        assert read.type.value == "static"
 
     async def test_reveal_denied_without_read_access(
-        self, service: SecretService, session: AsyncSession, enc: EncryptionService
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="NO_READ", value=SecretStr("v")), creator_id=user.id
         )
-        svc = SecretValueService(
-            session,
-            NoneSearchFilter[Secret](),  # no read access
-            AllSearchFilter[Secret](),  # value permission present
-            encryption_service=enc,
-        )
         with pytest.raises(SecretValueNotFoundError):
-            await svc.get(secret.id)
+            await service.get_secret_value(secret.id, read_filter=NONE, value_filter=ALL)
 
     async def test_reveal_denied_without_value_permission(
-        self, service: SecretService, session: AsyncSession, enc: EncryptionService
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        secret = await service.create(
+        secret = await service.create_secret(
             SecretCreate(code="NO_VAL", value=SecretStr("v")), creator_id=user.id
         )
-        svc = SecretValueService(
-            session,
-            AllSearchFilter[Secret](),  # read access present
-            NoneSearchFilter[Secret](),  # no value permission
-            encryption_service=enc,
-        )
         with pytest.raises(SecretValueNotFoundError):
-            await svc.get(secret.id)
+            await service.get_secret_value(secret.id, read_filter=ALL, value_filter=NONE)
 
     async def test_reveal_missing_detail_raises(
-        self, session: AsyncSession, enc: EncryptionService
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
-        # A static secret with no detail row is a data integrity break.
-        secret = Secret(code="NO_DETAIL")
+        # A secret with no detail row is a data integrity break.
+        secret = SqlSecret(code="NO_DETAIL")
         session.add(secret)
         await session.flush()
-        svc = SecretValueService(
-            session,
-            AllSearchFilter[Secret](),
-            AllSearchFilter[Secret](),
-            encryption_service=enc,
-        )
+        await session.refresh(secret)
         with pytest.raises(SecretValueNotFoundError):
-            await svc.get(secret.id)
+            await service.get_secret_value(secret.id, read_filter=ALL, value_filter=ALL)
 
-    async def test_reveal_oauth_without_detail_raises(
-        self, session: AsyncSession, enc: EncryptionService
-    ) -> None:
-        secret = Secret(code="OAUTH_ND", type="oauth")  # type: ignore[arg-type]
-        session.add(secret)
-        await session.flush()
-        svc = SecretValueService(
-            session,
-            AllSearchFilter[Secret](),
-            AllSearchFilter[Secret](),
-            encryption_service=enc,
-        )
-        with pytest.raises(SecretValueNotFoundError):
-            await svc.get(secret.id)
-
-    async def test_get_many_positional(
-        self, value_service: SecretValueService, service: SecretService, session: AsyncSession
+    async def test_get_secret_values_positional(
+        self, service: SqlSecretsService, session: AsyncSession
     ) -> None:
         user = await _seed_user(session)
-        a = await service.create(
+        a = await service.create_secret(
             SecretCreate(code="GM_A", value=SecretStr("a")), creator_id=user.id
         )
-        b = await service.create(
+        b = await service.create_secret(
             SecretCreate(code="GM_B", value=SecretStr("b")), creator_id=user.id
         )
-        results = await value_service.get_many([a.id, b.id, uuid.uuid4()])
+        results = await service.get_secret_values(
+            [a.id, b.id, uuid.uuid4()], read_filter=ALL, value_filter=ALL
+        )
         assert results[0] is not None and results[0].value == "a"
         assert results[1] is not None and results[1].value == "b"
         assert results[2] is None
+        assert await service.get_secret_values([], read_filter=ALL, value_filter=ALL) == []
+
+    async def test_search_secret_values_skips_valueless(
+        self, service: SqlSecretsService, session: AsyncSession
+    ) -> None:
+        user = await _seed_user(session)
+        await service.create_secret(
+            SecretCreate(code="SV1", value=SecretStr("one")), creator_id=user.id
+        )
+        # A secret with no detail row has no revealable value and is skipped.
+        session.add(SqlSecret(code="SV_ND"))
+        await session.flush()
+        items, next_cursor = await service.search_secret_values(read_filter=ALL, value_filter=ALL)
+        assert next_cursor is None
+        assert [item.value for item in items] == ["one"]
+
+
+class TestServiceLifecycle:
+    async def test_async_context_manager(self, service: SqlSecretsService) -> None:
+        async with service as entered:
+            assert entered is service
+
+    def test_resolve_secrets_service_class(self) -> None:
+        cls = resolve_secrets_service_class(
+            "openhands.ev2.secret.sql_secrets_service.SqlSecretsService"
+        )
+        assert cls is SqlSecretsService
+
+    def test_resolve_rejects_non_subclass(self) -> None:
+        with pytest.raises(TypeError, match="not a SecretsService subclass"):
+            resolve_secrets_service_class("openhands.ev2.secret.sql_secrets_models.SqlSecret")
+
+    def test_resolve_rejects_bad_names(self) -> None:
+        with pytest.raises(ValueError, match="Invalid secrets_service class name"):
+            resolve_secrets_service_class("NoDots")
+        with pytest.raises(ValueError, match="Cannot import secrets_service module"):
+            resolve_secrets_service_class("does.not.Exist")
 
 
 class TestSecretSchemaValidation:
@@ -347,17 +416,9 @@ class TestSecretSchemaValidation:
         with pytest.raises(ValidationError):
             SecretCreate(code="   ", value=SecretStr("v"))
 
-    def test_create_requires_value_for_static(self) -> None:
-        with pytest.raises(ValidationError, match="value is required when type is static"):
-            SecretCreate(code="S", type="static")  # type: ignore[arg-type]
-
-    def test_create_rejects_value_for_oauth(self) -> None:
-        with pytest.raises(ValidationError, match="value is not allowed for type oauth"):
-            SecretCreate(code="O", type="oauth", value=SecretStr("v"))  # type: ignore[arg-type]
-
-    def test_create_oauth_without_value_succeeds(self) -> None:
-        payload = SecretCreate(code="O", type="oauth")  # type: ignore[arg-type]
-        assert payload.value is None
+    def test_create_requires_value(self) -> None:
+        with pytest.raises(ValidationError, match="Field required"):
+            SecretCreate(code="S")  # type: ignore[call-arg]
 
     def test_update_none_code_passes_through(self) -> None:
         assert SecretUpdate().code is None

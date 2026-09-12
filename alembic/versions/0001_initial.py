@@ -507,13 +507,6 @@ def upgrade() -> None:
         "secrets",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("code", sa.String(length=255), nullable=False),
-        sa.Column(
-            "type",
-            sa.String(length=16),
-            server_default=sa.text("'static'"),
-            nullable=False,
-            comment="Secret type discriminator (static | oauth).",
-        ),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("creator_id", sa.Uuid(), nullable=True),
         sa.Column(
@@ -541,10 +534,10 @@ def upgrade() -> None:
     op.create_index("ix_secrets_creator_id", "secrets", ["creator_id"])
 
     # ------------------------------------------------------------------ #
-    # static_secret_details
+    # secret_details
     # ------------------------------------------------------------------ #
     op.create_table(
-        "static_secret_details",
+        "secret_details",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("secret_id", sa.Uuid(), nullable=False),
         sa.Column(
@@ -569,15 +562,13 @@ def upgrade() -> None:
             ["secret_id"],
             ["secrets.id"],
             ondelete="CASCADE",
-            name="fk_static_secret_details_secret_id_secrets",
+            name="fk_secret_details_secret_id_secrets",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("secret_id", name="uq_static_secret_details_secret_id"),
-        comment="Encrypted plaintext for static secrets",
+        sa.UniqueConstraint("secret_id", name="uq_secret_details_secret_id"),
+        comment="Encrypted plaintext for secrets",
     )
-    op.create_index(
-        "ix_static_secret_details_secret_id", "static_secret_details", ["secret_id"], unique=True
-    )
+    op.create_index("ix_secret_details_secret_id", "secret_details", ["secret_id"], unique=True)
 
     # ------------------------------------------------------------------ #
     # mcp_server_configs
@@ -1364,8 +1355,8 @@ def downgrade() -> None:
     op.drop_table("provider_connections")
     op.drop_index("ix_mcp_server_configs_creator_id", table_name="mcp_server_configs")
     op.drop_table("mcp_server_configs")
-    op.drop_index("ix_static_secret_details_secret_id", table_name="static_secret_details")
-    op.drop_table("static_secret_details")
+    op.drop_index("ix_secret_details_secret_id", table_name="secret_details")
+    op.drop_table("secret_details")
     op.drop_index("ix_secrets_code", table_name="secrets")
     op.drop_index("ix_secrets_creator_id", table_name="secrets")
     op.drop_table("secrets")

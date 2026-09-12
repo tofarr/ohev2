@@ -1,45 +1,57 @@
-"""Service layer for the typed secret feature.
+"""Service layer for the secret feature: a pluggable secrets control plane.
 
-Two services live here:
+The secret control plane is supplied by a polymorphic :class:`SecretsService`
+implementation selected at startup via the ``secrets_service_class`` config
+attribute (a fully qualified class name), mirroring the sandbox control plane
+(:mod:`openhands.ev2.sandbox.sandbox_service`). The service is constructed
+once via ``AppConfig.get_secrets_service`` and held as an async context
+manager tied to the server lifespan; every request resolves the same
+instance from ``app.state.secrets_service`` and passes its own permission
+filters, so authorization stays per-principal.
 
-* :class:`SecretService` — CRUD over the ``secrets`` umbrella table. It holds
-  the effective ``perm_filter`` (the search filter from the centralized
-  permission checker) as a field, set at construction, that scopes
-  search/get/update/delete SQL to secrets the principal may act on. The
-  ``value`` is encrypted at rest via the encryption service (AGENTS.md §9) and
-  stored in a type-specific detail row (``static_secret_details``); it is never
-  returned by this service — :meth:`to_read` omits the value. The ``creator_id``
-  of the creating principal is recorded on the secret row.
+Implementations exchange the Pydantic :class:`Secret` model — never an ORM
+row — so a provider backed by an external store (AWS Secrets Manager,
+1Password, ...) drops in without leaking client types. The default
+implementation is :class:`SqlSecretsService` (in
+:mod:`openhands.ev2.secret.sql_secrets_service`), which maintains its own
+SQLAlchemy models and translates to Pydantic internally. Concrete
+implementations live in their own modules and are only imported when selected
+via :func:`resolve_secrets_service_class`.
 
-* :class:`SecretValueService` — the read-only reveal projection behind
-  ``/secret-values``. It takes two filters (read-access + value-permission) and
-  ANDs them, so a secret is revealed only when *both* admit it (defense in
-  depth, AGENTS.md §12). It loads the detail row, decrypts, and returns
-  :class:`SecretValueRead`.
+The generic CRUD + reveal helpers are implemented here over the provider
+hooks and shared by every implementation:
+
+* metadata CRUD scopes every read/write through the principal's
+  ``perm_filter`` (in-memory, like the sandbox surface);
+* the ``/secret-values`` reveal projection ANDs the read-access filter
+  (``secret_permission``) with the value-reveal filter
+  (``secret_value_permission``), so a secret is revealed only when *both*
+  admit it (defense in depth, AGENTS.md §12). A failing reveal is a
+  :class:`SecretValueNotFoundError` (404, not 403) so existence is not
+  leaked.
+
+Providers with transactional stores override :meth:`SecretsService.apply_batch`
+to bracket the base implementation's per-op dispatch in a single transaction
+(the default SQL implementation commits exactly once per batch, preserving
+the atomic no-partial-application contract of AGENTS.md §3).
 """
 
 from __future__ import annotations
 
+import importlib
 import uuid
+from abc import ABC, abstractmethod
 from typing import Any
 
-from sqlalchemy import Select, func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
-from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
-from openhands.ev2.secret.secret_models import (
-    Secret,
-    SecretType,
-    StaticSecretDetail,
-)
+from openhands.ev2.secret.secret_models import Secret
 from openhands.ev2.secret.secret_schemas import (
     SecretBatchCreate,
     SecretBatchDelete,
     SecretBatchOp,
     SecretBatchUpdate,
     SecretCreate,
-    SecretRead,
     SecretSearchFilter,
     SecretUpdate,
     SecretValueRead,
@@ -64,182 +76,170 @@ class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted to the principal."""
 
 
-class SecretValueTypeError(Exception):
-    """Raised when a value is supplied for a secret whose type cannot hold one.
-
-    ``value`` is allowed only for ``type='static'`` secrets; supplying it on an
-    oauth secret (which has no detail table yet) is a 422 client error.
-    """
-
-
 class SecretValueNotFoundError(Exception):
-    """Raised when a reveal target has no decryptable detail row.
+    """Raised when a reveal target is missing, not both-admitted, or has no value.
 
-    A static secret missing its ``static_secret_details`` row is a data
-    integrity break; an oauth secret has no detail table yet. Both surface as
-    404 from the reveal endpoints.
+    Surfaces as 404 from the reveal endpoints (not 403) so existence is not
+    leaked.
     """
 
 
-class SecretService:
-    """CRUD operations over secrets.
+class SecretsService(DiscriminatedUnionMixin, ABC):
+    """Abstract base for the secret control plane.
 
-    Constructed per request with the request-scoped session, the principal's
-    effective ``perm_filter``, and (optionally) an encryption service for
-    at-rest value encryption. It holds no other mutable state.
+    Concrete subclasses provide provider-specific persistence behind the
+    hooks at the bottom of this class; the public methods are shared and
+    enforce authorization (via per-call permission filters) and the
+    value-reveal invariants uniformly. The service is created once at startup
+    and held as an async context manager for the server's lifetime.
     """
 
-    def __init__(
+    # ------------------------------------------------------------------ #
+    # Async context manager (server lifecycle). Concrete subclasses hold
+    # provider clients; ``__aenter__`` acquires them and ``aclose`` releases.
+    # ------------------------------------------------------------------ #
+    async def __aenter__(self) -> SecretsService:
+        return self
+
+    async def __aexit__(
         self,
-        session: AsyncSession,
-        perm_filter: SearchFilter[Secret] = ALL,
-        *,
-        encryption_service: EncryptionService | None = None,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: Any,
     ) -> None:
-        self._session = session
-        self._perm_filter = perm_filter
-        self._enc = encryption_service or get_encryption_service()
+        await self.aclose()
 
-    def to_read(self, secret: Secret) -> SecretRead:
-        """Materialize a metadata-only :class:`SecretRead` (no value)."""
-        return SecretRead(
-            id=secret.id,
-            code=secret.code,
-            type=secret.type,
-            description=secret.description,
-            creator_id=secret.creator_id,
-            created_at=secret.created_at,
-            updated_at=secret.updated_at,
-        )
+    async def aclose(self) -> None:
+        """Release any provider resources. Default is a no-op."""
+        return None
 
-    async def create(self, payload: SecretCreate, *, creator_id: uuid.UUID) -> Secret:
-        """Create a secret. Raises :class:`SecretCodeConflictError` on a duplicate code.
+    # ------------------------------------------------------------------ #
+    # Generic public metadata CRUD (built on the provider hooks below).
+    # ------------------------------------------------------------------ #
+    async def list_secrets(self, *, perm_filter: SearchFilter[Secret] = ALL) -> list[Secret]:
+        """Return every secret the principal may see (unordered)."""
+        secrets = await self._list_secrets()
+        return [secret for secret in secrets if perm_filter.matches(secret)]
 
-        For ``type='static'`` the value is encrypted at rest and stored in a
-        :class:`StaticSecretDetail` row. The ``creator_id`` of the creating
-        principal is recorded on the secret for ownership-based access control.
-        """
-        secret = Secret(
-            code=payload.code,
-            type=payload.type,
-            description=payload.description,
-            creator_id=creator_id,
-        )
-        if not self._perm_filter.matches(secret):
-            raise SecretPermissionScopeError(str(payload.code))
-        self._session.add(secret)
-        try:
-            await self._session.flush()
-            if payload.type == SecretType.STATIC:
-                self._session.add(self._make_static_detail(secret.id, payload))
-            await self._session.flush()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            raise _classify_integrity_error(exc, payload) from exc
-        await self._session.refresh(secret)
-        return secret
+    async def search_secrets(
+        self,
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+        cursor: uuid.UUID | None = None,
+        limit: int = 50,
+        search_filter: SecretSearchFilter | None = None,
+    ) -> tuple[list[Secret], uuid.UUID | None]:
+        """Search secrets ordered by id, keyed-pagination via cursor."""
+        secrets = await self.list_secrets(perm_filter=perm_filter)
+        if search_filter is not None:
+            secrets = [s for s in secrets if search_filter.matches(s)]
+        secrets.sort(key=lambda secret: secret.id)
+        if cursor is not None:
+            secrets = [s for s in secrets if s.id > cursor]
+        page = secrets[:limit]
+        next_cursor = page[-1].id if len(page) == limit else None
+        return page, next_cursor
 
-    def _make_static_detail(
-        self, secret_id: uuid.UUID, payload: SecretCreate
-    ) -> StaticSecretDetail:
-        value = payload.value.get_secret_value() if payload.value is not None else ""
-        return StaticSecretDetail(
-            secret_id=secret_id,
-            value=self._enc.encrypt_value(value),
-        )
+    async def count(
+        self,
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+        search_filter: SecretSearchFilter | None = None,
+    ) -> int:
+        """Total secret count, scoped by the filters."""
+        secrets = await self.list_secrets(perm_filter=perm_filter)
+        if search_filter is not None:
+            secrets = [s for s in secrets if search_filter.matches(s)]
+        return len(secrets)
 
-    async def get(self, secret_id: uuid.UUID) -> Secret:
+    async def get_secret(
+        self,
+        secret_id: uuid.UUID,
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+    ) -> Secret:
         """Retrieve a secret by id, scoped by ``perm_filter``.
 
         Raises :class:`SecretNotFoundError` if missing or out of scope (so
         callers return 404 without leaking existence).
         """
-        stmt = self._perm_filter.filter_sql(select(Secret).where(Secret.id == secret_id))
-        result = await self._session.execute(stmt)
-        secret = result.scalar_one_or_none()
-        if secret is None:
+        secret = await self._get_secret(secret_id)
+        if not perm_filter.matches(secret):
             raise SecretNotFoundError(str(secret_id))
         return secret
 
-    async def get_many(self, secret_ids: list[uuid.UUID]) -> list[Secret | None]:
-        """Retrieve secrets by ids in a single query, scoped by ``perm_filter``.
+    async def get_secrets(
+        self,
+        secret_ids: list[uuid.UUID],
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+    ) -> list[Secret | None]:
+        """Retrieve secrets by ids, scoped by ``perm_filter``.
 
         Returns a list positionally aligned with *secret_ids*; ``None`` where
         missing or out of scope. An empty *secret_ids* yields an empty list.
         """
         if not secret_ids:
             return []
-        stmt = self._perm_filter.filter_sql(select(Secret).where(Secret.id.in_(secret_ids)))
-        result = await self._session.execute(stmt)
-        by_id: dict[uuid.UUID, Secret] = {s.id: s for s in result.scalars().all()}
+        secrets = await self.list_secrets(perm_filter=perm_filter)
+        by_id = {secret.id: secret for secret in secrets}
         return [by_id.get(sid) for sid in secret_ids]
 
-    async def search_secrets(
+    async def create_secret(
         self,
+        payload: SecretCreate,
         *,
-        cursor: uuid.UUID | None = None,
-        limit: int = 50,
-        search_filter: SecretSearchFilter | None = None,
-    ) -> tuple[list[Secret], uuid.UUID | None]:
-        """Search secrets ordered by id, keyed-pagination via cursor."""
-        stmt = self._perm_filter.filter_sql(select(Secret).order_by(Secret.id))
-        if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        if cursor is not None:
-            stmt = stmt.where(Secret.id > cursor)
-        stmt = stmt.limit(limit)
-        result = await self._session.execute(stmt)
-        secrets = list(result.scalars().all())
-        next_cursor = secrets[-1].id if len(secrets) == limit else None
-        return secrets, next_cursor
+        creator_id: uuid.UUID,
+        perm_filter: SearchFilter[Secret] = ALL,
+    ) -> Secret:
+        """Create a secret. Raises on out-of-scope payload or provider conflict.
 
-    async def update(self, secret_id: uuid.UUID, payload: SecretUpdate) -> Secret:
-        """Partially update a secret. Raises on missing/scoped-out secret or code conflict.
-
-        If ``payload.value`` is set and the secret's type is ``oauth``, raises
-        :class:`SecretValueTypeError` (422). For ``static`` the detail row's
-        value is re-encrypted and upserted.
+        The pre-persistence model built by :meth:`_secret_from_create` is
+        checked against ``perm_filter`` (the principal's create scope) before
+        anything is persisted. The ``creator_id`` of the creating principal is
+        recorded for ownership-based access control.
         """
-        secret = await self.get(secret_id)
-        if payload.code is not None:
-            secret.code = payload.code
-        if payload.value is not None:
-            await self._apply_value_update(secret, payload.value)
-        if payload.description is not None:
-            secret.description = payload.description
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            raise _classify_integrity_error(exc, payload) from exc
-        await self._session.refresh(secret)
-        return secret
+        secret = self._secret_from_create(payload, creator_id=creator_id)
+        if not perm_filter.matches(secret):
+            raise SecretPermissionScopeError(str(payload.code))
+        return await self._create_secret(secret, payload)
 
-    async def _apply_value_update(self, secret: Secret, value: object) -> None:
-        if secret.type == SecretType.OAUTH:
-            raise SecretValueTypeError(str(secret.id))
-        await self._upsert_static_detail(secret.id, value)
+    def _secret_from_create(self, payload: SecretCreate, *, creator_id: uuid.UUID) -> Secret:
+        """Build the provider-neutral model from a create payload.
 
-    async def _upsert_static_detail(self, secret_id: uuid.UUID, value: object) -> None:
-        plaintext = getattr(value, "get_secret_value", lambda: str(value))()
-        detail = await self._load_static_detail(secret_id)
-        ciphertext = self._enc.encrypt_value(plaintext)
-        if detail is None:
-            self._session.add(StaticSecretDetail(secret_id=secret_id, value=ciphertext))
-        else:
-            detail.value = ciphertext
-
-    async def _load_static_detail(self, secret_id: uuid.UUID) -> StaticSecretDetail | None:
-        result = await self._session.execute(
-            select(StaticSecretDetail).where(StaticSecretDetail.secret_id == secret_id)
+        Providers persist the returned model as-is (its id and timestamps are
+        already minted); a provider may override to enrich it with
+        provider-specific fields.
+        """
+        return Secret(
+            code=payload.code,
+            description=payload.description,
+            creator_id=creator_id,
         )
-        return result.scalar_one_or_none()
 
-    async def delete(self, secret_id: uuid.UUID) -> None:
-        """Delete a secret. Raises :class:`SecretNotFoundError` if missing/out of scope."""
-        secret = await self.get(secret_id)
-        await self._session.delete(secret)
-        await self._session.flush()
+    async def update_secret(
+        self,
+        secret_id: uuid.UUID,
+        payload: SecretUpdate,
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+    ) -> Secret:
+        """Partially update a secret, scoped by ``perm_filter``.
+
+        Raises :class:`SecretNotFoundError` when missing or out of scope.
+        """
+        secret = await self.get_secret(secret_id, perm_filter=perm_filter)
+        return await self._update_secret(secret, payload)
+
+    async def delete_secret(
+        self,
+        secret_id: uuid.UUID,
+        *,
+        perm_filter: SearchFilter[Secret] = ALL,
+    ) -> None:
+        """Delete a secret, scoped by ``perm_filter``."""
+        await self.get_secret(secret_id, perm_filter=perm_filter)
+        await self._delete_secret(secret_id)
 
     async def apply_batch(
         self,
@@ -248,204 +248,191 @@ class SecretService:
         *,
         creator_id: uuid.UUID,
     ) -> list[Secret | None]:
-        """Apply a mix of create/update/delete operations in one transaction.
+        """Apply a mix of create/update/delete operations.
 
         Each operation is authorized against its own action via *perm_filters*;
         a ``None`` filter denies that operation
-        (:class:`BatchPermissionDeniedError`). No commit is performed — the
-        caller commits once after the whole batch succeeds (atomic). Returns
-        results aligned with *operations*: the secret for create/update,
-        ``None`` for delete.
+        (:class:`BatchPermissionDeniedError`). Returns results aligned with
+        *operations*: the secret for create/update, ``None`` for delete.
+        Providers with transactional stores override this to run the whole
+        batch in one transaction (atomic, no partial application).
         """
-        results: list[Secret | None] = []
-        for op in operations:
-            if isinstance(op, SecretBatchCreate):
-                results.append(await self._batch_create(op, perm_filters, creator_id=creator_id))
-            elif isinstance(op, SecretBatchUpdate):
-                results.append(await self._batch_update(op, perm_filters))
-            elif isinstance(op, SecretBatchDelete):
-                await self._batch_delete(op, perm_filters)
-                results.append(None)
-        return results
+        return [
+            await self._apply_batch_op(op, perm_filters, creator_id=creator_id) for op in operations
+        ]
 
-    async def _batch_create(
+    async def _apply_batch_op(
         self,
-        op: SecretBatchCreate,
+        op: SecretBatchOp,
         perm_filters: dict[Action, SearchFilter[Secret] | None],
         *,
         creator_id: uuid.UUID,
-    ) -> Secret:
-        filt = perm_filters.get(Action.CREATE)
+    ) -> Secret | None:
+        if isinstance(op, SecretBatchCreate):
+            filt = self._require_action(perm_filters, Action.CREATE, "create")
+            return await self.create_secret(op.data, creator_id=creator_id, perm_filter=filt)
+        if isinstance(op, SecretBatchUpdate):
+            filt = self._require_action(perm_filters, Action.UPDATE, "update")
+            return await self.update_secret(op.id, op.data, perm_filter=filt)
+        if isinstance(op, SecretBatchDelete):
+            filt = self._require_action(perm_filters, Action.DELETE, "delete")
+            await self.delete_secret(op.id, perm_filter=filt)
+            return None
+        raise TypeError(f"Unknown secret batch op: {type(op).__name__}")
+
+    @staticmethod
+    def _require_action(
+        perm_filters: dict[Action, SearchFilter[Any] | None],
+        action: Action,
+        label: str,
+    ) -> SearchFilter[Any]:
+        filt = perm_filters.get(action)
         if filt is None:
-            raise BatchPermissionDeniedError("create")
-        return await SecretService(self._session, filt, encryption_service=self._enc).create(
-            op.data, creator_id=creator_id
-        )
+            raise BatchPermissionDeniedError(label)
+        return filt
 
-    async def _batch_update(
+    # ------------------------------------------------------------------ #
+    # Value reveal (the ``/secret-values`` projection, AGENTS.md §12). A
+    # secret is revealed only when *both* the read-access filter and the
+    # value-reveal filter admit it.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _reveal_filter(
+        read_filter: SearchFilter[Secret], value_filter: SearchFilter[Secret]
+    ) -> SearchFilter[Secret]:
+        return AndSearchFilter(filters=[read_filter, value_filter])
+
+    async def get_secret_value(
         self,
-        op: SecretBatchUpdate,
-        perm_filters: dict[Action, SearchFilter[Secret] | None],
-    ) -> Secret:
-        filt = perm_filters.get(Action.UPDATE)
-        if filt is None:
-            raise BatchPermissionDeniedError("update")
-        return await SecretService(self._session, filt, encryption_service=self._enc).update(
-            op.id, op.data
-        )
-
-    async def _batch_delete(
-        self,
-        op: SecretBatchDelete,
-        perm_filters: dict[Action, SearchFilter[Secret] | None],
-    ) -> None:
-        filt = perm_filters.get(Action.DELETE)
-        if filt is None:
-            raise BatchPermissionDeniedError("delete")
-        await SecretService(self._session, filt, encryption_service=self._enc).delete(op.id)
-
-    async def count(self, search_filter: SecretSearchFilter | None = None) -> int:
-        """Total secret count, scoped by ``perm_filter`` and the optional filter."""
-        stmt = self._perm_filter.filter_sql(select(func.count()).select_from(Secret))
-        if search_filter is not None:
-            stmt = search_filter.filter_sql(stmt)
-        result = await self._session.execute(stmt)
-        return int(result.scalar_one())
-
-
-class SecretValueService:
-    """Read-only reveal projection behind ``/secret-values``.
-
-    Constructed per request with the request-scoped session, the read-access
-    filter (``secret_permission`` READ) and the value-reveal filter
-    (``secret_value_permission``). The two filters are ANDed so a secret is
-    revealed only when *both* admit it (defense in depth, AGENTS.md §12). It
-    loads the type-specific detail row, decrypts, and returns
-    :class:`SecretValueRead`.
-    """
-
-    def __init__(
-        self,
-        session: AsyncSession,
+        secret_id: uuid.UUID,
+        *,
         read_filter: SearchFilter[Secret],
         value_filter: SearchFilter[Secret],
-        *,
-        encryption_service: EncryptionService | None = None,
-    ) -> None:
-        self._session = session
-        self._read_filter = read_filter
-        self._value_filter = value_filter
-        self._enc = encryption_service or get_encryption_service()
-
-    def _combined(self) -> SearchFilter[Secret]:
-        return AndSearchFilter(filters=[self._read_filter, self._value_filter])
-
-    async def get(self, secret_id: uuid.UUID) -> SecretValueRead:
-        """Reveal one secret by id. 404 (via :class:`SecretValueNotFoundError`) if
-        not both-admitted or missing a detail row."""
-        stmt = self._combined().filter_sql(select(Secret).where(Secret.id == secret_id))
-        secret = (await self._session.execute(stmt)).scalar_one_or_none()
-        if secret is None:
-            raise SecretValueNotFoundError(str(secret_id))
-        plaintext = await self._decrypt_value(secret)
+    ) -> SecretValueRead:
+        """Reveal one secret by id. 404 (via :class:`SecretValueNotFoundError`)
+        if missing, not both-admitted, or without a revealable value."""
+        try:
+            secret = await self.get_secret(
+                secret_id, perm_filter=self._reveal_filter(read_filter, value_filter)
+            )
+        except SecretNotFoundError as exc:
+            raise SecretValueNotFoundError(str(secret_id)) from exc
+        plaintext = await self._require_plaintext(secret)
         return self._to_value_read(secret, plaintext)
 
-    async def get_many(self, secret_ids: list[uuid.UUID]) -> list[SecretValueRead | None]:
-        """Reveal secrets by ids in a single query, scoped by the combined filter.
+    async def get_secret_values(
+        self,
+        secret_ids: list[uuid.UUID],
+        *,
+        read_filter: SearchFilter[Secret],
+        value_filter: SearchFilter[Secret],
+    ) -> list[SecretValueRead | None]:
+        """Reveal secrets by ids, scoped by the combined filter.
 
         Returns a list positionally aligned with *secret_ids*; ``None`` where
-        missing, out of scope, or missing a detail row. An empty input yields
-        an empty list.
+        missing, out of scope, or without a revealable value. An empty input
+        yields an empty list.
         """
         if not secret_ids:
             return []
-        stmt = self._combined().filter_sql(select(Secret).where(Secret.id.in_(secret_ids)))
-        secrets = list((await self._session.execute(stmt)).scalars().all())
-        by_id = {s.id: s for s in secrets}
+        secrets = await self.get_secrets(
+            secret_ids, perm_filter=self._reveal_filter(read_filter, value_filter)
+        )
         results: list[SecretValueRead | None] = []
-        for sid in secret_ids:
-            secret = by_id.get(sid)
+        for secret in secrets:
             if secret is None:
                 results.append(None)
                 continue
-            plaintext = await self._decrypt_value_or_none(secret)
+            plaintext = await self._reveal_plaintext(secret)
             results.append(None if plaintext is None else self._to_value_read(secret, plaintext))
         return results
 
-    async def search_values(
+    async def search_secret_values(
         self,
         *,
+        read_filter: SearchFilter[Secret],
+        value_filter: SearchFilter[Secret],
         cursor: uuid.UUID | None = None,
         limit: int = 50,
         search_filter: SecretSearchFilter | None = None,
     ) -> tuple[list[SecretValueRead], uuid.UUID | None]:
-        """Reveal secrets ordered by id, keyed-pagination via cursor."""
-        stmt = self._combined().filter_sql(select(Secret).order_by(Secret.id))
-        stmt = self._apply_optional_filter(stmt, search_filter)
-        if cursor is not None:
-            stmt = stmt.where(Secret.id > cursor)
-        stmt = stmt.limit(limit)
-        secrets = list((await self._session.execute(stmt)).scalars().all())
-        reads = await self._materialize_values(secrets)
-        next_cursor = secrets[-1].id if len(secrets) == limit else None
-        return reads, next_cursor
+        """Reveal secrets ordered by id, keyed-pagination via cursor.
 
-    def _apply_optional_filter(
-        self,
-        stmt: Select[Any],
-        search_filter: SecretSearchFilter | None,
-    ) -> Select[Any]:
-        if search_filter is None:
-            return stmt
-        return search_filter.filter_sql(stmt)
+        Secrets without a revealable value are skipped (a page may therefore
+        carry fewer than ``limit`` items).
+        """
+        page, next_cursor = await self.search_secrets(
+            perm_filter=self._reveal_filter(read_filter, value_filter),
+            cursor=cursor,
+            limit=limit,
+            search_filter=search_filter,
+        )
+        items: list[SecretValueRead] = []
+        for secret in page:
+            plaintext = await self._reveal_plaintext(secret)
+            if plaintext is not None:
+                items.append(self._to_value_read(secret, plaintext))
+        return items, next_cursor
 
-    async def _materialize_values(self, secrets: list[Secret]) -> list[SecretValueRead]:
-        reads: list[SecretValueRead] = []
-        for secret in secrets:
-            plaintext = await self._decrypt_value_or_none(secret)
-            if plaintext is None:
-                continue
-            reads.append(self._to_value_read(secret, plaintext))
-        return reads
+    async def _require_plaintext(self, secret: Secret) -> str:
+        plaintext = await self._reveal_plaintext(secret)
+        if plaintext is None:
+            raise SecretValueNotFoundError(str(secret.id))
+        return plaintext
 
-    def _to_value_read(self, secret: Secret, plaintext: str) -> SecretValueRead:
+    async def _reveal_plaintext(self, secret: Secret) -> str | None:
+        """Plaintext for *secret*, or ``None`` when it has no revealable value.
+
+        The decrypt step itself is the provider hook.
+        """
+        return await self._decrypt_value(secret)
+
+    @staticmethod
+    def _to_value_read(secret: Secret, plaintext: str) -> SecretValueRead:
         return SecretValueRead(
             id=secret.id,
             code=secret.code,
-            type=secret.type,
             value=plaintext,
         )
 
-    async def _decrypt_value(self, secret: Secret) -> str:
-        if secret.type == SecretType.OAUTH:
-            raise SecretValueNotFoundError(str(secret.id))
-        detail = await self._load_static_detail(secret.id)
-        if detail is None:
-            raise SecretValueNotFoundError(str(secret.id))
-        return self._enc.decrypt_value(detail.value)
+    # ------------------------------------------------------------------ #
+    # Provider hooks (overridden by implementations).
+    # ------------------------------------------------------------------ #
+    @abstractmethod
+    async def _list_secrets(self) -> list[Secret]:
+        """Return all secrets known to the provider (unfiltered)."""
 
-    async def _decrypt_value_or_none(self, secret: Secret) -> str | None:
-        if secret.type == SecretType.OAUTH:
-            return None
-        detail = await self._load_static_detail(secret.id)
-        if detail is None:
-            return None
-        return self._enc.decrypt_value(detail.value)
+    @abstractmethod
+    async def _get_secret(self, secret_id: uuid.UUID) -> Secret:
+        """Return a secret, raising ``SecretNotFoundError`` if absent."""
 
-    async def _load_static_detail(self, secret_id: uuid.UUID) -> StaticSecretDetail | None:
-        result = await self._session.execute(
-            select(StaticSecretDetail).where(StaticSecretDetail.secret_id == secret_id)
-        )
-        return result.scalar_one_or_none()
+    @abstractmethod
+    async def _create_secret(self, secret: Secret, payload: SecretCreate) -> Secret:
+        """Persist a freshly-built secret (and its value payload, when static)."""
+
+    @abstractmethod
+    async def _update_secret(self, secret: Secret, payload: SecretUpdate) -> Secret:
+        """Apply a partial update to an existing secret and return the result."""
+
+    @abstractmethod
+    async def _delete_secret(self, secret_id: uuid.UUID) -> None:
+        """Remove a secret (and its value) from the provider."""
+
+    @abstractmethod
+    async def _decrypt_value(self, secret: Secret) -> str | None:
+        """Return the plaintext value for a static secret, or ``None`` if absent."""
 
 
-def _classify_integrity_error(
-    exc: IntegrityError, payload: SecretCreate | SecretUpdate
-) -> Exception:
-    """Map a unique-constraint IntegrityError to a code conflict.
-
-    The only unique column on ``secrets`` is ``code`` (and the primary key), so
-    any unique violation here is a code collision.
-    """
-    _ = str(getattr(exc, "orig", exc)).lower()
-    return SecretCodeConflictError(getattr(payload, "code", None) or "")
+def resolve_secrets_service_class(fqcn: str) -> type[SecretsService]:
+    """Resolve a fully qualified class name to a ``SecretsService`` subclass."""
+    module_name, _, class_name = fqcn.rpartition(".")
+    if not module_name or not class_name:
+        raise ValueError(f"Invalid secrets_service class name: {fqcn!r}")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(f"Cannot import secrets_service module {module_name!r}") from exc
+    candidate = getattr(module, class_name, None)
+    if not (isinstance(candidate, type) and issubclass(candidate, SecretsService)):
+        raise TypeError(f"{fqcn!r} is not a SecretsService subclass.")
+    return candidate

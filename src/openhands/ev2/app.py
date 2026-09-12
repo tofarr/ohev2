@@ -252,9 +252,10 @@ async def _warm_sandbox_loop() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
 
-    Also constructs the configured :class:`SandboxService` (an async context
-    manager) and exposes it on ``app.state.sandbox_service`` so the sandbox
-    routers can reach it.
+    Also constructs the configured :class:`SandboxService` and
+    :class:`SecretsService` (async context managers) and exposes them on
+    ``app.state.sandbox_service`` / ``app.state.secrets_service`` so the
+    routers can reach them.
     """
     tasks = [
         asyncio.create_task(_cleanup_loop(), name="auth-cleanup"),
@@ -267,8 +268,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()
-        async with sandbox_service:
+        secrets_service = get_config().get_secrets_service()
+        async with sandbox_service, secrets_service:
             app.state.sandbox_service = sandbox_service
+            app.state.secrets_service = secrets_service
             yield
     finally:
         for task in tasks:
