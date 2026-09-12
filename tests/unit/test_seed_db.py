@@ -31,7 +31,7 @@ from openhands.ev2.scripts.seed_db import (
     seed_admin,
     seed_db,
 )
-from openhands.ev2.security.security_models import Action, Permitted
+from openhands.ev2.security.security_models import Action, CreatorPermission, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import verify_password
 
@@ -165,10 +165,18 @@ class TestSeedDbRegularUser:
 
         user_role = await _named_role(session, "user")
         assert isinstance(user_role.api_key_permission, ApiKeyAccess)
+        assert isinstance(user_role.sandbox_permission, CreatorPermission)
+        assert isinstance(user_role.sandbox_permission.on_match, Permitted)
+        assert isinstance(user_role.sandbox_permission.on_create, Permitted)
         assert isinstance(user_role.conversation_permission, ConversationAccess)
         # Every other entity column is denied (None).
+        granted_cols = (
+            "api_key_permission",
+            "sandbox_permission",
+            "conversation_permission",
+        )
         for col in _ADMIN_COLUMNS:
-            if col in ("api_key_permission", "conversation_permission"):
+            if col in granted_cols:
                 continue
             assert getattr(user_role, col) is None
         # The regular user is a member of the user role.
