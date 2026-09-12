@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from openhands.ev2.auth.auth_models import ApiKey
+from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
+from openhands.ev2.encryption.encryption_service import get_encryption_service
+from openhands.ev2.role.role_models import Role
+from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 
 
 async def _create_template(client: AsyncClient) -> str:
@@ -15,6 +24,14 @@ async def _create_template(client: AsyncClient) -> str:
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
+
+
+async def _config_row(session: AsyncSession, config_id: str) -> SandboxConfig:
+    row = await session.scalar(
+        select(SandboxConfig).where(SandboxConfig.id == uuid.UUID(config_id))
+    )
+    assert row is not None, "sandbox config row missing"
+    return row
 
 
 class TestSandboxConfigRoutes:
@@ -199,3 +216,130 @@ class TestSandboxConfigRoutes:
             },
         )
         assert resp.status_code == 404
+
+
+class TestSandboxConfigSessionApiKey:
+    """The session key is a real ApiKey row minted via the api_key service."""
+
+    async def test_create_mints_system_api_key(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        template_id = await _create_template(client)
+        expires = datetime.now(UTC) + timedelta(hours=2)
+        resp = await client.post(
+            "/sandbox/sandbox-configs",
+            json={
+                "sandbox_template_id": template_id,
+                "expires_at": expires.isoformat(),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        config_id = resp.json()["id"]
+
+        row = await _config_row(session, config_id)
+        assert row.session_api_key_id is not None
+        key = await session.get(ApiKey, row.session_api_key_id)
+        assert key is not None, "session API key row missing"
+        assert key.name == f"Sandbox {config_id} API key"
+        assert key.system is True
+        assert key.enabled is True
+        assert key.expires_at is not None
+        # The raw key (decrypted from the config) authenticates as the creator.
+        raw = get_encryption_service().decrypt_value(row.session_api_key)
+        auth = await TokenService(session).authenticate(raw)
+        assert auth.user_id == row.creator_id
+        assert auth.enabled is True
+
+    async def test_create_links_restricting_role_when_seeded(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        role = Role(name="API key")
+        session.add(role)
+        await session.commit()
+
+        template_id = await _create_template(client)
+        resp = await client.post(
+            "/sandbox/sandbox-configs",
+            json={"sandbox_template_id": template_id},
+        )
+        assert resp.status_code == 201, resp.text
+
+        row = await _config_row(session, resp.json()["id"])
+        assert row.session_api_key_id is not None
+        key = await session.get(ApiKey, row.session_api_key_id)
+        assert key is not None
+        assert key.role_id == role.id
+
+    async def test_patch_expires_at_syncs_key_expiry(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        template_id = await _create_template(client)
+        resp = await client.post(
+            "/sandbox/sandbox-configs",
+            json={"sandbox_template_id": template_id},
+        )
+        assert resp.status_code == 201, resp.text
+        config_id = resp.json()["id"]
+
+        new_expiry = datetime.now(UTC) + timedelta(hours=6)
+        patched = await client.patch(
+            f"/sandbox/sandbox-configs/{config_id}",
+            json={"expires_at": new_expiry.isoformat()},
+        )
+        assert patched.status_code == 200, patched.text
+
+        row = await _config_row(session, config_id)
+        key = await session.get(ApiKey, row.session_api_key_id)
+        assert key is not None
+        assert key.expires_at == datetime.fromisoformat(patched.json()["expires_at"])
+
+    async def test_patch_expires_at_after_key_reaped(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        # When the cleanup sweep reaps the key row, the FK SET NULLs the link;
+        # patching expiry then has no key to sync and must still succeed.
+        template_id = await _create_template(client)
+        resp = await client.post(
+            "/sandbox/sandbox-configs",
+            json={"sandbox_template_id": template_id},
+        )
+        assert resp.status_code == 201, resp.text
+        config_id = resp.json()["id"]
+
+        row = await _config_row(session, config_id)
+        key = await session.get(ApiKey, row.session_api_key_id)
+        assert key is not None
+        await session.delete(key)
+        await session.commit()
+
+        new_expiry = datetime.now(UTC) + timedelta(hours=3)
+        patched = await client.patch(
+            f"/sandbox/sandbox-configs/{config_id}",
+            json={"expires_at": new_expiry.isoformat()},
+        )
+        assert patched.status_code == 200, patched.text
+        row = await _config_row(session, config_id)
+        await session.refresh(row)  # DB-side FK SET NULL is not in the identity map
+        assert row.session_api_key_id is None
+
+    async def test_delete_config_revokes_session_key(
+        self, client: AsyncClient, session: AsyncSession
+    ) -> None:
+        template_id = await _create_template(client)
+        resp = await client.post(
+            "/sandbox/sandbox-configs",
+            json={"sandbox_template_id": template_id},
+        )
+        assert resp.status_code == 201, resp.text
+        config_id = resp.json()["id"]
+
+        row = await _config_row(session, config_id)
+        key_id = row.session_api_key_id
+        raw = get_encryption_service().decrypt_value(row.session_api_key)
+
+        deleted = await client.delete(f"/sandbox/sandbox-configs/{config_id}")
+        assert deleted.status_code == 204
+        assert await session.get(ApiKey, key_id) is None
+        # The raw key no longer authenticates.
+        with pytest.raises(InvalidTokenError):
+            await TokenService(session).authenticate(raw)

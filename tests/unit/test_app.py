@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from openhands.ev2.app import (
+    _api_key_cleanup_loop,
     _background_sweep,
     _cleanup_loop,
     _llm_usage_aggregate_loop,
@@ -15,6 +16,7 @@ from openhands.ev2.app import (
     _mcp_usage_aggregate_loop,
     _mcp_usage_partition_loop,
     _partition_message,
+    _sweep_expired_api_keys,
     _sweep_expired_tokens,
     _sweep_llm_aggregate,
     _sweep_llm_partitions,
@@ -275,6 +277,48 @@ class TestMcpUsageAggregateLoop:
                 await task
 
 
+class TestApiKeyCleanupLoop:
+    async def test_interval_zero_returns_immediately(self) -> None:
+        with patch("openhands.ev2.app.get_config") as mock_cfg:
+            mock_cfg.return_value.api_key_cleanup_interval = 0
+            await _api_key_cleanup_loop()
+
+    async def test_sweep_runs_on_interval(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.api_key.api_key_service.delete_expired_system_keys",
+                new=AsyncMock(return_value=2),
+            ),
+        ):
+            mock_cfg.return_value.api_key_cleanup_interval = 0.01
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            task = asyncio.create_task(_api_key_cleanup_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_sweep_logs_exception_and_continues(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_config") as mock_cfg,
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+        ):
+            mock_cfg.return_value.api_key_cleanup_interval = 0.01
+            mock_factory.side_effect = RuntimeError("db down")
+
+            task = asyncio.create_task(_api_key_cleanup_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
 class TestBackgroundSweep:
     async def test_sweep_success_logs_message(self, caplog: pytest.LogCaptureFixture) -> None:
         async def sweep() -> str | None:
@@ -438,6 +482,40 @@ class TestSweepFunctions:
             mock_factory.return_value.return_value = session_cm
 
             result = await _sweep_mcp_aggregate()
+            assert result is None
+
+    async def test_sweep_expired_api_keys(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.api_key.api_key_service.delete_expired_system_keys",
+                new=AsyncMock(return_value=4),
+            ) as mock_delete,
+        ):
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_expired_api_keys()
+            assert result is not None
+            assert "4" in result
+            mock_delete.assert_awaited_once()
+
+    async def test_sweep_expired_api_keys_none(self) -> None:
+        with (
+            patch("openhands.ev2.app.get_session_factory") as mock_factory,
+            patch(
+                "openhands.ev2.api_key.api_key_service.delete_expired_system_keys",
+                new=AsyncMock(return_value=0),
+            ),
+        ):
+            session_cm = AsyncMock()
+            session_cm.__aenter__ = AsyncMock(return_value=object())
+            session_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_factory.return_value.return_value = session_cm
+
+            result = await _sweep_expired_api_keys()
             assert result is None
 
 

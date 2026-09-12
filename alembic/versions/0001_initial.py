@@ -102,6 +102,7 @@ def upgrade() -> None:
         sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("system", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("role_id", sa.Uuid(), nullable=True),
         sa.Column(
@@ -1220,6 +1221,7 @@ def upgrade() -> None:
         sa.Column("creator_id", sa.Uuid(), nullable=False),
         sa.Column("sandbox_template_id", sa.Uuid(), nullable=False),
         sa.Column("session_api_key", sa.String(length=8192), nullable=False),
+        sa.Column("session_api_key_id", sa.Uuid(), nullable=True),
         sa.Column("enabled", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("sandbox_snapshot_id", sa.Uuid(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -1249,11 +1251,23 @@ def upgrade() -> None:
             ondelete="RESTRICT",
             name="fk_sandbox_configs_sandbox_template_id_sandbox_templates",
         ),
+        sa.ForeignKeyConstraint(
+            ["session_api_key_id"],
+            ["api_keys.id"],
+            ondelete="SET NULL",
+            name="fk_sandbox_configs_session_api_key_id_api_keys",
+        ),
         sa.PrimaryKeyConstraint("id"),
         comment="Durable sandbox intent (DB-backed source of truth)",
     )
     op.create_index(
         "ix_sandbox_configs_creator_id", "sandbox_configs", ["creator_id"], unique=False
+    )
+    op.create_index(
+        "ix_sandbox_configs_session_api_key_id",
+        "sandbox_configs",
+        ["session_api_key_id"],
+        unique=False,
     )
     op.create_index(
         "ix_sandbox_configs_sandbox_template_id",
@@ -1311,6 +1325,7 @@ def downgrade() -> None:
     op.drop_index("ix_sandbox_snapshots_creator_id", table_name="sandbox_snapshots")
     op.drop_table("sandbox_snapshots")
     op.drop_index("ix_sandbox_configs_sandbox_template_id", table_name="sandbox_configs")
+    op.drop_index("ix_sandbox_configs_session_api_key_id", table_name="sandbox_configs")
     op.drop_index("ix_sandbox_configs_creator_id", table_name="sandbox_configs")
     op.drop_table("sandbox_configs")
     op.drop_index("ix_sandbox_templates_docker_image_tag", table_name="sandbox_templates")

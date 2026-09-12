@@ -62,6 +62,15 @@ class SandboxConfig(Base):
         String(8192),
         comment="Encrypted session API key for the sandbox (JWE ciphertext).",
     )
+    # The api_keys row backing the session key (minted via the api_key service
+    # as a system key). SET NULL when the key row is removed (e.g. reaped by
+    # the expired-key cleanup sweep) so the config outlives the credential.
+    session_api_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        default=None,
+        nullable=True,
+        index=True,
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

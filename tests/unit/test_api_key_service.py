@@ -22,6 +22,7 @@ from openhands.ev2.api_key.api_key_service import (
     ApiKeyPermissionScopeError,
     ApiKeyService,
     BatchPermissionDeniedError,
+    delete_expired_system_keys,
 )
 from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_tokens import InvalidTokenError, TokenService
@@ -138,6 +139,25 @@ class TestCreateApiKey:
         # The authenticated token carries the restricting role_id.
         auth = await TokenService(session).authenticate(raw_key)
         assert auth.role_id == role.id
+
+    async def test_create_defaults_to_non_system(
+        self, service: ApiKeyService, session: AsyncSession
+    ) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        _key, row = await service.create(ApiKeyCreate(name="user-key"), creator_id=uid)
+        assert row.system is False
+
+    async def test_create_system_key(self, service: ApiKeyService, session: AsyncSession) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        raw_key, row = await service.create(
+            ApiKeyCreate(name="Sandbox abc API key"), creator_id=uid, system=True
+        )
+        assert row.system is True
+        # A system key still authenticates like any other key.
+        auth = await TokenService(session).authenticate(raw_key)
+        assert auth.user_id == uid
 
     async def test_create_without_role_id_defaults_none(
         self, service: ApiKeyService, session: AsyncSession
@@ -267,6 +287,22 @@ class TestSearchApiKeys:
         assert all(k.creator_id == uid for k in keys)
         assert {k.name for k in keys} == {"mine"}
 
+    async def test_search_with_system_filter(
+        self, service: ApiKeyService, session: AsyncSession
+    ) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        await service.create(ApiKeyCreate(name="user-key"), creator_id=uid)
+        await service.create(ApiKeyCreate(name="sandbox-key"), creator_id=uid, system=True)
+        user_keys, _ = await service.search_api_keys(
+            search_filter=ApiKeySearchFilter(system__eq=False)
+        )
+        assert {k.name for k in user_keys} == {"user-key"}
+        system_keys, _ = await service.search_api_keys(
+            search_filter=ApiKeySearchFilter(system__eq=True)
+        )
+        assert {k.name for k in system_keys} == {"sandbox-key"}
+
 
 class TestUpdateApiKey:
     async def test_update_name(self, service: ApiKeyService, session: AsyncSession) -> None:
@@ -323,6 +359,46 @@ class TestDeleteApiKey:
     async def test_delete_missing_raises(self, service: ApiKeyService) -> None:
         with pytest.raises(ApiKeyNotFoundError):
             await service.delete(uuid.uuid4())
+
+
+class TestDeleteExpiredSystemKeys:
+    async def test_deletes_expired_system_keys(
+        self, service: ApiKeyService, session: AsyncSession
+    ) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        expired = datetime.now(UTC) - timedelta(hours=1)
+        raw_key, _row = await service.create(
+            ApiKeyCreate(name="Sandbox abc API key", expires_at=expired),
+            creator_id=uid,
+            system=True,
+        )
+        assert await delete_expired_system_keys(session) == 1
+        # The reaped key no longer authenticates.
+        with pytest.raises(InvalidTokenError):
+            await TokenService(session).authenticate(raw_key)
+
+    async def test_keeps_user_keys_unexpired_and_unset_expiry(
+        self, service: ApiKeyService, session: AsyncSession
+    ) -> None:
+        uid = uuid.uuid4()
+        await _seed_user(session, uid)
+        past = datetime.now(UTC) - timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
+        # Expired user-minted key: user data, never swept.
+        await service.create(ApiKeyCreate(name="expired-user", expires_at=past), creator_id=uid)
+        # Unexpired system key.
+        await service.create(
+            ApiKeyCreate(name="live-system", expires_at=future), creator_id=uid, system=True
+        )
+        # System key with no expiry never expires.
+        await service.create(ApiKeyCreate(name="forever-system"), creator_id=uid, system=True)
+        assert await delete_expired_system_keys(session) == 0
+        keys, _ = await service.search_api_keys()
+        assert {k.name for k in keys} == {"expired-user", "live-system", "forever-system"}
+
+    async def test_nothing_to_delete(self, session: AsyncSession) -> None:
+        assert await delete_expired_system_keys(session) == 0
 
 
 class TestCountApiKeys:

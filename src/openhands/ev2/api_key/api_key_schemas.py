@@ -105,6 +105,7 @@ class ApiKeyRead(BaseModel):
     creator_id: uuid.UUID
     name: str | None
     enabled: bool
+    system: bool
     expires_at: datetime | None
     role_id: uuid.UUID | None
     created_at: datetime
@@ -141,6 +142,13 @@ class ApiKeySearchFilter(BaseSearchFilter[ApiKey]):
         description="Exact role_id match; pass a UUID to find keys restricted to that role.",
     )
     enabled__eq: bool | None = Field(default=None, description="Exact enabled match.")
+    system__eq: bool | None = Field(
+        default=None,
+        description=(
+            "Exact system-flag match; pass false to hide system-minted keys "
+            "(e.g. sandbox session keys) from listings."
+        ),
+    )
     expires_at__gte: datetime | None = Field(
         default=None, description="ISO 8601; keys expiring at or after."
     )

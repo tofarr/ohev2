@@ -1,7 +1,7 @@
 """Seed the database with bootstrap roles, users, a default group, and a default
 sandbox template.
 
-Seeds two roles:
+Seeds three roles:
 
 * ``admin`` — grants :class:`Permitted` (unrestricted access) on every shipped
   resource type. Assigned to the seeded admin user.
@@ -10,6 +10,12 @@ Seeds two roles:
   (create/read/update/delete keys scoped to their own ``user_id``). All other
   entity columns are ``NULL`` (deny). Assigned to the optional seeded regular
   user.
+* the sandbox session-key role (default name ``API key``, from
+  ``AppConfig.sandbox_session_api_key_role``) — a limited-access role with
+  every entity column ``NULL`` (deny). System API keys minted for sandbox
+  configs carry it, so a sandbox session key authenticates but is authorized
+  for no app-API access (fail-closed, AGENTS.md §9). Re-seeding creates the
+  role if missing but never resets a deliberately widened role.
 
 Also seeds a default :class:`Group` and adds every seeded user (the admin and,
 when provided, the regular user) to it.
@@ -377,6 +383,7 @@ async def seed_db(
     )
     await _ensure_admin_role(session, admin)
     await _ensure_user_role(session)
+    await _ensure_api_key_role(session)
     if regular is not None:
         await _assign_role(session, regular.id, _USER_ROLE_NAME)
 
@@ -503,6 +510,19 @@ async def _ensure_user_role(session: AsyncSession) -> Role:
     ``api_key_permission`` column if it was changed.
     """
     return await _upsert_role(session, _USER_ROLE_NAME, _user_role_permissions())
+
+
+async def _ensure_api_key_role(session: AsyncSession) -> Role:
+    """Upsert the limited-access role assigned to sandbox session API keys.
+
+    Every entity column stays ``None`` (deny): a key carrying this role can
+    authenticate but is authorized for no app-API access. The name comes from
+    ``AppConfig.sandbox_session_api_key_role`` so the seeded role matches the
+    name :class:`SandboxConfigService` looks up when minting session keys.
+    Re-seeding creates the role if missing but leaves an existing role
+    untouched (an admin may deliberately widen it).
+    """
+    return await _upsert_role(session, get_config().sandbox_session_api_key_role, {})
 
 
 async def _upsert_role(

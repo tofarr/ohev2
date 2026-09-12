@@ -14,8 +14,10 @@ consistent.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_schemas import (
@@ -60,13 +62,22 @@ class ApiKeyService:
         self._session = session
         self._perm_filter = perm_filter
 
-    async def create(self, payload: ApiKeyCreate, *, creator_id: uuid.UUID) -> tuple[str, ApiKey]:
+    async def create(
+        self,
+        payload: ApiKeyCreate,
+        *,
+        creator_id: uuid.UUID,
+        system: bool = False,
+    ) -> tuple[str, ApiKey]:
         """Mint an API key and persist its backing row.
 
         Returns (raw_key, row). *creator_id* is the current principal, never read
         from the payload (AGENTS.md §9). Raises
         :class:`ApiKeyPermissionScopeError` if the prospective key does not
         satisfy the service's ``perm_filter`` (the principal's create scope).
+        ``system`` marks the key as system-minted (e.g. a sandbox session key);
+        it is not part of the public create payload — only internal services
+        may mint system keys.
         """
         # Validate scope before minting: the perm_filter is the principal's
         # create grant reduced to a row predicate. Checked in-memory so a
@@ -81,6 +92,7 @@ class ApiKeyService:
             enabled=payload.enabled,
             expires_at=payload.expires_at,
             role_id=payload.role_id,
+            system=system,
         )
         if not self._perm_filter.matches(prospective):
             raise ApiKeyPermissionScopeError(str(creator_id))
@@ -92,6 +104,7 @@ class ApiKeyService:
             enabled=payload.enabled,
             expires_at=payload.expires_at,
             role_id=payload.role_id,
+            system=system,
         )
         # Re-validate the persisted row against the scope in case the filter
         # depends on server-side defaults (id/created_at) — matches() on the
@@ -260,3 +273,23 @@ class ApiKeyService:
             stmt = search_filter.filter_sql(stmt)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
+
+
+async def delete_expired_system_keys(session: AsyncSession, *, now: datetime | None = None) -> int:
+    """Delete expired system API keys, returning the number removed.
+
+    Only ``system`` keys (e.g. sandbox session keys) are reaped: user-minted
+    keys are user data and are never deleted by the background sweep. Keys
+    with no ``expires_at`` never expire. Commits the session, like the other
+    cleanup entry points, so it can be called from the in-process lifespan
+    loop or an external scheduler (cron) alike (README 'Cleanup processes').
+    """
+    cutoff = now or datetime.now(UTC)
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            delete(ApiKey).where(ApiKey.system.is_(True), ApiKey.expires_at < cutoff)
+        ),
+    )
+    await session.commit()
+    return result.rowcount or 0

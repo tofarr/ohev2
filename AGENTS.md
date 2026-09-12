@@ -448,3 +448,29 @@ an oauth secret with no detail table yet. When OAuth detail tables are
 added, the only schema change needed is a new detail table + a branch in
 `SecretValueService._decrypt_value` — the type column and projection
 surface already exist.
+
+## 13. Background tasks
+
+Every background task follows one convention so it can run **either**
+in-process **or** as a cron job:
+
+* The work lives in a single service-level function (e.g.
+  `AuthService.delete_expired_tokens`, `delete_expired_system_keys`,
+  `prune_orphaned_acl_ids`) that opens no loop of its own and commits its
+  own session, so an external scheduler can call it directly.
+* An `*_interval` config knob (seconds, `>= 0`) gates an in-process
+  `asyncio` lifespan loop (`_background_sweep` in `app.py`) that calls the
+  function. **Non-zero** runs the loop; **`= 0` disables it** and the work
+  must then be driven by an external scheduler (cron) calling the same
+  function.
+* Loops log failures and continue; they are cancelled on shutdown.
+
+Existing loops: `cleanup_interval` (expired IdP refresh tokens),
+`api_key_cleanup_interval` (expired **system** API keys — user-minted keys
+are never auto-deleted), `acl_prune_interval` (orphaned ACL ids),
+`llm.usage.partition_interval` / `llm.usage.aggregate_interval`,
+`mcp.usage.partition_interval` / `mcp.usage.aggregate_interval`,
+`sandbox_warm_refresh_interval`, and the sandbox lifecycle sweep
+(`sandbox_lifecycle_interval`, §8). When adding a new background task,
+follow this pattern and document the knob in README 'Cleanup processes'
+(or the feature's README section).

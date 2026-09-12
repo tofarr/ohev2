@@ -160,7 +160,10 @@ Seed an admin user (credentials default from `OHE_SEED_ADMIN_*` env vars, or dev
 defaults). Idempotent — re-running upserts the user and ensures the `admin` role
 grants unrestricted access to every resource type. Also seeds a `user` role
 (granting `ApiKeyAccess` on `api_key_permission` so a regular user can manage
-their own API keys) and, by default, a regular user account
+their own API keys), an `API key` role (deny-everything; the limited-access role
+assigned to the system-minted session keys that sandbox configs carry — its name
+is configurable via `sandbox_session_api_key_role` /
+`OHE_SANDBOX_SESSION_API_KEY_ROLE`) and, by default, a regular user account
 (`OHE_SEED_USER_*` env vars):
 
 ```bash
@@ -280,6 +283,17 @@ Expired IdP refresh tokens are pruned by a background sweep.
 * `idp.delete_expired_seconds` (`OHE_IDP_DELETE_EXPIRED_SECONDS`, default
   `86400`): rows whose `expires_at` is older than this window are deleted.
   `0` deletes any already-expired row regardless of age.
+
+Expired **system API keys** (e.g. the session keys minted for sandbox
+configs) are reaped by a second background sweep. User-minted keys are user
+data and are never deleted automatically.
+
+* `api_key_cleanup_interval` (`OHE_API_KEY_CLEANUP_INTERVAL`, default `300`):
+  seconds between sweeps. **Non-zero** runs an `asyncio` loop inside the
+  FastAPI lifespan — no external scheduler needed.
+* `api_key_cleanup_interval = 0` **disables** the in-process loop; drive
+  cleanup with an external cron job hitting the same
+  `delete_expired_system_keys` service function.
 
 ## Proxy endpoints (LLM & MCP)
 

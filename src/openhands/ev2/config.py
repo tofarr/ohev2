@@ -396,6 +396,34 @@ class AppConfig(BaseModel):
     )
 
     # ------------------------------------------------------------------ #
+    # Sandbox session API keys.
+    # ------------------------------------------------------------------ #
+    sandbox_session_api_key_role: str = Field(
+        default="API key",
+        description=(
+            "Name of the role assigned to the system API keys minted as "
+            "sandbox session keys (SandboxConfig.session_api_key). The role "
+            "narrows — never widens — what the key may do (AGENTS.md §9); the "
+            "role seeded by seed_db under this name denies everything. When no "
+            "role with this name exists the key is minted without a "
+            "restricting role."
+        ),
+    )
+    # ------------------------------------------------------------------ #
+    # Background cleanup of expired system API keys.
+    # ------------------------------------------------------------------ #
+    api_key_cleanup_interval: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Seconds between background sweeps that delete expired system API "
+            "keys (e.g. sandbox session keys; user-minted keys are never "
+            "reaped). When 0 the background loop is disabled and cleanup must "
+            "be driven by an external scheduler (cron) calling "
+            "delete_expired_system_keys; see README 'Cleanup processes'."
+        ),
+    )
+    # ------------------------------------------------------------------ #
     # Background pruning of orphaned ACL ids.
     # ------------------------------------------------------------------ #
     acl_prune_interval: int = Field(

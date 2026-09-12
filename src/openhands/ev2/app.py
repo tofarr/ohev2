@@ -157,6 +157,16 @@ async def _sweep_acl_prune() -> str | None:
     return f"pruned {count} roles with orphaned ACL ids" if count else None
 
 
+async def _sweep_expired_api_keys() -> str | None:
+    """Delete expired system API keys and return a summary message."""
+    from openhands.ev2.api_key.api_key_service import delete_expired_system_keys
+
+    factory = get_session_factory()
+    async with factory() as session:
+        deleted = await delete_expired_system_keys(session)
+    return f"deleted {deleted} expired system API keys" if deleted else None
+
+
 def _partition_message(created: list[str], dropped: list[str]) -> str | None:
     """Build a log message from partition sweep results."""
     parts: list[str] = []
@@ -221,6 +231,15 @@ async def _acl_prune_loop() -> None:
     await _background_sweep(interval, "acl prune", _sweep_acl_prune)
 
 
+async def _api_key_cleanup_loop() -> None:
+    """Background sweep that deletes expired system API keys."""
+    cfg = get_config()
+    interval = cfg.api_key_cleanup_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "api key cleanup", _sweep_expired_api_keys)
+
+
 async def _sweep_warm_sandboxes() -> str | None:
     """Reconcile the warm sandbox pool to per-template num_warm targets."""
     from sqlalchemy import select
@@ -263,6 +282,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_mcp_usage_partition_loop(), name="mcp-usage-partition"),
         asyncio.create_task(_mcp_usage_aggregate_loop(), name="mcp-usage-aggregate"),
         asyncio.create_task(_acl_prune_loop(), name="acl-prune"),
+        asyncio.create_task(_api_key_cleanup_loop(), name="api-key-cleanup"),
         asyncio.create_task(_warm_sandbox_loop(), name="sandbox-warm-refresh"),
     ]
     try:

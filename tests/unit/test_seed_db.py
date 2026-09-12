@@ -254,6 +254,46 @@ class TestSeedDbRegularUser:
         assert policy.to_search_filter(None, Action.CREATE) is not None
 
 
+class TestSeedDbApiKeyRole:
+    async def test_seeds_deny_all_api_key_role(self, session: AsyncSession) -> None:
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        role = await _named_role(session, "API key")
+        # Every entity column stays None (deny): the role only narrows keys.
+        for col in _ADMIN_COLUMNS:
+            assert getattr(role, col) is None
+        # It is not assigned to any user.
+        membership = await session.scalar(select(UserRole).where(UserRole.role_id == role.id))
+        assert membership is None
+
+    async def test_api_key_role_rerun_is_idempotent(self, session: AsyncSession) -> None:
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        role = await _named_role(session, "API key")
+        # An admin widening the role survives a re-seed (unlike admin/user,
+        # whose grants are refreshed).
+        role.user_permission = Permitted()
+        await session.commit()
+        await seed_db(
+            session,
+            admin_username="root",
+            admin_email="root@example.com",
+            admin_password="pw",
+        )
+        roles = (await session.scalars(select(Role).where(Role.name == "API key"))).all()
+        assert len(roles) == 1
+        role = await _named_role(session, "API key")
+        assert isinstance(role.user_permission, Permitted)
+
+
 async def _admin_role(session: AsyncSession, user_id: uuid.UUID) -> Role:
     """The admin role assigned to *user_id*."""
     stmt = (

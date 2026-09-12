@@ -204,6 +204,7 @@ class TokenService:
         enabled: bool = True,
         expires_at: datetime | None = None,
         role_id: uuid.UUID | None = None,
+        system: bool = False,
     ) -> tuple[str, ApiKey]:
         """Mint a long-lived API key and persist its backing row.
 
@@ -214,6 +215,9 @@ class TokenService:
         are the one credential whose lifetime is *not* IdP-synced: they are
         user-managed service credentials. An optional ``role_id`` restricts the
         key's effective permissions (ANDed with the user's roles at authz time).
+        ``system`` marks keys minted by the system itself (e.g. sandbox session
+        keys) so listings can filter them and the cleanup sweep can reap them
+        once expired.
         """
         raw_key = _generate_api_key_value()
         row = ApiKey(
@@ -224,6 +228,7 @@ class TokenService:
             enabled=enabled,
             expires_at=expires_at,
             role_id=role_id,
+            system=system,
         )
         self._session.add(row)
         await self._session.flush()

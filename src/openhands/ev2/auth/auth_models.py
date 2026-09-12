@@ -131,6 +131,11 @@ class ApiKey(Base):
     )
     name: Mapped[str | None] = mapped_column(default=None, nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # True for keys minted by the system itself (e.g. sandbox session keys)
+    # rather than interactively by a user. The flag exists for filtering:
+    # listings can exclude system keys via ``system__eq``, and the expired-key
+    # cleanup sweep only reaps system keys (user-minted keys are user data).
+    system: Mapped[bool] = mapped_column(default=False, server_default="false")
     # Optional role restricting this key's effective permissions. When set, the
     # role's per-entity policies are ANDed (intersected) with the principal's
     # user-role policies at authorization time, so a key can only narrow access.

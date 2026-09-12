@@ -72,7 +72,12 @@ the reconciler:
   before deactivating.
 - `session_api_key` — **encrypted** (JWE) at rest; never exposed in plaintext
   through the API (`SandboxConfigRead` omits it). The live `Sandbox` carries
-  it for agent-server authentication.
+  it for agent-server authentication. The key is minted on config creation
+  via the api_key service as a real `api_keys` row — `system=True`, named
+  `Sandbox {config_id} API key`, expiring with the config, and restricted by
+  the role named in `AppConfig.sandbox_session_api_key_role` (seeded by
+  `seed_db`, deny-everything by default). `session_api_key_id` links the
+  config to that row; deleting the config revokes the key.
 - `meta` — JSONB for provider-specific overrides.
 
 ### SandboxSnapshot (`sandbox_snapshots` table)

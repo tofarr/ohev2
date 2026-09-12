@@ -1,9 +1,13 @@
 """Service layer for the DB-backed sandbox config resource.
 
 CRUD over :class:`SandboxConfig` (the durable intent for a sandbox). The
-``session_api_key`` is minted on create and encrypted at rest (JWE ciphertext,
-same pattern as :class:`StoredProviderConnection.api_key`). It is never exposed
-in the API read model — the live sandbox service decrypts it when reconciling.
+``session_api_key`` is minted on create via the api_key service — a real
+``api_keys`` row (``system=True``) named after the config and expiring with
+it, restricted by the configured limited-access role
+(``AppConfig.sandbox_session_api_key_role``, seeded by seed_db). The raw key
+is encrypted at rest (JWE ciphertext, same pattern as
+:class:`StoredProviderConnection.api_key`). It is never exposed in the API
+read model — the live sandbox service decrypts it when reconciling.
 
 The service delegates to the :class:`SandboxService` (the polymorphic
 reconciler) when ``enabled`` changes — the DB row is the source of truth, the
@@ -12,13 +16,18 @@ service boots/stops the live sandbox to match.
 
 from __future__ import annotations
 
-import secrets
+import logging
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.api_key.api_key_schemas import ApiKeyCreate
+from openhands.ev2.api_key.api_key_service import ApiKeyService
+from openhands.ev2.auth.auth_models import ApiKey
+from openhands.ev2.config import get_config
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
+from openhands.ev2.role.role_models import Role
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_config_schemas import (
     SandboxConfigBatchCreate,
@@ -33,6 +42,8 @@ from openhands.ev2.sandbox.sandbox_config_schemas import (
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxConfigNotFoundError(Exception):
@@ -49,11 +60,6 @@ class SandboxTemplateNotFoundError(Exception):
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
-
-
-def _generate_session_api_key() -> str:
-    """Mint a random session API key for a sandbox."""
-    return secrets.token_urlsafe(32)
 
 
 class SandboxConfigService:
@@ -100,18 +106,19 @@ class SandboxConfigService:
         *,
         creator_id: uuid.UUID,
     ) -> SandboxConfig:
-        """Create a sandbox config with an encrypted session API key."""
+        """Create a sandbox config and mint its session API key."""
         template = await self._get_template(payload.sandbox_template_id)
         snapshot_on_deactivate = (
             payload.snapshot_on_deactivate
             if payload.snapshot_on_deactivate is not None
             else template.snapshot_on_deactivate
         )
-        plaintext_key = _generate_session_api_key()
         config = SandboxConfig(
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
-            session_api_key=self._enc.encrypt_value(plaintext_key),
+            # Placeholder; the real encrypted key replaces it after the first
+            # flush assigns the id used in the key's name (same transaction).
+            session_api_key="",
             enabled=payload.enabled,
             sandbox_snapshot_id=payload.sandbox_snapshot_id,
             expires_at=payload.expires_at,
@@ -122,8 +129,46 @@ class SandboxConfigService:
             raise SandboxConfigPermissionScopeError(str(payload.sandbox_template_id))
         self._session.add(config)
         await self._session.flush()
+        await self._mint_session_api_key(config)
+        await self._session.flush()
         await self._session.refresh(config)
         return config
+
+    async def _mint_session_api_key(self, config: SandboxConfig) -> None:
+        """Mint the session API key for *config* via the api_key service.
+
+        The key is a real ``api_keys`` row (``system=True``) named after the
+        config — the durable sandbox identity; live sandbox ids are
+        provider-assigned and change on recreation — with an expiry matching
+        the config's and the configured limited-access role restricting it.
+        Only the raw value (encrypted) and the row id are kept on the config.
+        Minting uses an unscoped ApiKeyService: the caller's grant is CREATE
+        on the config, not on api keys — the key is a system side effect.
+        """
+        raw_key, row = await ApiKeyService(self._session).create(
+            ApiKeyCreate(
+                name=f"Sandbox {config.id} API key",
+                enabled=True,
+                expires_at=config.expires_at,
+                role_id=await self._session_key_role_id(),
+            ),
+            creator_id=config.creator_id,
+            system=True,
+        )
+        config.session_api_key = self._enc.encrypt_value(raw_key)
+        config.session_api_key_id = row.id
+
+    async def _session_key_role_id(self) -> uuid.UUID | None:
+        """Resolve the configured sandbox session-key role, if it exists."""
+        name = get_config().sandbox_session_api_key_role
+        role_id = await self._session.scalar(select(Role.id).where(Role.name == name))
+        if role_id is None:
+            logger.warning(
+                "sandbox session API key role %r not found; minting key without a "
+                "restricting role (run seed_db to create it)",
+                name,
+            )
+        return role_id
 
     async def get(self, config_id: uuid.UUID) -> SandboxConfig:
         """Retrieve a config by id, scoped by ``perm_filter``."""
@@ -190,15 +235,29 @@ class SandboxConfigService:
             config.snapshot_on_deactivate = payload.snapshot_on_deactivate
         if "expires_at" in fields:
             config.expires_at = payload.expires_at
+            await self._sync_session_key_expiry(config)
         if "meta" in fields and payload.meta is not None:
             config.meta = payload.meta
         await self._session.flush()
         await self._session.refresh(config)
         return config
 
+    async def _sync_session_key_expiry(self, config: SandboxConfig) -> None:
+        """Keep the session API key's expiry matching the config's."""
+        if config.session_api_key_id is None:
+            return
+        key = await self._session.get(ApiKey, config.session_api_key_id)
+        if key is not None:
+            key.expires_at = config.expires_at
+            await self._session.flush()
+
     async def delete(self, config_id: uuid.UUID) -> None:
-        """Delete a sandbox config."""
+        """Delete a sandbox config, revoking its session API key."""
         config = await self.get(config_id)
+        if config.session_api_key_id is not None:
+            key = await self._session.get(ApiKey, config.session_api_key_id)
+            if key is not None:
+                await self._session.delete(key)
         await self._session.delete(config)
         await self._session.flush()
 
