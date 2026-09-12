@@ -12,7 +12,9 @@ Seeds two roles:
   created plus create permission (``on_match=Permitted``,
   ``on_create=Permitted``), and :class:`ConversationAccess` on
   ``conversation_permission`` so they can search/read conversations backed by
-  sandbox configs they created. All other entity columns are ``NULL`` (deny).
+  sandbox configs they created, and :class:`EventAccess` on
+  ``event_permission`` so they can search/read the events on those
+  conversations. All other entity columns are ``NULL`` (deny).
   Assigned to the optional seeded regular user.
 
 Also seeds a default :class:`Group` and adds every seeded user (the admin and,
@@ -63,6 +65,7 @@ from openhands.ev2.api_key.api_key_security import ApiKeyAccess
 from openhands.ev2.config import get_config
 from openhands.ev2.conversation.conversation_security import ConversationAccess
 from openhands.ev2.db import create_engine, create_session_factory
+from openhands.ev2.event.event_security import EventAccess
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
@@ -151,8 +154,10 @@ def _user_role_permissions() -> dict[str, Permission | None]:
     Sets ``api_key_permission`` to :class:`ApiKeyAccess`, ``sandbox_permission``
     to a :class:`CreatorPermission` granting full access to the sandbox
     configs the user created (``on_match=Permitted``, ``on_create=Permitted``),
-    and ``conversation_permission`` to :class:`ConversationAccess`
-    (search/read conversations backed by sandbox configs the user created).
+    ``conversation_permission`` to :class:`ConversationAccess`
+    (search/read conversations backed by sandbox configs the user created),
+    and ``event_permission`` to :class:`EventAccess` (search/read events on
+    those conversations).
     Every other governed entity stays ``None`` (deny).
     """
     return {
@@ -162,6 +167,7 @@ def _user_role_permissions() -> dict[str, Permission | None]:
             on_create=Permitted(),
         ),
         "conversation_permission": ConversationAccess(),
+        "event_permission": EventAccess(),
     }
 
 

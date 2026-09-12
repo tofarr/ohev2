@@ -14,6 +14,7 @@ from openhands.ev2.conversation.conversation_security import (
     ConversationAccess,
     ConversationAccessFilter,
 )
+from openhands.ev2.event.event_security import EventAccess
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
@@ -169,11 +170,13 @@ class TestSeedDbRegularUser:
         assert isinstance(user_role.sandbox_permission.on_match, Permitted)
         assert isinstance(user_role.sandbox_permission.on_create, Permitted)
         assert isinstance(user_role.conversation_permission, ConversationAccess)
+        assert isinstance(user_role.event_permission, EventAccess)
         # Every other entity column is denied (None).
         granted_cols = (
             "api_key_permission",
             "sandbox_permission",
             "conversation_permission",
+            "event_permission",
         )
         for col in _ADMIN_COLUMNS:
             if col in granted_cols:

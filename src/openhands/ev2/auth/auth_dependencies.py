@@ -565,6 +565,12 @@ from openhands.ev2.conversation.conversation_models import (  # noqa: E402
     Conversation as _Conversation,
 )
 from openhands.ev2.cors.cors_models import AllowedOrigin as _AllowedOrigin  # noqa: E402
+from openhands.ev2.event import (  # noqa: E402,F401
+    event_security as _event_security,  # registers EventAccess in the Permission union
+)
+from openhands.ev2.event.event_models import (  # noqa: E402
+    Event as _Event,
+)
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
     FeatureFlag as _FeatureFlag,
 )
@@ -638,6 +644,11 @@ register_resource_policy(_GroupUser, "group_user_permission")
 # Non-admin users get read/search only, scoped by the backing sandbox config's
 # creator (ConversationAccess); writes belong to the ingestion path.
 register_resource_policy(_Conversation, "conversation_permission")
+# Event is governed by its own ``event_permission`` Role column. Non-admin
+# users get read/search only, scoped by the parent conversation's backing
+# sandbox config's creator (EventAccess); events are immutable and written by
+# the ingestion path.
+register_resource_policy(_Event, "event_permission")
 
 
 def depends_permissions(
