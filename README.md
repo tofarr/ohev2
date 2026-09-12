@@ -452,6 +452,49 @@ are periodic snapshots, not request records.
   default `365`). `0` **disables** the loop — drive it with an external
   scheduler calling `SandboxUsageService.ensure_partitions`.
 
+## Event storage
+
+Events are structured data captured from conversations. The `events` table is
+a **read-like-append** projection in Postgres — `GET /conversations/{id}/events`
+queries (plus `GET …/{event_id}`, and `GET …/{event_id}/body` for the full
+payload). Writes are best-effort: the full body is written to a backing
+object store, then the row is flushed; a store outage only affects `/body`
+lookups of truncated events, never blocks the row. A reconciliation job
+(`scripts.backfill_events`) rebuilds missing rows from the store.
+
+Every event's full body lands in the backing store (filesystem default, S3
+optional) at a key **derivable from its own identity** —
+`<event_date>/<event_id[:2]>/<event_id>.json` — so the `events` table needs no
+`body_uri` column and is identical in every deployment shape. Since **all**
+events (not only oversized ones) go to the store, `/body` and the backfill
+job resolve the derivable key; the stored object is a self-describing JSON
+envelope (`id`, `conversation_id`, `kind`, `timestamp`, `size_bytes`, `body`)
+so rows can be rebuilt without consulting Postgres. When a body exceeds
+`event.body_cap_bytes` (`OHE_EVENT_BODY_CAP_BYTES`, default 256KiB) the row
+stores a self-describing truncation stub
+(`{_truncated: true, original_size_bytes, preview}`); the full body is fetched
+from the store on `/body`.
+
+Like the usage tables, `events` is **range-partitioned by day** on
+`timestamp` (a `DEFAULT` partition catches rows with no allocated partition),
+managed by an in-process partition-manager loop. Rows are immutable — delete
+is partition retention only.
+
+* `event.body_store_class` (`OHE_EVENT_BODY_STORE_CLASS`): backing-store
+  class, resolved like the sandbox service class. Defaults to
+  `FilesystemEventBodyStore`; `event.body_dir` (`OHE_EVENT_BODY_DIR`, default
+  `$HOME/.openhands/enterprise/event-bodies`)
+  carries the base directory (or the bucket name for the optional
+  `S3EventBodyStore` in `event/s3_event_store.py`, requiring the `s3` extra =
+  `boto3`).
+* `event.partition_interval` (`OHE_EVENT_PARTITION_INTERVAL`, default `300`):
+  seconds between partition sweeps that pre-create `event.preallocate_days`
+  (default `7`) future daily partitions and drop partitions older than
+  `event.retention_days` (`OHE_EVENT_RETENTION_DAYS`, default `365`). On drop
+  the aligned object-store prefix for that day is cleaned. `0` **disables**
+  the loop — drive sweeps with an external scheduler calling
+  `EventService.ensure_partitions`.
+
 ## Sandbox lifecycle
 
 Each sandbox carries a nullable `last_accessed_at` timestamp derived from the

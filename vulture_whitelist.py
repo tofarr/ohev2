@@ -56,6 +56,7 @@ user_overrides
 api_key_permission
 conversation_permission
 cors_origin_permission
+event_permission
 feature_flag_permission
 feature_flag_role_assignment_permission
 feature_flag_user_assignment_permission
@@ -86,6 +87,9 @@ RefreshToken
 SecretValueAccess
 # Selected dynamically via the `secrets_service_class` config FQCN.
 SqlSecretsService
+# Selected dynamically via the `event.body_store_class` config FQCN.
+FilesystemEventBodyStore
+S3EventBodyStore
 
 # ---- Pydantic request/response schemas (serialized by FastAPI; not called) ----
 AuthorizeRequest
@@ -119,3 +123,7 @@ _.to_exposed_ports
 
 # ---- Encryption: JWS verification exercised by tests ----
 _.verify_jws_token
+
+# ---- Event feature: exercised by tests / resolved via config FQCN ----
+_.backfill
+resolve_event_body_store_class

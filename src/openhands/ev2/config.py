@@ -7,11 +7,16 @@ environment variables with a structured prefix scheme.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 from openhands.agent_server.env_parser import from_env
 from pydantic import BaseModel, Field, PrivateAttr, SecretStr, field_serializer, model_validator
 
+from openhands.ev2.event.event_store import (
+    EventBodyStore,
+    resolve_event_body_store_class,
+)
 from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     resolve_sandbox_service_class,
@@ -164,6 +169,70 @@ class McpConfig(BaseModel):
     usage: UsageConfig = Field(
         default_factory=UsageConfig,
         description="MCP usage logging (partitioning, retention, aggregation).",
+    )
+
+
+class EventConfig(BaseModel):
+    """Event storage configuration.
+
+    Events are stored as a daily-partitioned Postgres projection (the
+    ``events`` table) plus a backing object store holding every event's full
+    body at a derivable key (``<date>/<event_id[:2]>/<event_id>.json``). The
+    body store class is resolved by fully qualified class name like the
+    sandbox/secrets services; the default is the filesystem implementation
+    writing under ``body_dir``. When the serialized body exceeds
+    ``body_cap_bytes`` the row stores a self-describing truncation stub
+    (``{"_truncated": true, "original_size_bytes", "preview"}``) instead of
+    the payload; ``size_bytes`` always carries the original size.
+
+    The partition manager keeps ``preallocate_days`` future daily partitions
+    allocated and drops partitions older than ``retention_days``; dropping a
+    partition also removes the matching date prefix from the body store in
+    the same sweep.
+    """
+
+    body_cap_bytes: int = Field(
+        default=262_144,
+        ge=1,
+        description=(
+            "Serialized event bodies at or below this size are stored inline "
+            "in the row; larger bodies are replaced by a truncation stub."
+        ),
+    )
+    body_dir: str = Field(
+        default_factory=lambda: str(Path.home() / ".openhands" / "enterprise" / "event-bodies"),
+        description=(
+            "Base directory (filesystem store) or bucket (S3 store) holding "
+            "full event bodies at derivable keys."
+        ),
+    )
+    body_store_class: str = Field(
+        default="openhands.ev2.event.event_store.FilesystemEventBodyStore",
+        description=(
+            "Fully qualified class name of the EventBodyStore implementation "
+            "(filesystem default; S3 optional)."
+        ),
+    )
+    partition_interval: float = Field(
+        default=300.0,
+        ge=0,
+        description=(
+            "Seconds between partition-manager sweeps that allocate future "
+            "daily events partitions and drop expired ones (with the aligned "
+            "date prefix delete in the body store). 0 disables the in-process "
+            "loop (drive it with an external scheduler); see README 'Event "
+            "storage'."
+        ),
+    )
+    preallocate_days: int = Field(
+        default=7,
+        ge=1,
+        description="How many future daily partitions the manager keeps allocated.",
+    )
+    retention_days: int = Field(
+        default=365,
+        ge=1,
+        description=("Partitions older than this many days are dropped by the manager."),
     )
 
 
@@ -327,6 +396,10 @@ class AppConfig(BaseModel):
     # as ``_sandbox_service`` above.
     _secrets_service: SecretsService | None = PrivateAttr(default=None)
 
+    # Cached EventBodyStore built by ``get_event_store`` — a plain handle on
+    # the backing directory/bucket, not a per-request value.
+    _event_store: EventBodyStore | None = PrivateAttr(default=None)
+
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
     idp: IdpConfig = Field(
@@ -344,6 +417,10 @@ class AppConfig(BaseModel):
     mcp: McpConfig = Field(
         default_factory=McpConfig,
         description="MCP server proxy configuration (url for proxied MCP server configs).",
+    )
+    event: EventConfig = Field(
+        default_factory=EventConfig,
+        description="Event storage configuration (body store, cap, partitions).",
     )
     # Fully qualified class name of the SandboxService implementation to
     # instantiate at server startup (an async context manager tied to the
@@ -523,6 +600,22 @@ class AppConfig(BaseModel):
         service = cast(SecretsService, from_env(service_class, "OHE_SECRETS"))
         self._secrets_service = service
         return service
+
+    def get_event_store(self) -> EventBodyStore:
+        """Build the configured :class:`EventBodyStore` from the environment.
+
+        Resolves ``event.body_store_class`` and instantiates it with
+        ``event.body_dir`` (a directory for the filesystem store, a bucket
+        for the S3 store). Cached on this config so callers reuse the same
+        instance.
+        """
+        cached = self._event_store
+        if cached is not None:
+            return cached
+        store_class = resolve_event_body_store_class(self.event.body_store_class)
+        store = store_class(self.event.body_dir)
+        self._event_store = store
+        return store
 
 
 @lru_cache(maxsize=1)

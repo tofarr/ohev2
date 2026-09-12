@@ -37,6 +37,7 @@ Tables:
 * ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
 * ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (daily-partitioned, cpu/disk nullable).
 * ``conversations``          — agent conversations backed by sandbox configs.
+* ``events``                 — conversation event projection (daily-partitioned; no body_uri column).
 """
 
 from __future__ import annotations
@@ -463,6 +464,12 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
             comment="Permission policy for conversation resources; null = deny.",
+        ),
+        sa.Column(
+            "event_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for event resources; null = deny.",
         ),
         sa.Column(
             "created_at",
@@ -1410,8 +1417,43 @@ def upgrade() -> None:
         unique=False,
     )
 
+    # ------------------------------------------------------------------ #
+    # events (range-partitioned parent by timestamp; partitions are created
+    # by the background partition manager at runtime — see README 'Event
+    # storage'. A DEFAULT partition is created here so inserts never fail
+    # before the manager's first sweep. Every event's full body lives in the
+    # backing store at a derivable key, so there is no body_uri column.)
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "events",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column(
+            "timestamp",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column("conversation_id", sa.Uuid(), nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
+        sa.Column("body", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("size_bytes", sa.Integer(), nullable=False),
+        sa.PrimaryKeyConstraint("id", "timestamp"),
+        sa.ForeignKeyConstraint(
+            ["conversation_id"],
+            ["conversations.id"],
+            ondelete="CASCADE",
+            name="fk_events_conversation_id_conversations",
+        ),
+        comment="Conversation event projection, daily-partitioned by timestamp",
+        postgresql_partition_by="RANGE(timestamp)",
+    )
+    op.create_index("ix_events_conversation_id", "events", ["conversation_id"], unique=False)
+    op.execute("CREATE TABLE events_default PARTITION OF events DEFAULT")
+
 
 def downgrade() -> None:
+    op.drop_index("ix_events_conversation_id", table_name="events")
+    op.drop_table("events")
     op.drop_index("ix_conversations_sandbox_config_id", table_name="conversations")
     op.drop_table("conversations")
     op.drop_index("ix_sandbox_usage_sandbox_config_id", table_name="sandbox_usage")

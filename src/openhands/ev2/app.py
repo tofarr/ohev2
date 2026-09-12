@@ -25,6 +25,7 @@ from openhands.ev2.conversation.conversation_router import router as conversatio
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
+from openhands.ev2.event.event_router import router as event_router
 from openhands.ev2.feature_flag.feature_flag_router import (
     overrides_router as feature_flag_role_assignment_router,
 )
@@ -294,6 +295,30 @@ async def _sandbox_usage_partition_loop() -> None:
     await _background_sweep(interval, "sandbox_usage partition manager", _sweep_sandbox_partitions)
 
 
+async def _sweep_event_partitions() -> str | None:
+    """Manage daily ``events`` partitions (with store cleanup) and summarize."""
+    from openhands.ev2.event.event_service import EventService
+
+    cfg = get_config()
+    factory = get_session_factory()
+    async with factory() as session:
+        service = EventService(session, store=cfg.get_event_store())
+        created, dropped = await service.ensure_partitions(
+            preallocate_days=cfg.event.preallocate_days,
+            retention_days=cfg.event.retention_days,
+        )
+    return _partition_message(created, dropped)
+
+
+async def _event_partition_loop() -> None:
+    """Background sweep that manages daily ``events`` partitions."""
+    cfg = get_config()
+    interval = cfg.event.partition_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "events partition manager", _sweep_event_partitions)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
@@ -313,6 +338,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_warm_sandbox_loop(), name="sandbox-warm-refresh"),
         asyncio.create_task(_sandbox_usage_loop(), name="sandbox-usage"),
         asyncio.create_task(_sandbox_usage_partition_loop(), name="sandbox-usage-partition"),
+        asyncio.create_task(_event_partition_loop(), name="events-partition"),
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()
@@ -360,6 +386,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     },
     {"name": "feature-flags", "description": "Feature flags and their role/user assignments."},
     {"name": "llm", "description": "LLM models and usage tracking."},
+    {
+        "name": "events",
+        "description": "Event storage (nested under conversations); daily-partitioned projection with body store.",
+    },
     {"name": "mcp-server-configs", "description": "MCP server configs and role access grants."},
     {
         "name": "sandbox-templates",
@@ -402,6 +432,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_discovery_router)
     app.include_router(api_key_router)
     app.include_router(conversation_router)
+    app.include_router(event_router)
     app.include_router(cors_router)
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)

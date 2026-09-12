@@ -43,6 +43,7 @@ from openhands.ev2.auth.auth_models import (  # noqa: F401
 from openhands.ev2.config import get_config
 from openhands.ev2.conversation.conversation_models import Conversation  # noqa: F401
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
+from openhands.ev2.event.event_models import Event  # noqa: F401
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
     FeatureFlagRoleAssignment,
@@ -91,6 +92,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.auth.auth_models
     import openhands.ev2.conversation.conversation_models
     import openhands.ev2.cors.cors_models
+    import openhands.ev2.event.event_models
     import openhands.ev2.feature_flag.feature_flag_models
     import openhands.ev2.group.group_models
     import openhands.ev2.llm.llm_models
@@ -129,6 +131,9 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
                         "CREATE TABLE IF NOT EXISTS sandbox_usage_default "
                         "PARTITION OF sandbox_usage DEFAULT"
                     )
+                )
+                await conn.execute(
+                    text("CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT")
                 )
         finally:
             await eng.dispose()
@@ -178,6 +183,7 @@ def _set_test_env(
     monkeypatch.setenv("OHE_LLM_USAGE_AGGREGATE_INTERVAL", "0")
     monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
     monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
+    monkeypatch.setenv("OHE_EVENT_PARTITION_INTERVAL", "0")
 
 
 async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> None:
