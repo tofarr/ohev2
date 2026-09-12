@@ -419,10 +419,15 @@ fail before the manager's first sweep (or for out-of-range timestamps).
 
 ## Sandbox usage logging
 
-A background poll records one `sandbox_usage` row per sandbox known to the
-configured `SandboxService` each interval (raw, append-only, **not** exposed
-over REST). Each row captures the provider-assigned `sandbox_id` and two
-nullable stat columns, `cpu` and `disk`, which are left `NULL` until the
+A background poll records one `sandbox_usage` row per claimed sandbox (one
+carrying a `sandbox_config_id`) known to the configured `SandboxService`
+each interval (raw, append-only, **not** exposed over REST). Rows are keyed
+by the DB-backed `sandbox_config` (`ON DELETE RESTRICT` — a config with
+usage rows cannot be deleted; usage history outlives the sandbox) — not the
+provider-assigned sandbox id — so usage joins to the config and from there
+to the owning user (`creator_id`) and their groups; unclaimed warm-pool
+sandboxes (no config yet) are skipped. Each row also carries two nullable
+stat columns, `cpu` and `disk`, which are left `NULL` until the
 provider-neutral `Sandbox` model carries resource stats and the sandbox
 services populate them. Unlike `llm_usage` / `mcp_usage` the table is not
 daily-partitioned — rows are periodic snapshots, not request records.

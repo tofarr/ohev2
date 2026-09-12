@@ -229,10 +229,15 @@ symbols adds maintenance burden (easy to drift out of sync) without value.
   `sandbox_usage_interval`, env `OHE_SANDBOX_USAGE_INTERVAL`, default 60s;
   `= 0` disables with the external-scheduler fallback) lists sandboxes from
   the configured `SandboxService` and records one `sandbox_usage` row per
-  sandbox via `SandboxUsageService.record_usage`. The table mirrors the
-  llm/mcp usage pattern but is unpartitioned and not exposed over REST;
-  `cpu`/`disk` are nullable floats left NULL until `Sandbox` carries
-  resource stats and the providers populate them.
+  claimed sandbox via `SandboxUsageService.record_usage`. Rows are keyed by
+  `sandbox_config_id` (FK `ON DELETE RESTRICT` — a config with usage rows
+  cannot be deleted; usage history outlives the sandbox) — the DB-backed
+  config, not the provider sandbox id — so usage associates with the owning
+  user and their groups through `sandbox_configs`; unclaimed warm-pool
+  sandboxes are skipped. The table mirrors the llm/mcp usage pattern but is
+  unpartitioned and not exposed over REST; `cpu`/`disk` are nullable floats
+  left NULL
+  until `Sandbox` carries resource stats and the providers populate them.
 
 ## 9. Auth
 

@@ -35,7 +35,7 @@ Tables:
 * ``sandbox_templates``      — DB-backed sandbox templates (mutable, provider-neutral).
 * ``sandbox_configs``        — durable sandbox intent (DB-backed source of truth).
 * ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
-* ``sandbox_usage``          — per-poll per-sandbox usage snapshots (cpu/disk nullable).
+* ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (cpu/disk nullable).
 """
 
 from __future__ import annotations
@@ -1307,11 +1307,10 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # sandbox_usage (not partitioned: rows are periodic per-sandbox
+    # sandbox_usage (not partitioned: rows are periodic per-sandbox-config
     # snapshots recorded by the background poll, not request records —
-    # see README 'Sandbox usage logging'. sandbox_id is the provider-
-    # assigned id, not an FK: live sandboxes are provider-backed, not DB
-    # rows.)
+    # see README 'Sandbox usage logging'. Keyed by the DB-backed
+    # sandbox_config so usage joins to the owning user and their groups.)
     # ------------------------------------------------------------------ #
     op.create_table(
         "sandbox_usage",
@@ -1322,18 +1321,29 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
-        sa.Column("sandbox_id", sa.String(length=255), nullable=False),
+        sa.Column("sandbox_config_id", sa.Uuid(), nullable=False),
         sa.Column("cpu", sa.Float(), nullable=True),
         sa.Column("disk", sa.Float(), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["sandbox_config_id"],
+            ["sandbox_configs.id"],
+            ondelete="RESTRICT",
+            name="fk_sandbox_usage_sandbox_config_id_sandbox_configs",
+        ),
         sa.PrimaryKeyConstraint("id"),
-        comment="Per-poll per-sandbox usage snapshots recorded by the background poll",
+        comment="Per-poll per-sandbox-config usage snapshots recorded by the background poll",
     )
     op.create_index("ix_sandbox_usage_created_at", "sandbox_usage", ["created_at"], unique=False)
-    op.create_index("ix_sandbox_usage_sandbox_id", "sandbox_usage", ["sandbox_id"], unique=False)
+    op.create_index(
+        "ix_sandbox_usage_sandbox_config_id",
+        "sandbox_usage",
+        ["sandbox_config_id"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_sandbox_usage_sandbox_id", table_name="sandbox_usage")
+    op.drop_index("ix_sandbox_usage_sandbox_config_id", table_name="sandbox_usage")
     op.drop_index("ix_sandbox_usage_created_at", table_name="sandbox_usage")
     op.drop_table("sandbox_usage")
     op.drop_index("ix_sandbox_snapshots_sandbox_template_id", table_name="sandbox_snapshots")
