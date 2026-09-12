@@ -170,11 +170,11 @@ class TestEnsurePartitions:
         created, dropped = await service.ensure_partitions(
             preallocate_days=3, retention_days=365, now=now
         )
-        # 3 partitions for 2026-06-05, 2026-06-04, 2026-06-03.
+        # 3 partitions for 2026-06-05, 2026-06-06, 2026-06-07.
         assert len(created) == 3
         assert "llm_usage_20260605" in created
-        assert "llm_usage_20260604" in created
-        assert "llm_usage_20260603" in created
+        assert "llm_usage_20260606" in created
+        assert "llm_usage_20260607" in created
         assert dropped == []
         # Idempotent: a second sweep creates nothing.
         created2, _ = await service.ensure_partitions(

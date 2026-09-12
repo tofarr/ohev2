@@ -35,7 +35,7 @@ Tables:
 * ``sandbox_templates``      — DB-backed sandbox templates (mutable, provider-neutral).
 * ``sandbox_configs``        — durable sandbox intent (DB-backed source of truth).
 * ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
-* ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (cpu/disk nullable).
+* ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (daily-partitioned, cpu/disk nullable).
 """
 
 from __future__ import annotations
@@ -1307,10 +1307,10 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # sandbox_usage (not partitioned: rows are periodic per-sandbox-config
-    # snapshots recorded by the background poll, not request records —
-    # see README 'Sandbox usage logging'. Keyed by the DB-backed
-    # sandbox_config so usage joins to the owning user and their groups.)
+    # sandbox_usage (range-partitioned parent by created_at; partitions are
+    # managed by the background partition-manager loop — see README
+    # 'Sandbox usage logging'. Keyed by the DB-backed sandbox_config so
+    # usage joins to the owning user and their groups.)
     # ------------------------------------------------------------------ #
     op.create_table(
         "sandbox_usage",
@@ -1330,8 +1330,9 @@ def upgrade() -> None:
             ondelete="RESTRICT",
             name="fk_sandbox_usage_sandbox_config_id_sandbox_configs",
         ),
-        sa.PrimaryKeyConstraint("id"),
-        comment="Per-poll per-sandbox-config usage snapshots recorded by the background poll",
+        sa.PrimaryKeyConstraint("id", "created_at"),
+        comment="Per-poll per-sandbox-config usage snapshots, daily-partitioned by created_at",
+        postgresql_partition_by="RANGE(created_at)",
     )
     op.create_index("ix_sandbox_usage_created_at", "sandbox_usage", ["created_at"], unique=False)
     op.create_index(
@@ -1340,6 +1341,10 @@ def upgrade() -> None:
         ["sandbox_config_id"],
         unique=False,
     )
+    # DEFAULT partition so inserts succeed before the manager allocates the
+    # day's partition (or when a row's created_at falls outside any allocated
+    # day). Created with raw SQL: op.create_table does not emit PARTITION OF.
+    op.execute("CREATE TABLE sandbox_usage_default PARTITION OF sandbox_usage DEFAULT")
 
 
 def downgrade() -> None:

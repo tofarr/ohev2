@@ -431,6 +431,28 @@ class AppConfig(BaseModel):
             "see README 'Sandbox usage logging'."
         ),
     )
+    sandbox_usage_partition_interval: float = Field(
+        default=300.0,
+        ge=0,
+        description=(
+            "Seconds between partition-manager sweeps that allocate future "
+            "daily sandbox_usage partitions and drop expired ones. When 0 the "
+            "in-process loop is disabled and partition management must be "
+            "driven by an external scheduler calling "
+            "SandboxUsageService.ensure_partitions; see README 'Sandbox usage "
+            "logging'."
+        ),
+    )
+    sandbox_usage_preallocate_days: int = Field(
+        default=7,
+        ge=1,
+        description=("How many future daily sandbox_usage partitions the manager keeps allocated."),
+    )
+    sandbox_usage_retention_days: int = Field(
+        default=365,
+        ge=1,
+        description="sandbox_usage partitions older than this many days are dropped.",
+    )
 
     @model_validator(mode="after")
     def ensure_encryption_key_in_decryption_keys(self) -> Self:

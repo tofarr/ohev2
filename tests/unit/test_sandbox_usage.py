@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import make_principal as _make_principal
@@ -126,3 +127,69 @@ class TestRecordUsage:
         await service.record_usage([_sandbox("sb-1", config_id)])
         with pytest.raises(IntegrityError):
             await session.execute(delete(SandboxConfig).where(SandboxConfig.id == config_id))
+
+
+class TestEnsurePartitions:
+    async def test_allocates_today_and_future_days(self, session: AsyncSession) -> None:
+        now = datetime(2026, 6, 5, 12, 30, 45, tzinfo=UTC)
+        service = SandboxUsageService(session)
+        created, dropped = await service.ensure_partitions(
+            preallocate_days=3, retention_days=365, now=now
+        )
+        # 3 partitions for 2026-06-05, 2026-06-06, 2026-06-07.
+        assert len(created) == 3
+        assert "sandbox_usage_20260605" in created
+        assert "sandbox_usage_20260606" in created
+        assert "sandbox_usage_20260607" in created
+        assert dropped == []
+        # Idempotent: a second sweep creates nothing.
+        created2, _ = await service.ensure_partitions(
+            preallocate_days=3, retention_days=365, now=now
+        )
+        assert created2 == []
+
+    async def test_drops_expired_partitions_keeps_default(self, session: AsyncSession) -> None:
+        now = datetime(2026, 6, 5, tzinfo=UTC)
+        service = SandboxUsageService(session)
+        await service.ensure_partitions(preallocate_days=1, retention_days=365, now=now)
+        # Manually create an old partition (2026-05-20) to be dropped.
+        await session.execute(
+            text(
+                "CREATE TABLE sandbox_usage_20260520 PARTITION OF sandbox_usage "
+                "FOR VALUES FROM ('2026-05-20') TO ('2026-05-21')"
+            )
+        )
+        await session.commit()
+        _created, dropped = await service.ensure_partitions(
+            preallocate_days=1, retention_days=10, now=now
+        )
+        assert "sandbox_usage_20260520" in dropped
+        # DEFAULT partition is never dropped.
+        exists = (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = 'sandbox_usage_default'")
+            )
+        ).scalar_one_or_none()
+        assert exists is not None
+
+    async def test_default_partition_catches_rows(self, session: AsyncSession) -> None:
+        """A row whose created_at has no dated partition lands in DEFAULT."""
+        config_id, _ = await _seed_config(session, username="usage-default")
+        service = SandboxUsageService(session)
+        # No dated partitions allocated (preallocate covers today only, and the
+        # row is stamped far in the past) — the DEFAULT partition catches it.
+        await service.ensure_partitions(
+            preallocate_days=1, retention_days=365, now=datetime(2026, 6, 5, tzinfo=UTC)
+        )
+        await session.execute(
+            text(
+                "INSERT INTO sandbox_usage (id, created_at, sandbox_config_id) "
+                "VALUES (gen_random_uuid(), '2020-01-01T00:00:00Z', :cid)"
+            ),
+            {"cid": config_id},
+        )
+        await session.commit()
+        count = (
+            await session.execute(text("SELECT COUNT(*) FROM sandbox_usage_default"))
+        ).scalar_one()
+        assert count == 1

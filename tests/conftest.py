@@ -122,6 +122,12 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
                         "PARTITION OF mcp_usage DEFAULT"
                     )
                 )
+                await conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS sandbox_usage_default "
+                        "PARTITION OF sandbox_usage DEFAULT"
+                    )
+                )
         finally:
             await eng.dispose()
 

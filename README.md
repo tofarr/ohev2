@@ -429,15 +429,26 @@ to the owning user (`creator_id`) and their groups; unclaimed warm-pool
 sandboxes (no config yet) are skipped. Each row also carries two nullable
 stat columns, `cpu` and `disk`, which are left `NULL` until the
 provider-neutral `Sandbox` model carries resource stats and the sandbox
-services populate them. Unlike `llm_usage` / `mcp_usage` the table is not
-daily-partitioned — rows are periodic snapshots, not request records.
+services populate them.
+
+Like `llm_usage` / `mcp_usage`, the table is **range-partitioned by day**
+on `created_at` (a `DEFAULT` partition catches any row whose day has no
+allocated partition), managed by an in-process partition-manager loop.
+Unlike them there is no aggregated projection or aggregator loop — rows
+are periodic snapshots, not request records.
 
 * `sandbox_usage_interval` (`OHE_SANDBOX_USAGE_INTERVAL`, default `60`):
   seconds between polls. **Non-zero** runs an `asyncio` loop in the FastAPI
-  lifespan.
-* `sandbox_usage_interval = 0` **disables** the in-process loop; drive
-  recording with an external scheduler listing sandboxes from the configured
-  `SandboxService` and calling `SandboxUsageService.record_usage`.
+  lifespan; `0` **disables** it — drive recording with an external
+  scheduler listing sandboxes from the configured `SandboxService` and
+  calling `SandboxUsageService.record_usage`.
+* `sandbox_usage_partition_interval` (`OHE_SANDBOX_USAGE_PARTITION_INTERVAL`,
+  default `300`): seconds between partition-manager sweeps that pre-create
+  `sandbox_usage_preallocate_days` (`OHE_SANDBOX_USAGE_PREALLOCATE_DAYS`,
+  default `7`) future daily partitions and drop partitions older than
+  `sandbox_usage_retention_days` (`OHE_SANDBOX_USAGE_RETENTION_DAYS`,
+  default `365`). `0` **disables** the loop — drive it with an external
+  scheduler calling `SandboxUsageService.ensure_partitions`.
 
 ## Sandbox lifecycle
 
