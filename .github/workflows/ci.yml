@@ -69,6 +69,7 @@ jobs:
           quint test specs/auth.qnt --main=auth
           quint test specs/batch.qnt --main=batch
           quint test specs/conversation.qnt --main=conversation
+          quint test specs/webhook.qnt --main=webhook
       - name: Check invariants
         run: |
           quint run specs/sandbox.qnt --main=sandbox --invariant=statesConsistent --max-steps=100

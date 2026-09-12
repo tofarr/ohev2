@@ -104,6 +104,12 @@ class TestListRoute:
         )
         assert resp.status_code == 400
 
+    async def test_list_malformed_cursor_parts_400(self, client: AsyncClient, conversation) -> None:
+        resp = await client.get(
+            f"/conversations/{conversation.id}/events", params={"cursor": "junk|junk"}
+        )
+        assert resp.status_code == 400
+
 
 class TestGetRoute:
     async def test_get(self, client: AsyncClient, session: AsyncSession, conversation) -> None:

@@ -198,6 +198,29 @@ class TestGetBody:
         with pytest.raises(EventBodyNotFoundError):
             await service.get_body(conversation.id, event.id)
 
+    async def test_body_truncated_malformed_store_entry_raises(
+        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+    ) -> None:
+        """A missing, unparseable, or non-dict-body stored envelope is a 404-class error."""
+        store = FilesystemEventBodyStore(str(tmp_path))
+        service = EventService(session, ALL, store=store, body_cap_bytes=_CAP)
+        big = {"text": "x" * (_CAP * 2)}
+        event = await service.create(conversation.id, _payload(body=big))
+        day = event.timestamp.date()
+
+        for stored in list(Path(tmp_path).rglob("*.json")):
+            stored.unlink()
+        with pytest.raises(EventBodyNotFoundError):
+            await service.get_body(conversation.id, event.id)
+
+        store.store_body(event.id, day, b"not-json")
+        with pytest.raises(EventBodyNotFoundError):
+            await service.get_body(conversation.id, event.id)
+
+        store.store_body(event.id, day, json.dumps({"body": "oops"}).encode())
+        with pytest.raises(EventBodyNotFoundError):
+            await service.get_body(conversation.id, event.id)
+
 
 class TestSearchEvents:
     async def test_search_orders_by_timestamp(
@@ -287,6 +310,30 @@ class TestBackfill:
     ) -> None:
         service = EventService(session, ALL, store=None)
         assert await service.backfill() == 0
+
+    async def test_backfill_tolerates_malformed_envelopes(
+        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+    ) -> None:
+        """Unparseable/non-dict envelopes are skipped; a valid envelope with a
+        non-dict body and no timestamp is rebuilt with an empty body and the
+        object-key date."""
+        store = FilesystemEventBodyStore(str(tmp_path))
+        day = datetime(2025, 1, 2, tzinfo=UTC).date()
+        store.store_body(uuid.uuid4(), day, b"not-json")
+        store.store_body(uuid.uuid4(), day, json.dumps([1, 2]).encode())
+        good_id = uuid.uuid4()
+        store.store_body(
+            good_id,
+            day,
+            json.dumps(
+                {"conversation_id": str(conversation.id), "kind": "message", "body": "oops"}
+            ).encode(),
+        )
+        service = EventService(session, ALL, store=store)
+        assert await service.backfill() == 1
+        rebuilt = await service.get(conversation.id, good_id)
+        assert rebuilt.body == {}
+        assert rebuilt.timestamp == datetime(2025, 1, 2, tzinfo=UTC)
 
 
 class TestPartitions:

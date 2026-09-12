@@ -30,6 +30,7 @@ from openhands.ev2.sandbox.sandbox_config_schemas import (
     SandboxConfigSearchFilter,
     SandboxConfigUpdate,
 )
+from openhands.ev2.sandbox.sandbox_session import hash_session_api_key
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.search_filter import ALL, SearchFilter
@@ -112,6 +113,7 @@ class SandboxConfigService:
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
             session_api_key=self._enc.encrypt_value(plaintext_key),
+            session_api_key_hash=hash_session_api_key(plaintext_key),
             enabled=payload.enabled,
             sandbox_snapshot_id=payload.sandbox_snapshot_id,
             expires_at=payload.expires_at,

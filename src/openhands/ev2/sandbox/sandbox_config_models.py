@@ -62,6 +62,15 @@ class SandboxConfig(Base):
         String(8192),
         comment="Encrypted session API key for the sandbox (JWE ciphertext).",
     )
+    # Non-secret SHA-256 of the plaintext session API key. The ingestion path
+    # resolves an inbound ``X-Session-API-Key`` header to this config by hash
+    # (see sandbox_session.py) without ever storing the plaintext.
+    session_api_key_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        index=True,
+        comment="SHA-256 hex of the plaintext session API key (lookup hash).",
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

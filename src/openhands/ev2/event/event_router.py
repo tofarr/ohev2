@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
+    depends_permissions_or_sandbox_session,
 )
 from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
@@ -88,7 +89,13 @@ async def create_event(
     conversation_id: uuid.UUID,
     payload: EventCreate,
     session: SessionDep,
-    perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.CREATE))],
+    # The ingestion path authenticates with the sandbox session key
+    # (X-Session-API-Key), scoped to the sandbox's own conversations; user
+    # credentials resolve through the standard role-policy path.
+    perm_filter: Annotated[
+        SearchFilter[Event],
+        Depends(depends_permissions_or_sandbox_session(Event, Action.CREATE)),
+    ],
 ) -> EventRead:
     service = _service(session, perm_filter)
     try:

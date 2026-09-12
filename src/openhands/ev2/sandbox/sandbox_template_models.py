@@ -100,6 +100,16 @@ class SandboxTemplate(Base):
         default_factory=dict,
         comment="Environment variables injected into the sandbox (max 4k chars serialized).",
     )
+    callback_url: Mapped[str | None] = mapped_column(
+        String(2048),
+        default=None,
+        nullable=True,
+        comment=(
+            "Base URL of this ohev2 deployment handed to the in-sandbox agent "
+            "server so it posts events/conversation updates back (webhook "
+            "ingestion path). Null disables callback injection."
+        ),
+    )
     working_dir: Mapped[str] = mapped_column(
         String(1024),
         default="/home/openhands",

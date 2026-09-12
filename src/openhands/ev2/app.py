@@ -53,6 +53,7 @@ from openhands.ev2.sandbox.sandbox_template_router import router as sandbox_temp
 from openhands.ev2.secret.secret_router import router as secret_router
 from openhands.ev2.secret.secret_value_router import router as secret_value_router
 from openhands.ev2.user.user_router import router as user_router
+from openhands.ev2.webhook.webhook_router import router as webhook_router
 
 # Sentinel IdP URL that selects the built-in dev identity provider
 # (auth.dev_router). When idp.url == this value the dev IdP router is mounted so
@@ -407,6 +408,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "sandbox-snapshots",
         "description": "DB-backed sandbox snapshots - create from a sandbox or import a file.",
     },
+    {
+        "name": "webhooks",
+        "description": "Legacy agent-server webhook adapter (sandbox session-key auth only).",
+    },
 ]
 
 
@@ -451,6 +456,7 @@ def create_app() -> FastAPI:
     app.include_router(sandbox_sandbox_router)
     app.include_router(sandbox_snapshot_router)
     app.include_router(user_router)
+    app.include_router(webhook_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app
     # construction does not require the full AppConfig env to be present at

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
     depends_permissions_or_none,
+    depends_permissions_or_sandbox_session,
 )
 from openhands.ev2.conversation.conversation_models import Conversation
 from openhands.ev2.conversation.conversation_schemas import (
@@ -223,8 +224,12 @@ async def update_conversation(
     conversation_id: uuid.UUID,
     payload: ConversationUpdate,
     session: SessionDep,
+    # The ingestion path authenticates with the sandbox session key
+    # (X-Session-API-Key), scoped to the sandbox's own conversations; user
+    # credentials resolve through the standard role-policy path.
     perm_filter: Annotated[
-        SearchFilter[Conversation], Depends(depends_permissions(Conversation, Action.UPDATE))
+        SearchFilter[Conversation],
+        Depends(depends_permissions_or_sandbox_session(Conversation, Action.UPDATE)),
     ],
 ) -> ConversationRead:
     service = ConversationService(session, perm_filter)

@@ -66,6 +66,15 @@ _bearer_scheme = HTTPBearer(
     auto_error=False,
     description="OAuth2 access token (JWE) sent as `Authorization: Bearer <token>`.",
 )
+_sandbox_session_scheme = APIKeyHeader(
+    name="X-Session-API-Key",
+    scheme_name="SandboxSessionKey",
+    auto_error=False,
+    description=(
+        "Sandbox session API key (ingestion path). Scoped to the sandbox's "
+        "own conversations/events; never a user credential."
+    ),
+)
 
 # Request-state keys for the per-request caches. Storing on request.state lets
 # multiple dependencies in the same request share one decrypted token / one
@@ -603,6 +612,10 @@ from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.sandbox.sandbox_config_models import (  # noqa: E402
     SandboxConfig as _SandboxConfig,
 )
+from openhands.ev2.sandbox.sandbox_session import (  # noqa: E402
+    resolve_sandbox_config_by_session_key,
+    sandbox_scope_filter,
+)
 from openhands.ev2.sandbox.sandbox_snapshot_models import (  # noqa: E402
     SandboxSnapshot as _SandboxSnapshot,
 )
@@ -685,6 +698,53 @@ def depends_permissions(
         session: SessionDep,
         token: Annotated[AuthToken | None, Depends(depends_access_token)],
     ) -> SearchFilter[Any]:
+        effective = await resolve_permission_filter(model_type, action, request, session, token)
+        if effective is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(f"Permission denied: action={action.value} resource={model_type.__name__}"),
+            )
+        return effective
+
+    return _guard
+
+
+def depends_permissions_or_sandbox_session(
+    model_type: type,
+    action: Action,
+) -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
+    """Like :func:`depends_permissions` but also accepts a sandbox session key.
+
+    Credential resolution order:
+
+    1. the ``X-Session-API-Key`` header — the sandbox ingestion credential.
+       It is hashed (SHA-256) and resolved to a :class:`SandboxConfig`; the
+       returned filter scopes every mutation to that config's own
+       conversations/events (never the creator's user session). A present but
+       unknown key is a 401.
+    2. the standard user credential (API key / bearer token / session
+       cookie), resolved through the role-policy path exactly like
+       :func:`depends_permissions` — a missing grant is a 403.
+
+    Only resources a sandbox credential may mutate are supported by the
+    sandbox path (conversations and events); see
+    :mod:`openhands.ev2.sandbox.sandbox_session`.
+    """
+
+    async def _guard(
+        request: Request,
+        session: SessionDep,
+        token: Annotated[AuthToken | None, Depends(depends_access_token)],
+        sandbox_key: Annotated[str | None, Security(_sandbox_session_scheme)],
+    ) -> SearchFilter[Any]:
+        if sandbox_key is not None:
+            config = await resolve_sandbox_config_by_session_key(session, sandbox_key)
+            if config is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid session API key.",
+                )
+            return await sandbox_scope_filter(session, model_type, config.id)
         effective = await resolve_permission_filter(model_type, action, request, session, token)
         if effective is None:
             raise HTTPException(
