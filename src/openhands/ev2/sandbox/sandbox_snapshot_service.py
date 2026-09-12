@@ -69,7 +69,8 @@ class SandboxSnapshotService:
                 "sandbox_template_id": snapshot.sandbox_template_id,
                 "sandbox_id": snapshot.sandbox_id,
                 "schema": snapshot.schema,
-                "download_url": download_url or snapshot.download_url,
+                "download_url": download_url
+                or f"/sandbox/sandbox-snapshots/{snapshot.id}/download",
                 "size_bytes": snapshot.size_bytes,
                 "created_at": snapshot.created_at,
             }
@@ -80,24 +81,27 @@ class SandboxSnapshotService:
         payload: SandboxSnapshotCreate,
         *,
         creator_id: uuid.UUID,
-        download_url: str,
+        snapshot_id: uuid.UUID,
         size_bytes: int | None = None,
     ) -> SandboxSnapshot:
         """Create a snapshot DB row from an existing sandbox.
 
         The artifact capture itself is performed by the sandbox service; this
-        method only persists the index row.
+        method only persists the index row. *snapshot_id* is the pre-generated
+        id used as the artifact filename, set explicitly so the DB row id and
+        the tarball filename match for restore.
         """
         snapshot = SandboxSnapshot(
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
             schema=payload.schema_type or "docker-workspace-tar-v1",
-            download_url=download_url,
+            download_url="",
             sandbox_id=payload.sandbox_id,
             size_bytes=size_bytes,
         )
+        snapshot.id = snapshot_id
         if not self._perm_filter.matches(snapshot):
-            raise SandboxSnapshotPermissionScopeError(str(payload.sandbox_id))
+            raise SandboxSnapshotPermissionScopeError(payload.sandbox_id or "unknown")
         self._session.add(snapshot)
         await self._session.flush()
         await self._session.refresh(snapshot)
@@ -108,7 +112,7 @@ class SandboxSnapshotService:
         payload: SandboxSnapshotCreate,
         *,
         creator_id: uuid.UUID,
-        download_url: str,
+        snapshot_id: uuid.UUID,
         size_bytes: int | None = None,
     ) -> SandboxSnapshot:
         """Create a snapshot DB row from an uploaded file (no source sandbox)."""
@@ -116,10 +120,11 @@ class SandboxSnapshotService:
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
             schema=payload.schema_type or "docker-workspace-tar-v1",
-            download_url=download_url,
+            download_url="",
             sandbox_id=None,
             size_bytes=size_bytes,
         )
+        snapshot.id = snapshot_id
         if not self._perm_filter.matches(snapshot):
             raise SandboxSnapshotPermissionScopeError("file import")
         self._session.add(snapshot)

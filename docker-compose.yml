@@ -25,8 +25,21 @@ services:
       OHE_ENCRYPTION_KEY_ID: default
       OHE_ENCRYPTION_KEY_VALUE: dev-secret-at-least-32-bytes-long!!
       OHE_SANDBOX_PROVIDER: docker
+      # Workspace bind-mount source and snapshot store must be shared between
+      # the app container and the sandbox containers it creates.  Using the
+      # same host path on both sides means the Docker daemon (on the host)
+      # can resolve the bind-mount source the app specifies.
+      OHE_SANDBOX_WORKSPACE_DIR: /var/lib/openhands/workspaces
+      OHE_SANDBOX_SNAPSHOT_DIR: /var/lib/openhands/snapshots
     ports:
       - "8000:8000"
+    volumes:
+      # Docker-in-Docker: the app creates sandbox containers via the Docker API.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared workspace + snapshot directories.  The same host paths are
+      # bind-mounted into sandbox containers by DockerSandboxService.
+      - /var/lib/openhands/workspaces:/var/lib/openhands/workspaces
+      - /var/lib/openhands/snapshots:/var/lib/openhands/snapshots
     depends_on:
       postgres:
         condition: service_healthy

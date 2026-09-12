@@ -22,14 +22,14 @@ class _FakeArtifactService(SandboxService):
     """Minimal provider that supports snapshot artifact operations only."""
 
     async def capture_snapshot(
-        self, sandbox_id: str, *, sandbox_perm_filter: Any = None
-    ) -> tuple[str, int | None]:
-        return f"artifact://{sandbox_id}", 42
+        self, snapshot_id: uuid.UUID, sandbox_id: str, *, sandbox_perm_filter: Any = None
+    ) -> int | None:
+        return 42
 
     async def import_snapshot_file(
-        self, file_data: bytes | None, *, schema_type: str | None = None
-    ) -> tuple[str, int | None]:
-        return f"artifact://import-{schema_type}", len(file_data or b"")
+        self, snapshot_id: uuid.UUID, file_data: bytes | None, *, schema_type: str | None = None
+    ) -> int | None:
+        return len(file_data or b"")
 
     async def stream_snapshot(self, snapshot_id: str) -> Any:
         async def _gen() -> Any:
@@ -187,7 +187,7 @@ class TestCrud:
             "/sandbox/sandbox-snapshots",
             data={
                 "sandbox_template_id": template_id,
-                "sandbox_id": str(uuid.uuid4()),
+                "sandbox_id": f"OHE_{uuid.uuid4()}_{uuid.uuid4()}",
                 "schema_type": "docker-workspace-tar-v1",
             },
         )

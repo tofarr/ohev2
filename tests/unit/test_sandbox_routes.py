@@ -99,6 +99,23 @@ def _create_payload(template_id: str = "img-a") -> dict[str, Any]:
     return {"sandbox_template_id": template_id, "sandbox_config_id": "cfg-1"}
 
 
+async def _create_template(client: AsyncClient) -> str:
+    """Create a sandbox template and return its UUID (needed for sandbox create)."""
+    tag = f"img-{uuid.uuid4()}"
+    resp = await client.post(
+        "/sandbox/sandbox-templates",
+        json={"docker_image_tag": tag, "working_dir": "/home/openhands"},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def _post_sandbox(client: AsyncClient) -> Any:
+    """Create a template + sandbox in one step, returning the POST response."""
+    tid = await _create_template(client)
+    return await client.post("/sandbox/sandboxes", json=_create_payload(tid))
+
+
 @pytest_asyncio.fixture
 async def sandbox_service() -> _FakeSandboxService:
     return _FakeSandboxService()
@@ -132,7 +149,7 @@ class TestSearchAndCount:
         assert body["next_cursor"] is None
 
     async def test_search_returns_created(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes")
         assert resp.status_code == 200
         items = resp.json()["items"]
@@ -140,14 +157,14 @@ class TestSearchAndCount:
         assert items[0]["id"] == "sandbox-1"
 
     async def test_search_with_filter(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes?id__contains=nonexistent")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
     async def test_search_pagination(self, client: AsyncClient) -> None:
         for _ in range(3):
-            await client.post("/sandbox/sandboxes", json=_create_payload())
+            await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes?limit=2")
         assert resp.status_code == 200
         body = resp.json()
@@ -156,7 +173,7 @@ class TestSearchAndCount:
 
     async def test_search_cursor(self, client: AsyncClient) -> None:
         for _ in range(3):
-            await client.post("/sandbox/sandboxes", json=_create_payload())
+            await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes?limit=2&cursor=sandbox-2")
         assert resp.status_code == 200
         body = resp.json()
@@ -165,13 +182,13 @@ class TestSearchAndCount:
         assert body["next_cursor"] is None
 
     async def test_count(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes/count")
         assert resp.status_code == 200
         assert resp.json()["count"] >= 1
 
     async def test_count_with_filter(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes/count?id__eq=sandbox-1")
         assert resp.json()["count"] == 1
 
@@ -183,7 +200,7 @@ class TestSearchAndCount:
 
 class TestCrud:
     async def test_create_returns_201(self, client: AsyncClient) -> None:
-        resp = await client.post("/sandbox/sandboxes", json=_create_payload())
+        resp = await _post_sandbox(client)
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["id"] == "sandbox-1"
@@ -193,11 +210,11 @@ class TestCrud:
         # The fake service doesn't validate templates, but we can test the
         # error mapping path via a direct _create_sandbox override.
         # Instead, test create with valid payload still works.
-        resp = await client.post("/sandbox/sandboxes", json=_create_payload())
+        resp = await _post_sandbox(client)
         assert resp.status_code == 201
 
     async def test_get_sandbox(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes/sandbox-1")
         assert resp.status_code == 200
         assert resp.json()["id"] == "sandbox-1"
@@ -207,7 +224,7 @@ class TestCrud:
         assert resp.status_code == 404
 
     async def test_update_sandbox(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.patch(
             "/sandbox/sandboxes/sandbox-1",
             json={"desired_status": "inactive"},
@@ -223,7 +240,7 @@ class TestCrud:
         assert resp.status_code == 404
 
     async def test_delete_sandbox(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.delete("/sandbox/sandboxes/sandbox-1")
         assert resp.status_code == 204
         assert (await client.get("/sandbox/sandboxes/sandbox-1")).status_code == 404
@@ -240,7 +257,7 @@ class TestCrud:
 
 class TestBatch:
     async def test_batch_read_aligned_with_none(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.get("/sandbox/sandboxes/batch?ids=sandbox-1&ids=missing")
         assert resp.status_code == 200
         items = resp.json()["items"]
@@ -258,12 +275,13 @@ class TestBatch:
         assert resp.status_code == 422
 
     async def test_batch_write_mixed(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
+        tid = await _create_template(client)
         resp = await client.post(
             "/sandbox/sandboxes/batch",
             json={
                 "operations": [
-                    {"op": "create", "data": _create_payload()},
+                    {"op": "create", "data": _create_payload(tid)},
                     {"op": "delete", "id": "sandbox-1"},
                 ]
             },
@@ -317,12 +335,12 @@ class TestValidation:
         assert resp.status_code == 422
 
     async def test_update_requires_desired_status(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.patch("/sandbox/sandboxes/sandbox-1", json={})
         assert resp.status_code == 422
 
     async def test_update_rejects_invalid_status(self, client: AsyncClient) -> None:
-        await client.post("/sandbox/sandboxes", json=_create_payload())
+        await _post_sandbox(client)
         resp = await client.patch(
             "/sandbox/sandboxes/sandbox-1",
             json={"desired_status": "bogus"},

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -426,18 +427,22 @@ async def test_stream_snapshot_returns_bytes(tmp_path: Path) -> None:
 
 async def test_service_import_snapshot_from_file(tmp_path: Path) -> None:
     service = K8sSandboxService(snapshot_dir=str(tmp_path / "snaps"))
-    snapshot_id, size = await service.import_snapshot_file(b"tarball-bytes")
-    assert snapshot_id
+    snapshot_id = uuid.uuid4()
+    size = await service.import_snapshot_file(snapshot_id, b"tarball-bytes")
     assert size is not None and size > 0
+    from openhands.ev2.util import snapshot_store
+
+    assert snapshot_store.snapshot_exists(service.snapshot_dir, str(snapshot_id))
 
 
 async def test_service_delete_snapshot(tmp_path: Path) -> None:
     service = K8sSandboxService(snapshot_dir=str(tmp_path / "snaps"))
-    snapshot_id = (await service.import_snapshot_file(b"tarball-bytes"))[0]
-    await service.delete_snapshot_artifact(snapshot_id)
+    snapshot_id = uuid.uuid4()
+    await service.import_snapshot_file(snapshot_id, b"tarball-bytes")
+    await service.delete_snapshot_artifact(str(snapshot_id))
     from openhands.ev2.util import snapshot_store
 
-    assert not snapshot_store.snapshot_exists(service.snapshot_dir, snapshot_id)
+    assert not snapshot_store.snapshot_exists(service.snapshot_dir, str(snapshot_id))
 
 
 async def test_service_delete_snapshot_not_found_raises(tmp_path: Path) -> None:
