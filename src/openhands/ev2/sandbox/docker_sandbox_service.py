@@ -51,6 +51,7 @@ from openhands.ev2.sandbox.sandbox_service import (
 )
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 from openhands.ev2.util import snapshot_store
+from openhands.ev2.util.random_id import generate_random_id
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 logger = logging.getLogger(__name__)
@@ -556,32 +557,34 @@ class DockerSandboxService(SandboxService):
 
     async def capture_snapshot(
         self,
+        snapshot_id: uuid.UUID,
         sandbox_id: str,
         *,
         sandbox_perm_filter: SearchFilter[Any] = ALL,
-    ) -> tuple[str, int | None]:
+    ) -> int | None:
         """Capture a workspace tarball from a live sandbox.
 
-        Returns ``(snapshot_id, size_bytes)``. The snapshot id is the tarball
-        filename stem and doubles as the download URL identifier.
+        *snapshot_id* is the DB row id and doubles as the tarball filename
+        stem (``<snapshot_dir>/<snapshot_id>.tar.gz``). Returns the tarball
+        size in bytes. Raises :class:`SandboxNotFoundError` when the sandbox's
+        workspace does not exist.
         """
-        snapshot_id = _generate_snapshot_id()
-        await asyncio.to_thread(self._sync_tar_snapshot, snapshot_id, sandbox_id)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_tar_snapshot, artifact_id, sandbox_id)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def import_snapshot_file(
         self,
+        snapshot_id: uuid.UUID,
         file_data: bytes | None,
         *,
         schema_type: str | None = None,
-    ) -> tuple[str, int | None]:
-        """Store an uploaded tarball and return ``(snapshot_id, size_bytes)``."""
+    ) -> int | None:
+        """Store an uploaded tarball and return its size in bytes."""
         assert file_data is not None
-        snapshot_id = _generate_snapshot_id()
-        await asyncio.to_thread(self._sync_import_snapshot, snapshot_id, file_data)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_import_snapshot, artifact_id, file_data)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
         """Delete the stored tarball for a snapshot."""
@@ -654,9 +657,9 @@ class DockerSandboxService(SandboxService):
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
             environment={
-                # This is a temporary measure. The agent server does not start with --host 0.0.0.0
-                # by default unless a session api key is set.
-                "SESSION_API_KEY": "changeme"
+                # The agent server does not start with --host 0.0.0.0 by default
+                # unless a session api key is set; mint a random one per sandbox.
+                "SESSION_API_KEY": generate_random_id()
             },
         )
         return container_name
@@ -736,7 +739,7 @@ class DockerSandboxService(SandboxService):
             if self.extra_hosts and not self.use_host_network
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
-            environment={"SESSION_API_KEY": "changeme"},
+            environment={"SESSION_API_KEY": generate_random_id()},
         )
         container.pause()
 
@@ -821,11 +824,14 @@ class DockerSandboxService(SandboxService):
         """Return the host workspace dir for *sandbox_id*, or ``None``.
 
         When ``workspace_dir`` is unset the sandbox has no persistent workspace
-        to snapshot, so snapshotting is unsupported for that sandbox.
+        to snapshot, so snapshotting is unsupported for that sandbox. The
+        workspace is keyed by the bare sandbox UUID (stripped of the ``OHE_``
+        prefix and config id suffix encoded in the container name).
         """
         if self.workspace_dir is None:
             return None
-        workspace = Path(self.workspace_dir) / sandbox_id
+        sid = _strip_ohe_prefix(sandbox_id)
+        workspace = Path(self.workspace_dir) / sid
         if not workspace.is_dir():
             raise SandboxNotFoundError(sandbox_id) from None
         return workspace
@@ -898,6 +904,9 @@ def _sandbox_from_container_attrs(
     host_config = attrs.get("HostConfig") or {}
     network_settings = attrs.get("NetworkSettings") or {}
     ports_binding = network_settings.get("Ports") or {}
+    session_api_key = (
+        _session_api_key_from_env(config.get("Env") or []) if status_str == "running" else None
+    )
     return DockerSandbox(
         id=sandbox_id,
         sandbox_template_id=template_id,
@@ -905,7 +914,7 @@ def _sandbox_from_container_attrs(
         status=_docker_status_to_sandbox_status(status_str),
         desired_status=_desired_from_labels(labels, status_str),
         snapshot_mode=snapshot_mode,
-        session_api_key=None,
+        session_api_key=session_api_key,
         exposed_urls=_exposed_urls_from_ports(exposed_ports, ports_binding),
         created_at=_parse_created(attrs.get("Created")),
         status_detail=state.get("Error") or None,
@@ -979,6 +988,15 @@ def _label_int(labels: dict[str, Any], name: str) -> int | None:
         return None
 
 
+def _session_api_key_from_env(env: list[str]) -> str | None:
+    """Extract ``SESSION_API_KEY`` from a Docker container ``Config.Env`` list."""
+    for entry in env:
+        if entry.startswith("SESSION_API_KEY="):
+            value = entry[len("SESSION_API_KEY=") :]
+            return value or None
+    return None
+
+
 def _parse_created(created: object) -> datetime:
     """Parse a Docker ``Created`` timestamp into an aware UTC datetime."""
     if isinstance(created, str):
@@ -997,19 +1015,16 @@ def _iso_utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _generate_snapshot_id() -> str:
-    """Generate a unique snapshot id (used as the tarball filename stem)."""
-    return uuid.uuid4().hex
-
-
 def _generate_sandbox_id() -> str:
-    """Generate a unique sandbox id (UUID).
+    """Generate a unique sandbox id (22-char lowercase alphanumeric).
 
     The id is encoded in the container name (``OHE_<sid>`` or
     ``OHE_<sid>_<cid>``) and used as the workspace bind-mount directory key.
-    UUIDs use dashes (not underscores), so the name splits unambiguously on ``_``.
+    The id is ``[a-z0-9]`` only, so it contains neither the ``_`` separator used
+    by the ``OHE_`` name grammar nor the ``-`` used by derived K8s names, and
+    the Docker name splits unambiguously on ``_``.
     """
-    return str(uuid.uuid4())
+    return generate_random_id()
 
 
 def _ohe_name(sandbox_id: str, config_id: str | None = None) -> str:

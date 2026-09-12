@@ -52,6 +52,7 @@ from typing import Any
 import httpx
 from packaging.version import Version
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess
@@ -461,26 +462,32 @@ async def _upsert_user(
     email: str,
     password: str,
 ) -> User:
-    """Insert a user or update its credentials if it already exists."""
-    existing = await session.scalar(select(User).where(User.username == username))
-    if existing is None:
-        user = User(
+    """Insert a user or update its credentials if it already exists.
+
+    Uses ``INSERT ... ON CONFLICT (username) DO UPDATE`` so concurrent seed
+    calls (e.g. parallel e2e tests sharing one database) are resolved
+    atomically by PostgreSQL rather than racing on a SELECT-then-INSERT.
+    """
+    hashed = hash_password(password)
+    stmt = (
+        pg_insert(User)
+        .values(
             email=email,
             username=username,
             enabled=True,
-            password=hash_password(password),
+            password=hashed,
         )
-        session.add(user)
-        await session.flush()
-        await session.refresh(user)
-        return user
-
-    existing.email = email
-    existing.enabled = True
-    existing.password = hash_password(password)
-    await session.flush()
-    await session.refresh(existing)
-    return existing
+        .on_conflict_do_update(
+            index_elements=["username"],
+            set_={"email": email, "enabled": True, "password": hashed},
+        )
+        .returning(User.id)
+    )
+    result = await session.execute(stmt)
+    user_id = result.scalar_one()
+    user = await session.get(User, user_id)
+    assert user is not None
+    return user
 
 
 async def _ensure_admin_role(session: AsyncSession, user: User) -> None:

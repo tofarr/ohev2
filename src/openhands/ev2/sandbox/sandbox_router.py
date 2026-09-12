@@ -13,14 +13,18 @@ the service from ``app.state`` and call it directly.
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
+from openhands.ev2.db import SessionDep
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_models import Sandbox
 from openhands.ev2.sandbox.sandbox_schemas import (
+    SandboxBatchCreate,
     SandboxBatchWriteRequest,
     SandboxCreate,
     SandboxRead,
@@ -35,6 +39,7 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxPermissionScopeError,
 )
 from openhands.ev2.sandbox.sandbox_snapshot_router import get_sandbox_service
+from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult, BatchWriteResult, CountResult
 from openhands.ev2.util.search_filter import SearchFilter
@@ -100,19 +105,48 @@ async def count_sandboxes(
     return CountResult(count=len(sandboxes))
 
 
+async def _resolve_template_image_tag(session: SessionDep, template_id: str) -> str:
+    """Resolve a sandbox template UUID to its Docker image tag.
+
+    ``SandboxCreate.sandbox_template_id`` carries the DB template's UUID; the
+    Docker backend needs the actual ``docker_image_tag`` to run a container.
+    Returns the image tag, or raises 404 when the template does not exist.
+    """
+    try:
+        tid = uuid.UUID(template_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sandbox template {template_id!r} not found.",
+        ) from exc
+    result = await session.execute(
+        select(SandboxTemplate.docker_image_tag).where(SandboxTemplate.id == tid)
+    )
+    row = result.first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sandbox template {template_id!r} not found.",
+        )
+    return str(row[0])
+
+
 @router.post("", response_model=SandboxRead, status_code=status.HTTP_201_CREATED)
 async def create_sandbox(
     payload: SandboxCreate,
     request: Request,
+    session: SessionDep,
     perm_filter: Annotated[
         SearchFilter[SandboxConfig],
         Depends(depends_permissions(SandboxConfig, Action.CREATE)),
     ],
 ) -> SandboxRead:
+    image_tag = await _resolve_template_image_tag(session, payload.sandbox_template_id)
+    resolved = payload.model_copy(update={"sandbox_template_id": image_tag})
     service = await get_sandbox_service(request)
     try:
         sandbox = await service.create_sandbox(
-            payload, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+            resolved, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
         )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
@@ -146,6 +180,7 @@ async def get_sandboxes_batch(
 async def write_sandboxes_batch(
     payload: SandboxBatchWriteRequest,
     request: Request,
+    session: SessionDep,
     create_filter: Annotated[
         SearchFilter[SandboxConfig] | None,
         Depends(depends_permissions_or_none(SandboxConfig, Action.CREATE)),
@@ -155,6 +190,10 @@ async def write_sandboxes_batch(
         Depends(depends_permissions_or_none(SandboxConfig, Action.DELETE)),
     ],
 ) -> BatchWriteResult[SandboxRead]:
+    for op in payload.operations:
+        if isinstance(op, SandboxBatchCreate):
+            image_tag = await _resolve_template_image_tag(session, op.data.sandbox_template_id)
+            op.data = op.data.model_copy(update={"sandbox_template_id": image_tag})
     service = await get_sandbox_service(request)
     perm_filters = cast(
         dict[Action, SearchFilter[Sandbox] | None],

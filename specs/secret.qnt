@@ -4,15 +4,14 @@
 // is governed by the generic AclPermission policy stored in the role's
 // secret_permission JSONB column — the per-secret link tables have been removed.
 //
-// Typed secrets: a Secret carries a secretType discriminator ("static" | "oauth").
-// The sensitive payload lives in a type-specific detail table (not modelled here
+// The sensitive payload lives in a separate detail table (not modelled here
 // beyond its existence). The /secrets surface returns metadata only; decrypted
 // plaintext is revealed solely through the /secret-values projection, which
 // requires membership in both the read-grant set and the SecretValuePermission
 // set (defense in depth).
 
 module secret {
-  type Secret = { id: str, code: str, secretType: str }
+  type Secret = { id: str, code: str }
 
   type RoleSecretPermission = {
     roleId: str,
@@ -157,9 +156,6 @@ module secret {
   val secretCodesUnique: bool =
     secrets.forall(a => secrets.forall(b => (a.code == b.code) implies a.id == b.id))
 
-  val secretTypesValid: bool =
-    secrets.forall(secret => secret.secretType == "static" or secret.secretType == "oauth")
-
   val userSecretPermissionsUnique: bool =
     userSecretPermissions.forall(a => userSecretPermissions.forall(b =>
       (a.userId == b.userId and a.secretId == b.secretId) implies a == b))
@@ -172,7 +168,7 @@ module secret {
 
   run creatorReceivesDirectGrant = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
       .then(all {
         assert(canAccessSecret("u1", Set(), "s1", "read", userSecretPermissions, roleSecretPermissions)),
         assert(canAccessSecret("u1", Set(), "s1", "update", userSecretPermissions, roleSecretPermissions)),
@@ -186,7 +182,7 @@ module secret {
 
   run directUserGrantAllowsRead = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
       .then(grantUserSecretPermission({
         userId: "u2",
         secretId: "s1",
@@ -206,7 +202,7 @@ module secret {
 
   run roleGrantAllowsRead = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
       .then(grantRoleSecretPermission({
         roleId: "r1",
         secretId: "s1",
@@ -226,7 +222,7 @@ module secret {
 
   run secretHasNoSingularOwner = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
       .then(deleteUser("u1"))
       .then(all {
         assert(secrets.exists(secret => secret.id == "s1")),
@@ -240,7 +236,7 @@ module secret {
 
   run valueRevealRequiresBothPerms = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY", secretType: "static" }))
+      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
       .then(grantUserSecretPermission({
         userId: "u2",
         secretId: "s1",

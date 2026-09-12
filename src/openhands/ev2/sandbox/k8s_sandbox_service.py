@@ -35,7 +35,6 @@ import contextlib
 import json
 import logging
 import re
-import secrets
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -70,6 +69,7 @@ from openhands.ev2.sandbox.sandbox_service import (
 )
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort
 from openhands.ev2.util import snapshot_store
+from openhands.ev2.util.random_id import generate_random_id
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 logger = logging.getLogger(__name__)
@@ -363,31 +363,32 @@ class K8sSandboxService(SandboxService):
 
     async def capture_snapshot(
         self,
+        snapshot_id: uuid.UUID,
         sandbox_id: str,
         *,
         sandbox_perm_filter: SearchFilter[Any] = ALL,
-    ) -> tuple[str, int | None]:
+    ) -> int | None:
         """Capture a workspace tarball from a live sandbox's PVC.
 
-        Returns ``(snapshot_id, size_bytes)``.
+        *snapshot_id* is the DB row id and doubles as the tarball filename
+        stem. Returns the tarball size in bytes.
         """
-        snapshot_id = uuid.uuid4().hex
-        await asyncio.to_thread(self._sync_capture_snapshot, snapshot_id, sandbox_id)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_capture_snapshot, artifact_id, sandbox_id)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def import_snapshot_file(
         self,
+        snapshot_id: uuid.UUID,
         file_data: bytes | None,
         *,
         schema_type: str | None = None,
-    ) -> tuple[str, int | None]:
-        """Store an uploaded tarball and return ``(snapshot_id, size_bytes)``."""
+    ) -> int | None:
+        """Store an uploaded tarball and return its size in bytes."""
         assert file_data is not None
-        snapshot_id = uuid.uuid4().hex
-        await asyncio.to_thread(self._sync_import_snapshot, snapshot_id, file_data)
-        size = snapshot_store.snapshot_size(self.snapshot_dir, snapshot_id)
-        return snapshot_id, size
+        artifact_id = str(snapshot_id)
+        await asyncio.to_thread(self._sync_import_snapshot, artifact_id, file_data)
+        return snapshot_store.snapshot_size(self.snapshot_dir, artifact_id)
 
     async def delete_snapshot_artifact(self, snapshot_id: str) -> None:
         """Delete the stored tarball for a snapshot."""
@@ -837,10 +838,11 @@ class K8sSandboxService(SandboxService):
     def _build_env(template: _K8sTemplateSpec) -> list[k8s_client.V1EnvVar]:
         """Build the container env list, ensuring SESSION_API_KEY is present."""
         env = [k8s_client.V1EnvVar(name=k, value=v) for k, v in template.initial_env.items()]
-        # Temporary measure: the agent server does not start with --host 0.0.0.0
-        # by default unless a session api key is set.
+        # The agent server does not start with --host 0.0.0.0 by default unless a
+        # session api key is set; mint a random one when the template env did not
+        # supply one.
         if not any(e.name == "SESSION_API_KEY" for e in env):
-            env.append(k8s_client.V1EnvVar(name="SESSION_API_KEY", value="changeme"))
+            env.append(k8s_client.V1EnvVar(name="SESSION_API_KEY", value=generate_random_id()))
         return env
 
     @staticmethod
@@ -1170,10 +1172,11 @@ def _sanitize_name(template_id: str) -> str:
 def _generate_sandbox_name() -> str:
     """Generate a unique sandbox name (Deployment name).
 
-    Uses a short random suffix to avoid collisions, prefixed with ``sandbox-``.
+    The name is a 22-char lowercase alphanumeric id (DNS-1123 compliant) used
+    directly as the Deployment name; derived names (``<id>-data`` PVC,
+    ``<id>-restore`` pod) are unambiguous because the id contains no ``-``.
     """
-    suffix = secrets.token_hex(4)
-    return f"sandbox-{suffix}"
+    return generate_random_id()
 
 
 class _K8sTemplateSpec(NamedTuple):

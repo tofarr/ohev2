@@ -345,8 +345,8 @@ async def test_base_snapshot_hooks_raise_unsupported() -> None:
     with pytest.raises(SandboxSnapshotUnsupportedError):
         await service.stream_snapshot("snap-a")
     with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service.capture_snapshot("sb-a")
+        await service.capture_snapshot(uuid.uuid4(), "sb-a")
     with pytest.raises(SandboxSnapshotUnsupportedError):
-        await service.import_snapshot_file(b"tar")
+        await service.import_snapshot_file(uuid.uuid4(), b"tar")
     with pytest.raises(SandboxSnapshotUnsupportedError):
         await service.delete_snapshot_artifact("snap-a")

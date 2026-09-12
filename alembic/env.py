@@ -34,7 +34,7 @@ from openhands.ev2.llm.llm_models import (  # noqa: F401
 )
 from openhands.ev2.role.role_models import Role, UserRole  # noqa: F401
 from openhands.ev2.sandbox.sandbox_usage_models import SandboxUsage  # noqa: F401
-from openhands.ev2.secret.secret_models import Secret  # noqa: F401
+from openhands.ev2.secret.sql_secrets_models import SqlSecret  # noqa: F401
 from openhands.ev2.user.user_models import User  # noqa: F401
 
 config = context.config
