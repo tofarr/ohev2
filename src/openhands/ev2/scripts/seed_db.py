@@ -7,9 +7,11 @@ Seeds two roles:
   resource type. Assigned to the seeded admin user.
 * ``user`` — a regular-user role granting :class:`ApiKeyAccess` on
   ``api_key_permission`` so a non-admin user can manage their own API keys
-  (create/read/update/delete keys scoped to their own ``user_id``). All other
-  entity columns are ``NULL`` (deny). Assigned to the optional seeded regular
-  user.
+  (create/read/update/delete keys scoped to their own ``user_id``), and a
+  :class:`CreatorPermission` on ``sandbox_permission`` granting full access to
+  the sandbox configs the user created plus create permission
+  (``on_match=Permitted``, ``on_create=Permitted``). All other entity columns
+  are ``NULL`` (deny). Assigned to the optional seeded regular user.
 
 Also seeds a default :class:`Group` and adds every seeded user (the admin and,
 when provided, the regular user) to it.
@@ -61,7 +63,7 @@ from openhands.ev2.db import create_engine, create_session_factory
 from openhands.ev2.group.group_models import Group, GroupUser
 from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_template_models import ExposedPort, SandboxTemplate
-from openhands.ev2.security.security_models import Permission, Permitted
+from openhands.ev2.security.security_models import CreatorPermission, Permission, Permitted
 from openhands.ev2.user.user_models import User
 from openhands.ev2.util.password import hash_password
 
@@ -143,11 +145,19 @@ def _is_valid_email(email: str) -> bool:
 def _user_role_permissions() -> dict[str, Permission | None]:
     """Per-entity ``Permission`` columns for the regular-user role.
 
-    Only ``api_key_permission`` is set (to :class:`ApiKeyAccess`); every other
-    governed entity stays ``None`` (deny). A regular user can therefore manage
-    their own API keys and nothing else without an additional grant.
+    Sets ``api_key_permission`` to :class:`ApiKeyAccess` so a regular user can
+    manage their own API keys, and ``sandbox_permission`` to a
+    :class:`CreatorPermission` granting full access to the sandbox configs the
+    user created and allowing them to create new ones (``on_match=Permitted``,
+    ``on_create=Permitted``). Every other governed entity stays ``None`` (deny).
     """
-    return {"api_key_permission": ApiKeyAccess()}
+    return {
+        "api_key_permission": ApiKeyAccess(),
+        "sandbox_permission": CreatorPermission(
+            on_match=Permitted(),
+            on_create=Permitted(),
+        ),
+    }
 
 
 # --------------------------------------------------------------------------- #
