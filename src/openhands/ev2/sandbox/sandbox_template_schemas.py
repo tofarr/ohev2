@@ -39,15 +39,6 @@ class SandboxTemplateCreate(BaseModel):
     max_memory: int | None = Field(default=None, gt=0)
     exposed_ports: list[ExposedPort] = Field(default_factory=list, max_length=_MAX_EXPOSED_PORTS)
     env_vars: dict[str, str] = Field(default_factory=dict)
-    callback_url: str | None = Field(
-        default=None,
-        max_length=2048,
-        description=(
-            "Base URL of this ohev2 deployment handed to the in-sandbox agent "
-            "server (as an env var) so it posts events/conversation updates "
-            "back to the webhook ingestion path; null disables it."
-        ),
-    )
     working_dir: str = Field(default="/home/openhands", min_length=1, max_length=1024)
     snapshot_dirs: list[str] = Field(default_factory=list)
     snapshot_on_deactivate: bool = False
@@ -79,7 +70,6 @@ class SandboxTemplateUpdate(BaseModel):
     max_memory: int | None = Field(default=None, gt=0)
     exposed_ports: list[ExposedPort] | None = Field(default=None, max_length=_MAX_EXPOSED_PORTS)
     env_vars: dict[str, str] | None = None
-    callback_url: str | None = Field(default=None, max_length=2048)
     working_dir: str | None = Field(default=None, min_length=1, max_length=1024)
     snapshot_dirs: list[str] | None = None
     snapshot_on_deactivate: bool | None = None
@@ -109,7 +99,6 @@ class SandboxTemplateRead(BaseModel):
     max_memory: int | None
     exposed_ports: list[ExposedPort]
     env_vars: dict[str, str]
-    callback_url: str | None
     working_dir: str
     snapshot_dirs: list[str]
     snapshot_on_deactivate: bool

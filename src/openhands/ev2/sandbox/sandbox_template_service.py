@@ -102,7 +102,6 @@ class SandboxTemplateService:
             max_memory=template.max_memory,
             exposed_ports=_dicts_to_exposed_ports(template.exposed_ports),
             env_vars=template.env_vars,
-            callback_url=template.callback_url,
             working_dir=template.working_dir,
             snapshot_dirs=template.snapshot_dirs,
             snapshot_on_deactivate=template.snapshot_on_deactivate,
@@ -128,7 +127,6 @@ class SandboxTemplateService:
             max_memory=payload.max_memory,
             exposed_ports=_exposed_ports_to_dicts(payload.exposed_ports),
             env_vars=payload.env_vars,
-            callback_url=payload.callback_url,
             working_dir=payload.working_dir,
             snapshot_dirs=payload.snapshot_dirs,
             snapshot_on_deactivate=payload.snapshot_on_deactivate,
@@ -214,8 +212,6 @@ class SandboxTemplateService:
             template.exposed_ports = _exposed_ports_to_dicts(payload.exposed_ports)
         if "env_vars" in fields and payload.env_vars is not None:
             template.env_vars = payload.env_vars
-        if "callback_url" in fields:
-            template.callback_url = payload.callback_url
         if "working_dir" in fields and payload.working_dir is not None:
             template.working_dir = payload.working_dir
         if "snapshot_dirs" in fields and payload.snapshot_dirs is not None:
