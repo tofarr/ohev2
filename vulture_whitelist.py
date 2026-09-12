@@ -80,6 +80,8 @@ OAuthClientSearchFilter
 ReadOnly
 RefreshToken
 SecretValueAccess
+# Selected dynamically via the `secrets_service_class` config FQCN.
+SqlSecretsService
 
 # ---- Pydantic request/response schemas (serialized by FastAPI; not called) ----
 AuthorizeRequest

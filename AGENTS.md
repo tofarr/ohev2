@@ -393,6 +393,26 @@ access/refresh tokens; only the `OAUTH` enum value exists today so the
 type column is forward-compatible (OAuth refresh logic is explicitly out
 of scope until those tables land).
 
+### 12.0 The secrets control plane is polymorphic
+
+Like the sandbox control plane (§8), secrets are served by a pluggable
+`SecretsService` ABC (`secret/secret_service.py`) selected via the
+`secrets_service_class` config value (a fully qualified class name) and
+constructed once by `AppConfig.get_secrets_service()` as an async context
+manager tied to the app lifespan; routers resolve it from
+`app.state.secrets_service` and pass per-principal permission filters to
+each call. The service surface exchanges the Pydantic `Secret`
+(`secret/secret_models.py`) — never an ORM row — so external stores (AWS
+Secrets Manager, 1Password, …) can be implemented without leaking client
+types. The default implementation is `SqlSecretsService`
+(`secret/sql_secrets_service.py`), which owns the ORM models
+(`secret/sql_secrets_models.py`: `SqlSecret`, `SqlStaticSecretDetail`) and
+translates internally; each operation runs in a session from
+`get_session_factory()`, and a contextvar-carried session lets `apply_batch`
+share one session and one commit across its operations (atomic batches,
+§3). Permission/search filters are applied in memory (`matches`), never
+pushed into provider-specific queries — the same convention as sandboxes.
+
 ### 12.1 Value reveal is a separate projection
 
 The typed secret tables (`secrets`, `static_secret_details`, …) **never**
@@ -401,15 +421,16 @@ omits `value` entirely; `/secrets` returns metadata only.
 
 Decrypted plaintext is revealed solely through the **`/secret-values`**
 projection, a read-only umbrella surface (`GET /secret-values`,
-`GET /secret-values/batch`, `GET /secret-values/{id}`) backed by
-`SecretValueService`. A secret is revealed only when the principal has
-**both**:
+`GET /secret-values/batch`, `GET /secret-values/{id}`) backed by the
+value-reveal methods on `SecretsService` (`get_secret_value`,
+`get_secret_values`, `search_secret_values`). A secret is revealed only when
+the principal has **both**:
 
 1. read access to the secret (the `secret_permission` filter — same grant
    logic as `/secrets`), **and**
 2. the value-reveal permission (`secret_value_permission`).
 
-`SecretValueService` ANDs the two filters (`AndSearchFilter(filters=[read,
+`SecretsService` ANDs the two filters (`AndSearchFilter(filters=[read,
 value])`); either being `None`/denying yields 404 (fail-closed — a 404, not
 a 403, so existence is not leaked). The Quint spec mirrors this in
 `canRevealValue` / `valueRevealRequiresBothPerms` (`specs/secret.qnt`).
@@ -441,10 +462,10 @@ documented exception to the "every entity column is registered 1:1" rule in
 ### 12.3 OAuth forward-compat
 
 `SecretCreate` rejects `value` when `type == oauth` (model validator) and
-requires it when `type == static`. `SecretService.update` raises
+requires it when `type == static`. `SecretsService.update_secret` raises
 `SecretValueTypeError` (→ 422) if a `value` is supplied for an oauth
-secret. `SecretValueService` raises `SecretValueNotFoundError` (→ 404) for
-an oauth secret with no detail table yet. When OAuth detail tables are
+secret. The reveal path raises `SecretValueNotFoundError` (→ 404) for
+an oauth secret with no value storage yet. When OAuth detail tables are
 added, the only schema change needed is a new detail table + a branch in
-`SecretValueService._decrypt_value` — the type column and projection
+`SqlSecretsService._decrypt_value` — the type column and projection
 surface already exist.

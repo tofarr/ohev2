@@ -16,6 +16,10 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     resolve_sandbox_service_class,
 )
+from openhands.ev2.secret.secret_service import (
+    SecretsService,
+    resolve_secrets_service_class,
+)
 
 
 class EncryptionKeyConfig(BaseModel):
@@ -319,6 +323,10 @@ class AppConfig(BaseModel):
     # async context manager, not configuration.
     _sandbox_service: SandboxService | None = PrivateAttr(default=None)
 
+    # Cached SecretsService built by ``get_secrets_service`` — same rationale
+    # as ``_sandbox_service`` above.
+    _secrets_service: SecretsService | None = PrivateAttr(default=None)
+
     encryption_key: EncryptionKeyConfig
     decryption_keys: list[EncryptionKeyConfig] = Field(default_factory=list)
     idp: IdpConfig = Field(
@@ -345,6 +353,18 @@ class AppConfig(BaseModel):
         default="openhands.ev2.sandbox.docker_sandbox_service.DockerSandboxService",
         description=(
             "Fully qualified class name of the SandboxService implementation "
+            "instantiated at server startup."
+        ),
+    )
+    # Fully qualified class name of the SecretsService implementation to
+    # instantiate at server startup (an async context manager tied to the
+    # app lifespan). Later implementations (AWS Secrets Manager, 1Password,
+    # ...) register their own FQCN here; the default selects the SQL-backed
+    # implementation.
+    secrets_service_class: str = Field(
+        default="openhands.ev2.secret.sql_secrets_service.SqlSecretsService",
+        description=(
+            "Fully qualified class name of the SecretsService implementation "
             "instantiated at server startup."
         ),
     )
@@ -450,6 +470,25 @@ class AppConfig(BaseModel):
         service_class = resolve_sandbox_service_class(self.sandbox_service_class)
         service = cast(SandboxService, from_env(service_class, "OHE_SANDBOX"))
         self._sandbox_service = service
+        return service
+
+    def get_secrets_service(self) -> SecretsService:
+        """Build the configured :class:`SecretsService` from the environment.
+
+        Resolves ``secrets_service_class`` then instantiates that concrete
+        class by parsing environment variables under the ``OHE_SECRETS``
+        prefix onto it (so each implementation can read its own
+        provider-specific knobs). The built service is cached on this config
+        so callers reuse the same instance — the service is a long-lived
+        async context manager tied to the app lifespan, not a per-request
+        value.
+        """
+        cached = self._secrets_service
+        if cached is not None:
+            return cached
+        service_class = resolve_secrets_service_class(self.secrets_service_class)
+        service = cast(SecretsService, from_env(service_class, "OHE_SECRETS"))
+        self._secrets_service = service
         return service
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 
+from fastapi import FastAPI
 from httpx import AsyncClient
 from tests.unit._auth_helpers import assign_role as _assign_role
 from tests.unit._auth_helpers import make_principal as _make_principal
@@ -99,6 +100,19 @@ class TestUpdateSecretRoute:
     async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
         resp = await client.patch(f"/secrets/{uuid.uuid4()}", json={"description": "x"})
         assert resp.status_code == 404
+
+    async def test_update_code_conflict_returns_409(self, client: AsyncClient) -> None:
+        await client.post("/secrets", json=_create_payload("TAKEN"))
+        sid = (await client.post("/secrets", json=_create_payload("FREE"))).json()["id"]
+        resp = await client.patch(f"/secrets/{sid}", json={"code": "TAKEN"})
+        assert resp.status_code == 409
+
+    async def test_update_value_on_oauth_returns_422(self, client: AsyncClient) -> None:
+        resp = await client.post("/secrets", json={"code": "OA_SECRET", "type": "oauth"})
+        assert resp.status_code == 201
+        sid = resp.json()["id"]
+        resp = await client.patch(f"/secrets/{sid}", json={"value": "x"})
+        assert resp.status_code == 422
 
 
 class TestDeleteSecretRoute:
@@ -274,3 +288,23 @@ class TestSecretRouteErrorPaths:
 
     async def test_batch_empty_ops_rejected(self, client: AsyncClient) -> None:
         assert (await client.post("/secrets/batch", json={"operations": []})).status_code == 422
+
+    async def test_batch_denied_without_roles_returns_403(
+        self, client: AsyncClient, session
+    ) -> None:
+        # A principal with no roles has no action filters; the batch endpoint
+        # denies the whole batch with 403 (fail-closed).
+        principal = await _make_principal(session, email="norole@example.com", username="norole")
+        await session.commit()
+        token = create_auth_token(principal.id)
+        resp = await client.post(
+            "/secrets/batch",
+            json={"operations": [{"op": "create", "data": _create_payload("DENIED")}]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
+    async def test_service_unavailable_returns_503(self, client: AsyncClient, app: FastAPI) -> None:
+        # The lifespan normally wires the app-scoped service; without it -> 503.
+        del app.state.secrets_service
+        assert (await client.get("/secrets")).status_code == 503

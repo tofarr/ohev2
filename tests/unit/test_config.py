@@ -66,6 +66,29 @@ class TestAppConfig:
         config = _cfg(sandbox_service_class="my.module.CustomSandboxService")
         assert config.sandbox_service_class == "my.module.CustomSandboxService"
 
+    def test_secrets_service_default(self) -> None:
+        config = _cfg()
+        assert config.secrets_service_class.endswith(".SqlSecretsService")
+
+    def test_secrets_service_override(self) -> None:
+        config = _cfg(secrets_service_class="my.module.CustomSecretsService")
+        assert config.secrets_service_class == "my.module.CustomSecretsService"
+
+    def test_get_secrets_service_builds_and_caches(self) -> None:
+        from openhands.ev2.secret.secret_service import SecretsService
+        from openhands.ev2.secret.sql_secrets_service import SqlSecretsService
+
+        config = _cfg()
+        service = config.get_secrets_service()
+        assert isinstance(service, SqlSecretsService)
+        assert isinstance(service, SecretsService)
+        assert config.get_secrets_service() is service
+
+    def test_get_secrets_service_rejects_bad_class(self) -> None:
+        config = _cfg(secrets_service_class="does.not.Exist")
+        with pytest.raises(ValueError, match="Cannot import secrets_service module"):
+            config.get_secrets_service()
+
     def test_encryption_key_auto_added_to_decryption_keys(self) -> None:
         config = _cfg(
             encryption_key=EncryptionKeyConfig(id="primary", value=SecretStr("secret")),

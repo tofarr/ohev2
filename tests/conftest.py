@@ -65,8 +65,8 @@ from openhands.ev2.role.role_models import ROLE_ENTITY_COLUMNS, Role, UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig  # noqa: F401
 from openhands.ev2.sandbox.sandbox_snapshot_models import SandboxSnapshot  # noqa: F401
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate  # noqa: F401
-from openhands.ev2.secret.secret_models import (  # noqa: F401
-    Secret,
+from openhands.ev2.secret.sql_secrets_models import (  # noqa: F401
+    SqlSecret,
 )
 from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.user.user_models import User  # noqa: F401
@@ -97,7 +97,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.sandbox.sandbox_config_models
     import openhands.ev2.sandbox.sandbox_snapshot_models
     import openhands.ev2.sandbox.sandbox_template_models
-    import openhands.ev2.secret.secret_models
+    import openhands.ev2.secret.sql_secrets_models
     import openhands.ev2.user.user_models  # noqa: F401
     from openhands.ev2.db import Base
 
@@ -349,11 +349,30 @@ async def app(engine, monkeypatch: pytest.MonkeyPatch):
         await s.commit()
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
+        # Mirror the production get_session lifecycle (db.py): commit on
+        # success, rollback on exception. The commit matters for app-scoped
+        # services (e.g. SqlSecretsService) that open their own savepoint
+        # sessions on the shared test connection: a dependency session that
+        # closes without committing would ROLLBACK TO its (earlier) savepoint
+        # and undo work the service committed inside it.
         async with factory() as s:
-            yield s
+            try:
+                yield s
+            except Exception:
+                await s.rollback()
+                raise
+            else:
+                await s.commit()
 
     application = create_app()
     application.dependency_overrides[_app_get_session] = _override_get_session
+    # ASGITransport does not run the lifespan, so wire the app-scoped services
+    # the lifespan would normally provide (see app.py). The default SQL-backed
+    # secrets service runs against the per-test savepoint transaction via the
+    # patched get_session_factory().
+    from openhands.ev2.secret.sql_secrets_service import SqlSecretsService
+
+    application.state.secrets_service = SqlSecretsService()
     yield application
     application.dependency_overrides.clear()
 
