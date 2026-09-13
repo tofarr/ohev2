@@ -1,267 +1,204 @@
-// Secret specification: secrets are permissioned resources with optional ownership.
+// Secret specification (AGENTS.md §12).
 //
-// A Secret carries an optional creator_id owner (the creating principal). Access
-// is governed by the generic AclPermission policy stored in the role's
-// secret_permission JSONB column — the per-secret link tables have been removed.
+// The secrets surface is multi-provider, retrieval-oriented. A
+// `SecretProvider` is a governed CRUD row (`secret_provider_permission`)
+// selecting a retrieval-only implementation via its `kind` discriminator;
+// the built-in `static` kind reads from the DB-backed `static_secrets`
+// store. The `/secret-values` reveal projection returns decrypted plaintext
+// gated by a **single** USE permission on the parent provider — there is no
+// separate value-reveal permission or per-secret link table.
 //
-// The sensitive payload lives in a separate detail table (not modelled here
-// beyond its existence). The /secrets surface returns metadata only; decrypted
-// plaintext is revealed solely through the /secret-values projection, which
-// requires membership in both the read-grant set and the SecretValuePermission
-// set (defense in depth).
+// The composite secret id is `{provider_id}/{internal_id}`; in this spec the
+// composite is modeled as the pair `(providerId, internalId)` (Quint strings
+// do not support splitting), and `internalId` addresses a secret within a
+// provider's store. Static-secret names are unique and env-var compatible.
 
 module secret {
-  type Secret = { id: str, code: str }
+  // ---- Data model -----------------------------------------------------------
 
-  type RoleSecretPermission = {
-    roleId: str,
-    secretId: str,
-    readEnabled: bool,
-    updateEnabled: bool,
-    deleteEnabled: bool,
+  type SecretProvider = {
+    id: str,
+    kind: str,
+    creatorId: str,
   }
 
-  type UserSecretPermission = {
-    userId: str,
-    secretId: str,
-    readEnabled: bool,
-    updateEnabled: bool,
-    deleteEnabled: bool,
+  type StaticSecret = {
+    id: str,
+    name: str,
+    value: str,
+    creatorId: str,
   }
 
-  var secrets: Set[Secret]
-  var roleSecretPermissions: Set[RoleSecretPermission]
-  var userSecretPermissions: Set[UserSecretPermission]
-  var secretValuePermissions: Set[str]
+  // The composite id `{provider_id}/{internal_id}` addresses a value.
+  type CompositeId = (str, str)
+
+  // ---- State --------------------------------------------------------------
+
+  var providers: Set[SecretProvider]
+
+  var staticSecrets: Set[StaticSecret]
+
+  // Provider ids the principal may USE (resolved from the role's
+  // secret_provider_permission). Reveal is gated on this alone.
+  var providerIdsUserCanUse: Set[str]
 
   action init = all {
-    secrets' = Set(),
-    roleSecretPermissions' = Set(),
-    userSecretPermissions' = Set(),
-    secretValuePermissions' = Set(),
+    providers' = Set(),
+    staticSecrets' = Set(),
+    providerIdsUserCanUse' = Set(),
   }
 
-  pure def flagAllows(readEnabled: bool, updateEnabled: bool, deleteEnabled: bool, act: str): bool =
-    if (act == "read" or act == "search") readEnabled
-    else if (act == "update") updateEnabled
-    else if (act == "delete") deleteEnabled
-    else false
+  // ---- Actions --------------------------------------------------------------
 
-  pure def roleGrantAllows(grant: RoleSecretPermission, act: str): bool =
-    flagAllows(grant.readEnabled, grant.updateEnabled, grant.deleteEnabled, act)
-
-  pure def userGrantAllows(grant: UserSecretPermission, act: str): bool =
-    flagAllows(grant.readEnabled, grant.updateEnabled, grant.deleteEnabled, act)
-
-  pure def canAccessSecret(
-    userId: str,
-    roleIds: Set[str],
-    secretId: str,
-    act: str,
-    directGrants: Set[UserSecretPermission],
-    roleGrants: Set[RoleSecretPermission],
-  ): bool =
-    if (act == "create") true
-    else directGrants.exists(grant =>
-      grant.userId == userId and grant.secretId == secretId and userGrantAllows(grant, act))
-      or roleGrants.exists(grant =>
-        roleIds.contains(grant.roleId)
-          and grant.secretId == secretId
-          and roleGrantAllows(grant, act))
-
-  pure def canReadSecret(
-    userId: str,
-    roleIds: Set[str],
-    secretId: str,
-    directGrants: Set[UserSecretPermission],
-    roleGrants: Set[RoleSecretPermission],
-  ): bool =
-    canAccessSecret(userId, roleIds, secretId, "read", directGrants, roleGrants)
-
-  pure def canRevealValue(
-    userId: str,
-    roleIds: Set[str],
-    secretId: str,
-    directGrants: Set[UserSecretPermission],
-    roleGrants: Set[RoleSecretPermission],
-    valuePermittedUsers: Set[str],
-  ): bool =
-    canReadSecret(userId, roleIds, secretId, directGrants, roleGrants)
-      and valuePermittedUsers.contains(userId)
-
-  action createSecret(userId: str, newSecret: Secret): bool = all {
-    not(secrets.exists(secret => secret.id == newSecret.id)),
-    not(secrets.exists(secret => secret.code == newSecret.code)),
-    secrets' = secrets.union(Set(newSecret)),
-    roleSecretPermissions' = roleSecretPermissions,
-    userSecretPermissions' = userSecretPermissions.union(Set({
-      userId: userId,
-      secretId: newSecret.id,
-      readEnabled: true,
-      updateEnabled: true,
-      deleteEnabled: true,
-    })),
-    secretValuePermissions' = secretValuePermissions,
+  action createProvider(provider: SecretProvider): bool = all {
+    not(providers.exists(p => p.id == provider.id)),
+    provider.kind != "",
+    providers' = providers.union(Set(provider)),
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse,
     true,
   }
 
-  action grantUserSecretPermission(grant: UserSecretPermission): bool = all {
-    secrets.exists(secret => secret.id == grant.secretId),
-    not(userSecretPermissions.exists(existing =>
-      existing.userId == grant.userId and existing.secretId == grant.secretId)),
-    secrets' = secrets,
-    roleSecretPermissions' = roleSecretPermissions,
-    userSecretPermissions' = userSecretPermissions.union(Set(grant)),
-    secretValuePermissions' = secretValuePermissions,
+  action deleteProvider(id: str): bool = all {
+    providers.exists(p => p.id == id),
+    providers' = providers.filter(p => p.id != id),
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse.filter(pid => pid != id),
     true,
   }
 
-  action grantRoleSecretPermission(grant: RoleSecretPermission): bool = all {
-    secrets.exists(secret => secret.id == grant.secretId),
-    not(roleSecretPermissions.exists(existing =>
-      existing.roleId == grant.roleId and existing.secretId == grant.secretId)),
-    secrets' = secrets,
-    roleSecretPermissions' = roleSecretPermissions.union(Set(grant)),
-    userSecretPermissions' = userSecretPermissions,
-    secretValuePermissions' = secretValuePermissions,
+  action grantProviderUse(id: str): bool = all {
+    providers.exists(p => p.id == id),
+    not(providerIdsUserCanUse.contains(id)),
+    providers' = providers,
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse.union(Set(id)),
     true,
   }
 
-  action grantSecretValuePermission(userId: str): bool = all {
-    not(secretValuePermissions.contains(userId)),
-    secrets' = secrets,
-    roleSecretPermissions' = roleSecretPermissions,
-    userSecretPermissions' = userSecretPermissions,
-    secretValuePermissions' = secretValuePermissions.union(Set(userId)),
+  action createStaticSecret(secret: StaticSecret): bool = all {
+    not(staticSecrets.exists(s => s.id == secret.id)),
+    not(staticSecrets.exists(s => s.name == secret.name)),
+    secret.name != "",
+    providers' = providers,
+    staticSecrets' = staticSecrets.union(Set(secret)),
+    providerIdsUserCanUse' = providerIdsUserCanUse,
     true,
   }
 
-  action deleteSecret(secretId: str): bool = all {
-    secrets.exists(secret => secret.id == secretId),
-    secrets' = secrets.filter(secret => secret.id != secretId),
-    roleSecretPermissions' = roleSecretPermissions.filter(grant => grant.secretId != secretId),
-    userSecretPermissions' = userSecretPermissions.filter(grant => grant.secretId != secretId),
-    secretValuePermissions' = secretValuePermissions,
+  action deleteStaticSecret(id: str): bool = all {
+    staticSecrets.exists(s => s.id == id),
+    providers' = providers,
+    staticSecrets' = staticSecrets.filter(s => s.id != id),
+    providerIdsUserCanUse' = providerIdsUserCanUse,
     true,
   }
 
   action deleteUser(userId: str): bool = all {
-    secrets' = secrets,
-    roleSecretPermissions' = roleSecretPermissions,
-    userSecretPermissions' = userSecretPermissions.filter(grant => grant.userId != userId),
-    secretValuePermissions' = secretValuePermissions.filter(u => u != userId),
+    providers' = providers,
+    staticSecrets' = staticSecrets.filter(s => s.creatorId != userId),
+    providerIdsUserCanUse' = providerIdsUserCanUse,
     true,
   }
 
-  val secretCodesUnique: bool =
-    secrets.forall(a => secrets.forall(b => (a.code == b.code) implies a.id == b.id))
+  // ---- Reveal projection ------------------------------------------------------
 
-  val userSecretPermissionsUnique: bool =
-    userSecretPermissions.forall(a => userSecretPermissions.forall(b =>
-      (a.userId == b.userId and a.secretId == b.secretId) implies a == b))
+  // A value reveal succeeds when the principal may USE the composite's provider
+  // AND a static secret with that internal id exists. There is no second
+  // value-reveal permission: USE on the provider alone gates revelation.
+  def canReveal(composite: CompositeId): bool =
+    providerIdsUserCanUse.contains(composite._1)
+      and staticSecrets.exists(s => s.id == composite._2)
 
-  val userSecretPermissionsReferenceSecret: bool =
-    userSecretPermissions.forall(grant => secrets.exists(secret => secret.id == grant.secretId))
+  // ---- Invariants ------------------------------------------------------------
 
-  val roleSecretPermissionsReferenceSecret: bool =
-    roleSecretPermissions.forall(grant => secrets.exists(secret => secret.id == grant.secretId))
+  val providerIdsUnique: bool =
+    providers.forall(a => providers.forall(b => (a.id == b.id) implies a == b))
 
-  run creatorReceivesDirectGrant = {
+  val staticSecretIdsUnique: bool =
+    staticSecrets.forall(a => staticSecrets.forall(b => (a.id == b.id) implies a == b))
+
+  val staticSecretNamesUnique: bool =
+    staticSecrets.forall(a => staticSecrets.forall(b => (a.name == b.name) implies a.id == b.id))
+
+  // Valueless state-change noop helper for tests.
+  action assertNoStateChange: bool = all {
+    providers' = providers,
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse,
+    true,
+  }
+
+  // ---- Tests -----------------------------------------------------------------
+
+  run revealRequiresProviderUse = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
+      .then(createProvider({ id: "p1", kind: "static", creatorId: "u1" }))
+      .then(createStaticSecret({ id: "s1", name: "API_KEY", value: "hunter2", creatorId: "u1" }))
       .then(all {
-        assert(canAccessSecret("u1", Set(), "s1", "read", userSecretPermissions, roleSecretPermissions)),
-        assert(canAccessSecret("u1", Set(), "s1", "update", userSecretPermissions, roleSecretPermissions)),
-        assert(canAccessSecret("u1", Set(), "s1", "delete", userSecretPermissions, roleSecretPermissions)),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
+        // Without USE on the provider the reveal is denied...
+        assert(not(canReveal(("p1", "s1")))),
+        assertNoStateChange,
+      })
+      .then(grantProviderUse("p1"))
+      .then(all {
+        // ...with USE, the composite reveal succeeds (single gate).
+        assert(canReveal(("p1", "s1"))),
+        assert(
+          staticSecrets.exists(s => s.id == "s1" and s.name == "API_KEY" and s.value == "hunter2")
+        ),
+        assertNoStateChange,
       })
   }
 
-  run directUserGrantAllowsRead = {
+  run useScopeIsPerProvider = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
-      .then(grantUserSecretPermission({
-        userId: "u2",
-        secretId: "s1",
-        readEnabled: true,
-        updateEnabled: false,
-        deleteEnabled: false,
-      }))
+      .then(createProvider({ id: "p1", kind: "static", creatorId: "u1" }))
+      .then(createProvider({ id: "p2", kind: "static", creatorId: "u1" }))
+      .then(createStaticSecret({ id: "s1", name: "API_KEY", value: "hunter2", creatorId: "u1" }))
+      .then(grantProviderUse("p2"))
       .then(all {
-        assert(canAccessSecret("u2", Set(), "s1", "read", userSecretPermissions, roleSecretPermissions)),
-        assert(not(canAccessSecret("u2", Set(), "s1", "update", userSecretPermissions, roleSecretPermissions))),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
+        // USE on p2 alone does not grant reveal scope over p1.
+        assert(not(providerIdsUserCanUse.contains("p1"))),
+        assert(providerIdsUserCanUse.contains("p2")),
+        assert(not(canReveal(("p1", "s1")))),
+        assertNoStateChange,
+      })
+      .then(grantProviderUse("p1"))
+      .then(all {
+        assert(canReveal(("p1", "s1"))),
+        assertNoStateChange,
       })
   }
 
-  run roleGrantAllowsRead = {
+  run cannotReuseStaticSecretName = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
-      .then(grantRoleSecretPermission({
-        roleId: "r1",
-        secretId: "s1",
-        readEnabled: true,
-        updateEnabled: false,
-        deleteEnabled: false,
-      }))
-      .then(all {
-        assert(canAccessSecret("u2", Set("r1"), "s1", "read", userSecretPermissions, roleSecretPermissions)),
-        assert(not(canAccessSecret("u2", Set("r1"), "s1", "delete", userSecretPermissions, roleSecretPermissions))),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
-      })
+      .then(createStaticSecret({ id: "s1", name: "API_KEY", value: "a", creatorId: "u1" }))
+      .then(createStaticSecret({ id: "s2", name: "API_KEY", value: "b", creatorId: "u1" }))
+      .fail()
   }
 
-  run secretHasNoSingularOwner = {
+  run staticSecretIdsAreUnique = {
     init
-      .then(createSecret("u1", { id: "s1", code: "API_KEY" }))
-      .then(deleteUser("u1"))
-      .then(all {
-        assert(secrets.exists(secret => secret.id == "s1")),
-        assert(not(userSecretPermissions.exists(grant => grant.userId == "u1"))),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
-      })
+      .then(createStaticSecret({ id: "s1", name: "API_KEY", value: "a", creatorId: "u1" }))
+      .then(createStaticSecret({ id: "s1", name: "OTHER", value: "b", creatorId: "u1" }))
+      .fail()
   }
 
-  run valueRevealRequiresBothPerms = {
+  run deleteProviderRevokesReveal = {
     init
-      .then(createSecret("creator", { id: "s1", code: "API_KEY" }))
-      .then(grantUserSecretPermission({
-        userId: "u2",
-        secretId: "s1",
-        readEnabled: true,
-        updateEnabled: false,
-        deleteEnabled: false,
-      }))
+      .then(createProvider({ id: "p1", kind: "static", creatorId: "u1" }))
+      .then(createStaticSecret({ id: "s1", name: "API_KEY", value: "hunter2", creatorId: "u1" }))
+      .then(grantProviderUse("p1"))
       .then(all {
-        // u2 can read the secret metadata...
-        assert(canReadSecret("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions)),
-        // ...but cannot reveal the value without the value-reveal permission.
-        assert(not(canRevealValue("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions, secretValuePermissions))),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
+        assert(canReveal(("p1", "s1"))),
+        assertNoStateChange,
       })
-      .then(grantSecretValuePermission("u2"))
+      .then(deleteProvider("p1"))
       .then(all {
-        // Now u2 can reveal (both read access and value permission).
-        assert(canRevealValue("u2", Set(), "s1", userSecretPermissions, roleSecretPermissions, secretValuePermissions)),
-        secrets' = secrets,
-        roleSecretPermissions' = roleSecretPermissions,
-        userSecretPermissions' = userSecretPermissions,
-        secretValuePermissions' = secretValuePermissions,
+        assert(not(canReveal(("p1", "s1")))),
+        assert(not(providers.exists(p => p.id == "p1"))),
+        assertNoStateChange,
       })
   }
 }

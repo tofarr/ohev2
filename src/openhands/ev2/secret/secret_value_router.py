@@ -1,13 +1,10 @@
 """HTTP routes for the ``/secret-values`` reveal projection.
 
-Read-only surface that returns decrypted plaintext. Three endpoints, all
-requiring *both* read access to the secret (``secret_permission`` READ via
-:func:`depends_permissions`) and the value-reveal permission
-(``secret_value_permission`` via :func:`depends_secret_value_permission`).
-A secret is revealed only when both admit it (defense in depth, AGENTS.md §12).
-
-Follows the uniform REST surface (AGENTS.md §3): plural lowercase noun,
-standard verbs, ProblemDetail errors, no ``/search`` or ``/list`` paths.
+Read-only surface that returns decrypted plaintext, gated by a **single** USE
+permission on the parent :class:`SecretProvider` (AGENTS.md §12). The secret
+id in the path and batch reads is the composite ``{provider_id}/{internal_id}``
+string (:class:`SecretValue.split_id`). Search pages by provider via
+``GET /secret-values?provider_id=...``.
 """
 
 from __future__ import annotations
@@ -15,20 +12,20 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
-    depends_secret_value_permission,
+    depends_user_id,
 )
-from openhands.ev2.secret.secret_models import Secret
-from openhands.ev2.secret.secret_router import get_secrets_service
-from openhands.ev2.secret.secret_schemas import (
-    SecretSearchFilter,
-    SecretValueRead,
-    SecretValueSearchResult,
+from openhands.ev2.db import SessionDep
+from openhands.ev2.secret.secret_models import SecretProvider
+from openhands.ev2.secret.secret_schemas import SecretValueRead, SecretValueSearchResult
+from openhands.ev2.secret.secret_value import SecretValue
+from openhands.ev2.secret.secret_value_service import (
+    SecretValueNotFoundError,
+    SecretValueSession,
 )
-from openhands.ev2.secret.secret_service import SecretValueNotFoundError
 from openhands.ev2.security.security_models import Action
 from openhands.ev2.util.schemas import BatchReadResult
 from openhands.ev2.util.search_filter import SearchFilter
@@ -36,40 +33,47 @@ from openhands.ev2.util.search_filter import SearchFilter
 router = APIRouter(prefix="/secret-values", tags=["secret-values"])
 
 
-def _cursor(value: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(value)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid cursor; expected a UUID.",
-        ) from exc
+def _to_read(value: SecretValue) -> SecretValueRead:
+    return SecretValueRead(
+        id=value.id,
+        provider_id=value.provider_id,
+        internal_id=value.internal_id,
+        name=value.name,
+        value=value.value,
+        valid_at=value.valid_at,
+        expires_at=value.expires_at,
+    )
 
 
 @router.get("", response_model=SecretValueSearchResult)
 async def search_secret_values(
-    request: Request,
-    read_filter: Annotated[
-        SearchFilter[Secret], Depends(depends_permissions(Secret, Action.SEARCH))
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
+    provider_filter: Annotated[
+        SearchFilter[SecretProvider],
+        Depends(depends_permissions(SecretProvider, Action.USE)),
     ],
-    value_filter: Annotated[SearchFilter[Secret], Depends(depends_secret_value_permission())],
-    search_filter: SecretSearchFilter = Depends(),  # noqa: B008
-    cursor: Annotated[str | None, Query(description="Opaque UUID cursor")] = None,
+    provider_id: Annotated[uuid.UUID, Query(description="Provider to page secrets from.")],
+    cursor: Annotated[str | None, Query(description="Opaque provider cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> SecretValueSearchResult:
-    service = await get_secrets_service(request)
-    cursor_uuid = _cursor(cursor) if cursor is not None else None
-    reads, next_cursor = await service.search_secret_values(
-        read_filter=read_filter,
-        value_filter=value_filter,
-        cursor=cursor_uuid,
-        limit=limit,
-        search_filter=search_filter,
-    )
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    service = SecretValueSession(session)
+    try:
+        values, next_cursor = await service.search(
+            provider_id,
+            provider_filter,
+            limit=limit,
+            cursor=cursor,
+        )
+    except SecretValueNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return SecretValueSearchResult(
-        items=reads,
-        next_cursor=str(next_cursor) if next_cursor is not None else None,
-        limit=limit,
+        items=[_to_read(v) for v in values], next_cursor=next_cursor, limit=limit
     )
 
 
@@ -78,38 +82,52 @@ async def search_secret_values(
     response_model=BatchReadResult[SecretValueRead],
 )
 async def get_secret_values_batch(
-    request: Request,
-    read_filter: Annotated[SearchFilter[Secret], Depends(depends_permissions(Secret, Action.READ))],
-    value_filter: Annotated[SearchFilter[Secret], Depends(depends_secret_value_permission())],
-    # Declared before `/{secret_id}` so the static `/batch` path matches ahead
-    # of the UUID path param. Default to an empty list so an omitted `ids`
-    # param is valid (returns an empty result) rather than a 422.
-    ids: Annotated[list[uuid.UUID], Query(default_factory=list)],
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
+    provider_filter: Annotated[
+        SearchFilter[SecretProvider],
+        Depends(depends_permissions(SecretProvider, Action.USE)),
+    ],
+    # Declared before `/{composite_id}` so the static `/batch` path matches
+    # ahead of the composite-id path param.
+    ids: Annotated[list[str], Query(default_factory=list)],
 ) -> BatchReadResult[SecretValueRead]:
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
     if len(ids) > 100:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="ids: at most 100 ids are allowed per batch read.",
         )
-    service = await get_secrets_service(request)
-    reads = await service.get_secret_values(ids, read_filter=read_filter, value_filter=value_filter)
-    return BatchReadResult(items=reads)
+    service = SecretValueSession(session)
+    values = await service.get_many(ids, provider_filter)
+    return BatchReadResult(items=[_to_read(v) if v is not None else None for v in values])
 
 
-@router.get("/{secret_id}", response_model=SecretValueRead)
+@router.get("/{composite_id:path}", response_model=SecretValueRead)
 async def get_secret_value(
-    secret_id: uuid.UUID,
-    request: Request,
-    read_filter: Annotated[SearchFilter[Secret], Depends(depends_permissions(Secret, Action.READ))],
-    value_filter: Annotated[SearchFilter[Secret], Depends(depends_secret_value_permission())],
+    composite_id: str,
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID | None, Depends(depends_user_id)],
+    provider_filter: Annotated[
+        SearchFilter[SecretProvider],
+        Depends(depends_permissions(SecretProvider, Action.USE)),
+    ],
 ) -> SecretValueRead:
-    service = await get_secrets_service(request)
-    try:
-        return await service.get_secret_value(
-            secret_id, read_filter=read_filter, value_filter=value_filter
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
         )
+    service = SecretValueSession(session)
+    try:
+        value = await service.get(composite_id, provider_filter)
     except SecretValueNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Secret value not found: {exc}",
         ) from exc
+    return _to_read(value)

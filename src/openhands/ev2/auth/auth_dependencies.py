@@ -609,10 +609,10 @@ from openhands.ev2.sandbox.sandbox_snapshot_models import (  # noqa: E402
 from openhands.ev2.sandbox.sandbox_template_models import (  # noqa: E402
     SandboxTemplate as _SandboxTemplate,
 )
-from openhands.ev2.secret import (  # noqa: E402,F401
-    secret_security as _secret_security,  # registers SecretValueAccess in the Permission union
+from openhands.ev2.secret.secret_models import (  # noqa: E402
+    SecretProvider as _SecretProvider,
 )
-from openhands.ev2.secret.secret_models import Secret as _Secret  # noqa: E402
+from openhands.ev2.secret.secret_models import StaticSecret as _StaticSecret  # noqa: E402
 from openhands.ev2.user.user_models import User as _User  # noqa: E402
 
 register_resource_policy(_User, "user_permission")
@@ -621,7 +621,8 @@ register_resource_policy(_UserRole, "user_role_permission")
 register_resource_policy(_ApiKey, "api_key_permission")
 register_resource_policy(_OAuthClient, "oauth_client_permission")
 register_resource_policy(_AllowedOrigin, "cors_origin_permission")
-register_resource_policy(_Secret, "secret_permission")
+register_resource_policy(_SecretProvider, "secret_provider_permission")
+register_resource_policy(_StaticSecret, "static_secret_permission")
 register_resource_policy(_MCPServerConfig, "mcp_server_config_permission")
 register_resource_policy(_StoredProviderConnection, "provider_connection_permission")
 register_resource_policy(_StoredLLM, "llm_permission")
@@ -741,29 +742,6 @@ async def resolve_permission_filter(
     return await _resolve_column_filter(column, action, user_id, groups, request, session, token)
 
 
-async def resolve_permission_filter_for_column(
-    column: str,
-    action: Action,
-    request: Request,
-    session: AsyncSession,
-    token: AuthToken | None,
-) -> SearchFilter[Any] | None:
-    """Reduce the principal's role policies for a named column to one filter.
-
-    Like :func:`resolve_permission_filter` but resolves a policy by its Role
-    ``Permission`` column name instead of by ORM model type. This is required
-    for ``secret_value_permission`` — a non-CRUD projection column that
-    governs the ``/secret-values`` reveal surface rather than a table. There is
-    no ORM model registered 1:1 against it via
-    :func:`register_resource_policy` (the registry maps a model type to one
-    column, and ``Secret`` is already mapped to ``secret_permission``), so the
-    value-permission is resolved by name only (AGENTS.md §12).
-    """
-    user_id = token.user_id if token is not None else None
-    groups = await _principal_groups(request, session, user_id)
-    return await _resolve_column_filter(column, action, user_id, groups, request, session, token)
-
-
 async def _resolve_column_filter(
     column: str,
     action: Action,
@@ -870,34 +848,6 @@ async def _principal_groups(
     group_ids = frozenset({row[0] for row in (await session.execute(stmt))})
     setattr(request.state, _GROUPS_KEY, group_ids)
     return group_ids
-
-
-def depends_secret_value_permission() -> Callable[..., Coroutine[Any, Any, SearchFilter[Any]]]:
-    """FastAPI dependency that authorizes value-reveal on the secret projection.
-
-    Resolves the ``secret_value_permission`` column (by name, not by model —
-    see :func:`resolve_permission_filter_for_column`) for ``READ`` and raises
-    403 when the result is ``None`` (fail-closed). The returned filter is ANDed
-    with the read-access filter inside :class:`SecretValueService`, so a secret
-    is revealed only when both admit it.
-    """
-
-    async def _guard(
-        request: Request,
-        session: SessionDep,
-        token: Annotated[AuthToken | None, Depends(depends_access_token)],
-    ) -> SearchFilter[Any]:
-        effective = await resolve_permission_filter_for_column(
-            "secret_value_permission", Action.READ, request, session, token
-        )
-        if effective is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Permission denied: action=read resource=secret_value",
-            )
-        return effective
-
-    return _guard
 
 
 def _policy_attr_for(model_type: type) -> str | None:

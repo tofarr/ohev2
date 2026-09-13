@@ -8,11 +8,9 @@ orphans.
 
 The column-to-entity-model mapping is derived from the ``_RESOURCE_POLICY``
 registry in ``auth_dependencies`` (model → column), reversed to column → model.
-The secret columns (``secret_permission``, and ``secret_value_permission`` —
-the documented §12.2 exception not in ``_RESOURCE_POLICY``) are mapped to
-:class:`SqlSecret` explicitly: the registered model is the provider-neutral
-Pydantic ``Secret``, but the canonical id space for pruning is the SQL table
-maintained by the default ``SqlSecretsService``.
+``secret_provider_permission`` / ``static_secret_permission`` resolve to their
+ORM models (:class:`SecretProvider` / :class:`StaticSecret`) and are pruned
+like any other governed entity.
 """
 
 from __future__ import annotations
@@ -96,15 +94,8 @@ async def _prune_policy(
 def _build_column_to_model_map() -> dict[str, type]:
     """Reverse ``_RESOURCE_POLICY`` (model → column) to column → model."""
     from openhands.ev2.auth.auth_dependencies import _RESOURCE_POLICY
-    from openhands.ev2.secret.sql_secrets_models import SqlSecret
 
     mapping: dict[str, type] = {}
     for model, column in _RESOURCE_POLICY.items():
         mapping[column] = model
-    # The registered model for the secret columns is the provider-neutral
-    # Pydantic Secret; the id space to prune against is the SQL table.
-    # secret_value_permission is the documented §12.2 exception not in
-    # _RESOURCE_POLICY — it governs a projection over the same table.
-    mapping["secret_permission"] = SqlSecret
-    mapping["secret_value_permission"] = SqlSecret
     return mapping

@@ -50,8 +50,9 @@ from openhands.ev2.sandbox.sandbox_config_router import router as sandbox_config
 from openhands.ev2.sandbox.sandbox_router import router as sandbox_sandbox_router
 from openhands.ev2.sandbox.sandbox_snapshot_router import router as sandbox_snapshot_router
 from openhands.ev2.sandbox.sandbox_template_router import router as sandbox_template_router
-from openhands.ev2.secret.secret_router import router as secret_router
+from openhands.ev2.secret.secret_provider_router import router as secret_provider_router
 from openhands.ev2.secret.secret_value_router import router as secret_value_router
+from openhands.ev2.secret.static_secret_router import router as static_secret_router
 from openhands.ev2.user.user_router import router as user_router
 from openhands.ev2.webhook.webhook_router import router as webhook_router
 
@@ -324,10 +325,10 @@ async def _event_partition_loop() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
 
-    Also constructs the configured :class:`SandboxService` and
-    :class:`SecretsService` (async context managers) and exposes them on
-    ``app.state.sandbox_service`` / ``app.state.secrets_service`` so the
-    routers can reach them.
+    Also constructs the configured :class:`SandboxService` (async context
+    manager) and exposes it on ``app.state.sandbox_service`` so the routers can
+    reach it. Secret providers are read-only and constructed lazily per
+    request, so no app-scoped secret service is needed.
     """
     tasks = [
         asyncio.create_task(_cleanup_loop(), name="auth-cleanup"),
@@ -343,10 +344,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()
-        secrets_service = get_config().get_secrets_service()
-        async with sandbox_service, secrets_service:
+        async with sandbox_service:
             app.state.sandbox_service = sandbox_service
-            app.state.secrets_service = secrets_service
             yield
     finally:
         for task in tasks:
@@ -380,10 +379,17 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "Agent conversations backed by sandbox configs.",
     },
     {"name": "cors-origins", "description": "CORS allow-list origins."},
-    {"name": "secrets", "description": "Secrets and role/user secret-access grants."},
+    {
+        "name": "secret-providers",
+        "description": "Governed secret-source configurations (retrieval-only).",
+    },
+    {
+        "name": "static-secrets",
+        "description": "DB-backed secret store backing the static provider.",
+    },
     {
         "name": "secret-values",
-        "description": "Read-only reveal of decrypted secret values (requires both read access and value-reveal permission).",
+        "description": "Read-only reveal of decrypted secret values (single USE gate on the provider).",
     },
     {"name": "feature-flags", "description": "Feature flags and their role/user assignments."},
     {"name": "llm", "description": "LLM models and usage tracking."},
@@ -449,8 +455,9 @@ def create_app() -> FastAPI:
     app.include_router(mcp_proxy_router)
     app.include_router(role_router)
     app.include_router(user_role_router)
-    app.include_router(secret_router)
+    app.include_router(secret_provider_router)
     app.include_router(secret_value_router)
+    app.include_router(static_secret_router)
     app.include_router(sandbox_template_router)
     app.include_router(sandbox_config_router)
     app.include_router(sandbox_sandbox_router)

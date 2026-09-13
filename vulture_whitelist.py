@@ -72,8 +72,8 @@ role_permission
 sandbox_permission
 sandbox_snapshot_permission
 sandbox_template_permission
-secret_permission
-secret_value_permission
+secret_provider_permission
+static_secret_permission
 user_permission
 user_role_permission
 
@@ -84,9 +84,8 @@ GroupPermission
 OAuthClientSearchFilter
 ReadOnly
 RefreshToken
-SecretValueAccess
-# Selected dynamically via the `secrets_service_class` config FQCN.
-SqlSecretsService
+SecretProviderCache
+StaticSecretProvider
 # Selected dynamically via the `event.body_store_class` config FQCN.
 FilesystemEventBodyStore
 S3EventBodyStore
@@ -102,9 +101,13 @@ CursorResult
 # ---- Tested utility functions / methods (reached via tests, not src dispatch) ----
 AttributeFilter
 create_auth_token
+decrypt_secret_map
 dispose_engine_factory
+dump_secret_map
+dump_secret_str
 extract_user_id
 list_snapshot_ids
+load_secret_str
 mcp_proxy_url_for
 or_filter
 reset_engine_factory
