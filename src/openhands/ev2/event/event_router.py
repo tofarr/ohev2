@@ -86,9 +86,6 @@ async def create_event(
     conversation_id: uuid.UUID,
     payload: EventCreate,
     session: SessionDep,
-    # The ingestion path also publishes events; sandboxes call the webhook
-    # adapter (``/webhooks/...``) instead. Authorization is the standard
-    # role-policy filter, matching every other route.
     perm_filter: Annotated[
         SearchFilter[Event],
         Depends(depends_permissions(Event, Action.CREATE)),
