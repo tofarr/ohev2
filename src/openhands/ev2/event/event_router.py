@@ -22,7 +22,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from openhands.ev2.auth.auth_dependencies import depends_permissions
+from openhands.ev2.auth.auth_dependencies import (
+    depends_permissions,
+)
 from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.event.event_models import Event
@@ -88,10 +90,7 @@ async def create_event(
     conversation_id: uuid.UUID,
     payload: EventCreate,
     session: SessionDep,
-    perm_filter: Annotated[
-        SearchFilter[Event],
-        Depends(depends_permissions(Event, Action.CREATE)),
-    ],
+    perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.CREATE))],
 ) -> EventRead:
     service = _service(session, perm_filter)
     try:

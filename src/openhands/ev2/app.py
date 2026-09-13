@@ -410,7 +410,7 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
     },
     {
         "name": "webhooks",
-        "description": "Legacy agent-server webhook adapter (sandbox session-key auth only).",
+        "description": "Legacy agent-server webhook adapter (standard API-key auth).",
     },
 ]
 
