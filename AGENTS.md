@@ -477,3 +477,36 @@ from the equality assertion and asserts `depends_secret_value_permission`
 is callable, so the column cannot be silently ungoverned. This is the only
 documented exception to the "every entity column is registered 1:1" rule in
 §11; do not add more without updating that test and this section.
+
+## 13. Sensitive columns & the `SecretStr` serialization standard
+
+Any column or payload field that carries a secret (an API key, token,
+password, encrypted blob, a secret provider's `data` config, …) is typed
+`SecretStr` (Pydantic) on the schema/model and **never** serialized through
+ad-hoc `encrypt_value`/`decrypt_value`/`_secret_map_to_plain` calls.
+Instead, every sensitive field is read and written through one uniform
+pydantic-serialization convention, driven by an optional **context object**
+passed to `model_dump` / `model_validate`:
+
+* `context["encryption_service"]` is an `EncryptionService` → on **dump** the
+  `SecretStr` plaintext is encrypted with `create_jwe_token` and the JWE
+  ciphertext string is what gets persisted; on **load** the persisted
+  ciphertext is decrypted with `decrypt_jwe_token` back into the `SecretStr`.
+  This is how columns are encrypted at rest.
+* `context["expose_secrets"] is True` (and no `encryption_service`) → the
+  `SecretStr` is dumped as its plaintext. Use this only in trusted,
+  non-persisted paths (e.g. handing a real credential to an in-process
+  client). Never combine with persistence.
+* No context, or neither flag → the `SecretStr` is **redacted** (Pydantic's
+  default `str(SecretStr)` — `**********`). This is the safe default for
+  logging, repr, and any dump that is not explicitly authorized to expose or
+  encrypt.
+
+The convention is implemented once as a reusable field
+serializer/validator (or a small `SecretStr` wrapper type) and applied to
+every sensitive field — it does not live in each feature. The existing
+`EncryptionKeyConfig.serialize_value` context pattern is the seed;
+`llm_models.py` (LLM `api_key`), `mcp_server_config_*` (MCP `env` /
+`headers`), `secret` provider `data`, and `static_secrets.value` all use it.
+When reviewing: if a `SecretStr` is read or written without going through
+this context convention, reject the change.
