@@ -579,6 +579,8 @@ class AppConfig(BaseModel):
             return cached
         service_class = resolve_sandbox_service_class(self.sandbox_service_class)
         service = cast(SandboxService, from_env(service_class, "OHE_SANDBOX"))
+        if service.base_url is None:
+            service.base_url = self.base_url
         self._sandbox_service = service
         return service
 

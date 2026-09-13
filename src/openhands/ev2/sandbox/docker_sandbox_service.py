@@ -24,6 +24,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
+from urllib.parse import urlparse
 
 import docker  # type: ignore[import-untyped]  # docker SDK ships no type stubs
 import httpx
@@ -60,6 +61,38 @@ logger = logging.getLogger(__name__)
 # Docker and Kubernetes providers converge on this path so a snapshot taken
 # from one provider restores cleanly into the other.
 _DEFAULT_WORKING_DIR = "/home/openhands"
+
+
+def _webhook_base_url(base_url: str, sandbox_config_id: str) -> str:
+    """Webhook callback URL as reachable from inside a container.
+
+    The public ``base_url`` host is not resolvable from inside a container, so
+    only the scheme and port are kept and the host becomes
+    ``host.docker.internal`` (mapped by ``extra_hosts``).
+    """
+    parsed = urlparse(base_url)
+    scheme = parsed.scheme or "http"
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f"{scheme}://host.docker.internal{port}/webhooks/{sandbox_config_id}"
+
+
+def _sandbox_environment(base_url: str | None, sandbox_config_id: str | None) -> dict[str, str]:
+    """Container environment for a new sandbox.
+
+    The agent server does not start with --host 0.0.0.0 by default unless a
+    session api key is set, so one is minted per sandbox. When ``base_url`` is
+    set, the webhook callback and CORS environment are injected so the agent
+    server reports conversation/event updates to this app and accepts browser
+    requests from it; the webhook URL carries the sandbox config id in its
+    path.
+    """
+    environment = {"SESSION_API_KEY": generate_random_id()}
+    if base_url is not None:
+        environment["OH_ALLOW_CORS_ORIGINS_0"] = base_url
+        if sandbox_config_id is not None:
+            environment["OH_WEBHOOKS_0_BASE_URL"] = _webhook_base_url(base_url, sandbox_config_id)
+    return environment
+
 
 # Docker image labels carrying the lifespan metadata.
 _TAG_IDLE_PAUSE_SECONDS = "io.openhands.sandbox.idle_pause_seconds"
@@ -656,11 +689,7 @@ class DockerSandboxService(SandboxService):
             if self.extra_hosts and not self.use_host_network
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
-            environment={
-                # The agent server does not start with --host 0.0.0.0 by default
-                # unless a session api key is set; mint a random one per sandbox.
-                "SESSION_API_KEY": generate_random_id()
-            },
+            environment=_sandbox_environment(self.base_url, sandbox.sandbox_config_id),
         )
         return container_name
 
@@ -739,7 +768,9 @@ class DockerSandboxService(SandboxService):
             if self.extra_hosts and not self.use_host_network
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
-            environment={"SESSION_API_KEY": generate_random_id()},
+            # Warm containers are unclaimed: no webhook callback yet (the config
+            # id is assigned at claim time), CORS only.
+            environment=_sandbox_environment(self.base_url, None),
         )
         container.pause()
 

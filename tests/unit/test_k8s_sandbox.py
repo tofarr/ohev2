@@ -982,9 +982,76 @@ def test_build_env_preserves_template_session_api_key() -> None:
         max_age_seconds=None,
         max_memory=None,
     )
-    env = {e.name: e.value for e in K8sSandboxService._build_env(spec)}
+    env = {e.name: e.value for e in K8sSandboxService()._build_env(spec)}
     # A template-supplied key is preserved, not overwritten with a random one.
     assert env["SESSION_API_KEY"] == "preset-key"
+
+
+def _template_spec(initial_env: dict[str, str] | None = None) -> Any:
+    from openhands.ev2.sandbox.k8s_sandbox_service import _K8sTemplateSpec
+
+    return _K8sTemplateSpec(
+        id="img:1",
+        command=None,
+        initial_env=initial_env or {},
+        working_dir="/work",
+        idle_pause_seconds=None,
+        paused_delete_seconds=None,
+        max_age_seconds=None,
+        max_memory=None,
+    )
+
+
+def test_build_env_injects_webhook_and_cors() -> None:
+    service = K8sSandboxService(base_url="https://app.example.com")
+    env = {e.name: e.value for e in service._build_env(_template_spec(), "cfg-1")}
+    assert env["OH_WEBHOOKS_0_BASE_URL"] == "https://app.example.com/webhooks/cfg-1"
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "https://app.example.com"
+
+
+def test_build_env_no_webhook_without_config_id() -> None:
+    service = K8sSandboxService(base_url="https://app.example.com")
+    env = {e.name: e.value for e in service._build_env(_template_spec())}
+    assert "OH_WEBHOOKS_0_BASE_URL" not in env
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "https://app.example.com"
+
+
+def test_build_env_template_overrides_injected_values() -> None:
+    service = K8sSandboxService(base_url="https://app.example.com")
+    spec = _template_spec(
+        {
+            "OH_ALLOW_CORS_ORIGINS_0": "https://custom.example.com",
+            "OH_WEBHOOKS_0_BASE_URL": "https://custom.example.com/wh/cfg-1",
+        }
+    )
+    env = {e.name: e.value for e in service._build_env(spec, "cfg-1")}
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "https://custom.example.com"
+    assert env["OH_WEBHOOKS_0_BASE_URL"] == "https://custom.example.com/wh/cfg-1"
+
+
+def test_build_env_no_base_url_only_session_key() -> None:
+    service = K8sSandboxService()
+    env = {e.name: e.value for e in service._build_env(_template_spec(), "cfg-1")}
+    assert "SESSION_API_KEY" in env
+    assert "OH_ALLOW_CORS_ORIGINS_0" not in env
+    assert "OH_WEBHOOKS_0_BASE_URL" not in env
+
+
+def test_sync_create_sandbox_carries_webhook_env() -> None:
+    fake = _FakeKube()
+    _add_template_cm(fake, "img:1")
+    service = _make_k8s_service(fake, base_url="https://app.example.com")
+    sandbox_id = service._sync_create_sandbox(
+        K8sSandbox(
+            sandbox_template_id="img:1",
+            sandbox_config_id="cfg-1",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    container = fake.apps.deployments[sandbox_id].spec.template.spec.containers[0]
+    env = {e.name: e.value for e in container.env}
+    assert env["OH_WEBHOOKS_0_BASE_URL"] == "https://app.example.com/webhooks/cfg-1"
 
 
 def test_sync_update_sandbox_scales_down() -> None:
