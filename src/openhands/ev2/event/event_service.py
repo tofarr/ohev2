@@ -148,12 +148,19 @@ class EventService:
         self._store = store
         self._body_cap_bytes = body_cap_bytes
 
-    async def create(self, conversation_id: uuid.UUID, payload: EventCreate) -> Event:
+    async def create(
+        self,
+        conversation_id: uuid.UUID,
+        payload: EventCreate,
+        *,
+        timestamp: datetime | None = None,
+    ) -> Event:
         """Persist an event under a conversation.
 
         Stores the full body to the backing store (best-effort), then flushes
         the row — either the inline payload or the truncation stub — so a
-        store outage never blocks the row.
+        store outage never blocks the row. ``timestamp`` overrides the server
+        default; the ingestion path passes the event's own time.
         """
         if not await self._conversation_exists(conversation_id):
             raise ConversationNotFoundError(str(conversation_id))
@@ -166,6 +173,10 @@ class EventService:
         )
         if not self._perm_filter.matches(event):
             raise EventPermissionScopeError(str(conversation_id))
+        if timestamp is not None:
+            # ``timestamp`` is init=False on the model (server default); stamp
+            # the event's own time for the ingestion path.
+            event.timestamp = timestamp
         self._session.add(event)
         await self._session.flush()
         await self._session.refresh(event)

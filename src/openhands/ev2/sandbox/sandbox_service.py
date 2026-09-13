@@ -27,6 +27,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
+from pydantic import Field
 
 from openhands.ev2.sandbox.sandbox_models import Sandbox
 from openhands.ev2.sandbox.sandbox_schemas import (
@@ -102,6 +103,16 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
     their own services; this ABC only owns the live sandbox and the snapshot
     *artifact* (tarball) operations those DB services delegate to.
     """
+
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Public base URL of this app (scheme + host[:port]), used to "
+            "derive the webhook callback and CORS environment injected into "
+            "sandboxes. When unset, ``AppConfig.get_sandbox_service`` fills "
+            "it from ``AppConfig.base_url``."
+        ),
+    )
 
     # ------------------------------------------------------------------ #
     # Async context manager (server lifecycle). Concrete subclasses hold

@@ -1595,6 +1595,28 @@ def test_get_sandbox_service_caches_instance(monkeypatch: pytest.MonkeyPatch) ->
     assert first is second
 
 
+def test_get_sandbox_service_inherits_app_base_url() -> None:
+    from openhands.ev2.config import AppConfig
+
+    config = AppConfig(
+        idp={"url": "https://idp.example.com", "client_id": "c", "client_secret": "s"},  # type: ignore[arg-type]
+        encryption_key={"id": "primary", "value": "test-secret-at-least-32-bytes-long!!"},  # type: ignore[arg-type]
+        base_url="https://app.example.com",
+    )
+    assert config.get_sandbox_service().base_url == "https://app.example.com"
+
+
+def test_get_sandbox_service_env_base_url_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openhands.ev2.config import AppConfig
+
+    monkeypatch.setenv("OHE_SANDBOX_BASE_URL", "https://sandbox-override.example.com")
+    config = AppConfig(
+        idp={"url": "https://idp.example.com", "client_id": "c", "client_secret": "s"},  # type: ignore[arg-type]
+        encryption_key={"id": "primary", "value": "test-secret-at-least-32-bytes-long!!"},  # type: ignore[arg-type]
+    )
+    assert config.get_sandbox_service().base_url == "https://sandbox-override.example.com"
+
+
 # --------------------------------------------------------------------------- #
 # Warm pool (Docker).
 # --------------------------------------------------------------------------- #
@@ -1735,6 +1757,76 @@ def test_sync_create_warm_creates_paused_container() -> None:
     key = c.environment["SESSION_API_KEY"]
     assert key != "changeme"
     assert len(key) == 22 and key.islower() and key.isalnum()
+
+
+def test_sync_create_sandbox_injects_webhook_and_cors_env() -> None:
+    service, fc = _make_warm_service()
+    service.base_url = "http://localhost:8000"
+    service._sync_create_sandbox(
+        DockerSandbox(
+            sandbox_template_id="img:latest",
+            sandbox_config_id="cfg-9",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    env = fc._created[0].environment
+    assert env["OH_WEBHOOKS_0_BASE_URL"] == "http://host.docker.internal:8000/webhooks/cfg-9"
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "http://localhost:8000"
+
+
+def test_sync_create_sandbox_webhook_omits_port_when_unspecified() -> None:
+    service, fc = _make_warm_service()
+    service.base_url = "https://app.example.com"
+    service._sync_create_sandbox(
+        DockerSandbox(
+            sandbox_template_id="img:latest",
+            sandbox_config_id="cfg-9",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    env = fc._created[0].environment
+    assert env["OH_WEBHOOKS_0_BASE_URL"] == "https://host.docker.internal/webhooks/cfg-9"
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "https://app.example.com"
+
+
+def test_sync_create_sandbox_no_webhook_without_config_id() -> None:
+    service, fc = _make_warm_service()
+    service.base_url = "http://localhost:8000"
+    service._sync_create_sandbox(
+        DockerSandbox(
+            sandbox_template_id="img:latest",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    env = fc._created[0].environment
+    assert "OH_WEBHOOKS_0_BASE_URL" not in env
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "http://localhost:8000"
+
+
+def test_sync_create_sandbox_no_extra_env_without_base_url() -> None:
+    service, fc = _make_warm_service()
+    service._sync_create_sandbox(
+        DockerSandbox(
+            sandbox_template_id="img:latest",
+            sandbox_config_id="cfg-9",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+        )
+    )
+    env = fc._created[0].environment
+    assert set(env) == {"SESSION_API_KEY"}
+
+
+def test_sync_create_warm_cors_only_no_webhook() -> None:
+    service, fc = _make_warm_service()
+    service.base_url = "http://localhost:8000"
+    service._sync_create_warm("img:latest")
+    env = fc._created[0].environment
+    assert env["OH_ALLOW_CORS_ORIGINS_0"] == "http://localhost:8000"
+    assert "OH_WEBHOOKS_0_BASE_URL" not in env
 
 
 def test_sync_count_warm_counts_unclaimed() -> None:

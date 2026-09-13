@@ -107,6 +107,7 @@ def upgrade() -> None:
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("role_id", sa.Uuid(), nullable=True),
+        sa.Column("system", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -122,7 +123,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.ForeignKeyConstraint(["creator_id"], ["users.id"], ondelete="CASCADE"),
         # roles is created later in this migration; defer the FK so it is
-        # emitted as a separate ALTER TABLE after roles exists.
+        # emitted as a separate ALTER TABLE statement after that table exists.
         sa.ForeignKeyConstraint(["role_id"], ["roles.id"], ondelete="SET NULL", use_alter=True),
         sa.UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
     )
@@ -1267,7 +1268,6 @@ def upgrade() -> None:
         ["sandbox_template_id"],
         unique=False,
     )
-
     # ------------------------------------------------------------------ #
     # sandbox_snapshots
     # ------------------------------------------------------------------ #
@@ -1547,6 +1547,7 @@ def downgrade() -> None:
     op.drop_table("refresh_tokens")
     op.drop_index("ix_api_keys_creator_id", table_name="api_keys")
     op.drop_index("ix_api_keys_key_hash", table_name="api_keys")
+
     op.drop_table("api_keys")
     op.drop_index("ix_users_idp_user_id", table_name="users")
     op.drop_index("ix_users_username", table_name="users")

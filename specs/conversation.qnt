@@ -12,9 +12,9 @@
 //     backing sandbox config they created (ConversationAccess policy);
 //     create/update/delete are denied to them
 //
-// The webhook ingestion path that populates conversations is out of scope
-// here (see the webhook sub-issue of #122); this spec covers storage + CRUD
-// and the cross-table ownership scope only.
+// The webhook ingestion path that populates conversations is modeled in
+// webhook.qnt; this spec covers storage + CRUD and the cross-table
+// ownership scope only.
 //
 // Companion to rbac.qnt (conversation permissions are governed by the
 // conversation_permission column on Role) and api_key.qnt (same CRUD shape).

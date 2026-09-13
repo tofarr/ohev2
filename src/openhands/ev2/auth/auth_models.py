@@ -34,7 +34,7 @@ import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.ev2.db import Base
@@ -142,6 +142,10 @@ class ApiKey(Base):
         nullable=True,
         index=True,
     )
+    # True for keys minted by the system, not by a user action (e.g. the
+    # per-sandbox-config session key used on the webhook ingestion path).
+    # Never settable via the public CRUD surface.
+    system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     expires_at: Mapped[datetime | None] = mapped_column(
         _TZ,
         default=None,

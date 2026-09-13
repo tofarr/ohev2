@@ -1,9 +1,11 @@
 """Service layer for the DB-backed sandbox config resource.
 
-CRUD over :class:`SandboxConfig` (the durable intent for a sandbox). The
-``session_api_key`` is minted on create and encrypted at rest (JWE ciphertext,
-same pattern as :class:`StoredProviderConnection.api_key`). It is never exposed
-in the API read model — the live sandbox service decrypts it when reconciling.
+CRUD over :class:`SandboxConfig` (the durable intent for a sandbox). On
+create a regular ``ApiKey`` (``system=True``, named
+``"Sandbox {id} API Key"``) is minted; its raw ``oh_...`` value is
+encrypted at rest into ``session_api_key`` (JWE ciphertext, same pattern as
+:class:`StoredProviderConnection.api_key`). It is never exposed in the API
+read model — the live sandbox service decrypts it when reconciling.
 
 The service delegates to the :class:`SandboxService` (the polymorphic
 reconciler) when ``enabled`` changes — the DB row is the source of truth, the
@@ -12,12 +14,12 @@ service boots/stops the live sandbox to match.
 
 from __future__ import annotations
 
-import secrets
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.ev2.auth.auth_tokens import TokenService
 from openhands.ev2.encryption.encryption_service import EncryptionService, get_encryption_service
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_config_schemas import (
@@ -49,11 +51,6 @@ class SandboxTemplateNotFoundError(Exception):
 
 class BatchPermissionDeniedError(Exception):
     """Raised when a batch operation's action is not granted."""
-
-
-def _generate_session_api_key() -> str:
-    """Mint a random session API key for a sandbox."""
-    return secrets.token_urlsafe(32)
 
 
 class SandboxConfigService:
@@ -100,26 +97,41 @@ class SandboxConfigService:
         *,
         creator_id: uuid.UUID,
     ) -> SandboxConfig:
-        """Create a sandbox config with an encrypted session API key."""
+        """Create a sandbox config and mint its system session API key.
+
+        The key is a regular :class:`ApiKey` row (``system=True``, named
+        ``"Sandbox {id} API Key"``); its raw ``oh_...`` value is encrypted
+        into ``session_api_key``. The config id is generated up front so the
+        ApiKey name and the encrypted key are both set before the single
+        flush — no placeholder row / second save.
+        """
         template = await self._get_template(payload.sandbox_template_id)
         snapshot_on_deactivate = (
             payload.snapshot_on_deactivate
             if payload.snapshot_on_deactivate is not None
             else template.snapshot_on_deactivate
         )
-        plaintext_key = _generate_session_api_key()
         config = SandboxConfig(
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
-            session_api_key=self._enc.encrypt_value(plaintext_key),
+            session_api_key="",
             enabled=payload.enabled,
             sandbox_snapshot_id=payload.sandbox_snapshot_id,
             expires_at=payload.expires_at,
             snapshot_on_deactivate=snapshot_on_deactivate,
             meta=payload.meta,
         )
+        config.id = uuid.uuid4()
         if not self._perm_filter.matches(config):
             raise SandboxConfigPermissionScopeError(str(payload.sandbox_template_id))
+
+        token_service = TokenService(self._session)
+        raw_key, _ = await token_service.create_api_key(
+            creator_id,
+            name=f"Sandbox {config.id} API Key",
+            system=True,
+        )
+        config.session_api_key = self._enc.encrypt_value(raw_key)
         self._session.add(config)
         await self._session.flush()
         await self._session.refresh(config)
