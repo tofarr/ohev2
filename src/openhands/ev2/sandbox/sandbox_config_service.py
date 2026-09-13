@@ -1,8 +1,8 @@
 """Service layer for the DB-backed sandbox config resource.
 
 CRUD over :class:`SandboxConfig` (the durable intent for a sandbox). On
-create a regular ``ApiKey`` (``system=True``, ``sandbox_config_id`` linked,
-named ``"Sandbox {id} API Key"``) is minted; its raw ``oh_...`` value is
+create a regular ``ApiKey`` (``system=True``, named
+``"Sandbox {id} API Key"``) is minted; its raw ``oh_...`` value is
 encrypted at rest into ``session_api_key`` (JWE ciphertext, same pattern as
 :class:`StoredProviderConnection.api_key`). It is never exposed in the API
 read model — the live sandbox service decrypts it when reconciling.
@@ -100,10 +100,9 @@ class SandboxConfigService:
         """Create a sandbox config and mint its system session API key.
 
         The key is a regular :class:`ApiKey` row (``system=True``, named
-        ``"Sandbox {id} API Key"`` and linked via ``sandbox_config_id``);
-        its raw ``oh_...`` value is encrypted into ``session_api_key``. The
-        empty placeholder below is immediately replaced — the ApiKey name
-        needs the flush-assigned config id.
+        ``"Sandbox {id} API Key"``); its raw ``oh_...`` value is encrypted
+        into ``session_api_key``. The empty placeholder below is immediately
+        replaced — the ApiKey name needs the flush-assigned config id.
         """
         template = await self._get_template(payload.sandbox_template_id)
         snapshot_on_deactivate = (
@@ -131,7 +130,6 @@ class SandboxConfigService:
             creator_id,
             name=f"Sandbox {config.id} API Key",
             system=True,
-            sandbox_config_id=config.id,
         )
         config.session_api_key = self._enc.encrypt_value(raw_key)
         await self._session.flush()

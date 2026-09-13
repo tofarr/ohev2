@@ -209,7 +209,6 @@ class TokenService:
         expires_at: datetime | None = None,
         role_id: uuid.UUID | None = None,
         system: bool = False,
-        sandbox_config_id: uuid.UUID | None = None,
     ) -> tuple[str, ApiKey]:
         """Mint a long-lived API key and persist its backing row.
 
@@ -221,8 +220,7 @@ class TokenService:
         user-managed service credentials. An optional ``role_id`` restricts the
         key's effective permissions (ANDed with the user's roles at authz time).
         ``system`` marks a key minted by the system rather than a user action
-        (e.g. a per-sandbox-config session key); ``sandbox_config_id`` links a
-        key to the sandbox config it scopes (webhook ingestion path).
+        (e.g. a per-sandbox-config session key).
         """
         raw_key = _generate_api_key_value()
         row = ApiKey(
@@ -234,7 +232,6 @@ class TokenService:
             expires_at=expires_at,
             role_id=role_id,
             system=system,
-            sandbox_config_id=sandbox_config_id,
         )
         self._session.add(row)
         await self._session.flush()

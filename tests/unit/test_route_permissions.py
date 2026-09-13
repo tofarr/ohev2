@@ -68,13 +68,6 @@ PERMISSION_DEPENDENCY_OVERRIDES: set[tuple[str, str]] = {
     ("POST", "/auth/dev/login"),
     ("POST", "/auth/dev/token"),
     ("POST", "/auth/dev/refresh"),
-    # Legacy agent-server webhook adapter. These routes are sandbox-only:
-    # they authenticate through the bespoke X-Session-API-Key header resolved
-    # to a SandboxConfig (sandbox_session.depends_sandbox_config), which is
-    # *not* one of the standard protecting dependencies — a user credential
-    # is deliberately not accepted on this surface.
-    ("POST", "/webhooks/conversations"),
-    ("POST", "/webhooks/events/{conversation_id}"),
 }
 
 

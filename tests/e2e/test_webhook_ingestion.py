@@ -1,14 +1,16 @@
 """E2E test: legacy agent-server webhook ingestion (tofarr/ohev2#125).
 
-Seeds the database with the admin user, inserts a sandbox config with a known
-plaintext session API key directly in the DB, then verifies over HTTP that:
+Seeds the database with the admin user and a sandbox config, mints a system
+API key with a known plaintext directly in the DB, then verifies over HTTP
+that:
 
-1. ``POST /webhooks/conversations`` authenticates via ``X-Session-API-Key``
-   and creates the conversation (idempotent upsert: a second call updates
-   title/metrics instead of duplicating the row).
-2. ``POST /webhooks/events/{conversation_id}`` appends events and folds a
-   stats snapshot into the conversation's metric columns.
-3. An unknown session key is rejected (401) and events for a conversation
+1. ``POST /webhooks/{sandbox_config_id}/conversations`` authenticated via
+   ``X-API-Key`` creates the conversation (idempotent upsert: a second call
+   updates title/metrics instead of duplicating the row) for the sandbox
+   identified by the URL.
+2. ``POST /webhooks/{sandbox_config_id}/conversations/{id}/events`` appends
+   events and folds a stats snapshot into the conversation's metric columns.
+3. An unknown API key is rejected (401) and events for a conversation
    owned by another sandbox are rejected (404).
 
 Run: uv run pytest tests/e2e -q
@@ -55,7 +57,7 @@ ADMIN_PASSWORD = os.environ.get("OHE_SEED_ADMIN_PASSWORD", "changeme")
 
 COOKIE_NAME = os.environ.get("OHE_AUTH_COOKIE_NAME", "ohesession")
 
-SESSION_KEY = f"e2e-session-key-{uuid.uuid4()}"
+API_KEY_VALUE = f"e2e-webhook-key-{uuid.uuid4()}"
 
 
 async def _login(client: httpx.AsyncClient, username: str, password: str) -> str:
@@ -68,12 +70,13 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> str
     return resp.cookies[COOKIE_NAME]
 
 
-def _session_headers(key: str = SESSION_KEY) -> dict[str, str]:
-    return {"X-Session-API-Key": key}
+def _api_key_headers(key: str = API_KEY_VALUE) -> dict[str, str]:
+    return {"X-API-Key": key}
 
 
 async def _reset_e2e_artifacts(session: AsyncSession) -> None:
     """Delete rows from prior runs so the test is hermetic across re-runs."""
+    await session.execute(delete(ApiKey))
     await session.execute(delete(Event))
     await session.execute(delete(Conversation))
     await session.execute(delete(SandboxConfig))
@@ -108,14 +111,15 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
     )
     session.add(config)
     await session.flush()
+    # The principal authenticates as the config's owner with a raw API key;
+    # the webhook route carries the sandbox config id in its path.
     session.add(
         ApiKey(
-            key_hash=hash_api_key_value(SESSION_KEY),
-            prefix=SESSION_KEY[:7],
+            key_hash=hash_api_key_value(API_KEY_VALUE),
+            prefix=API_KEY_VALUE[:7],
             creator_id=admin.id,
             name=f"Sandbox {config.id} API Key",
             system=True,
-            sandbox_config_id=config.id,
         )
     )
     await session.flush()
@@ -165,28 +169,30 @@ def _event_payloads() -> list[dict]:
 async def test_webhook_ingestion() -> None:
     db_url = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     engine = create_async_engine(db_url)
+    config_id: uuid.UUID | None = None
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
             await _reset_e2e_artifacts(session)
-            await _seed(session)
+            _, config_id = await _seed(session)
     finally:
         await engine.dispose()
+    assert config_id is not None
 
     conversation_id = uuid.uuid4()
     async with httpx.AsyncClient(base_url=BASE_URL) as ac:
-        # Unknown session keys are rejected.
+        # Unknown API keys are rejected.
         bad = await ac.post(
-            "/webhooks/conversations",
-            headers=_session_headers("bogus"),
+            f"/webhooks/{config_id}/conversations",
+            headers=_api_key_headers("bogus"),
             json=_conversation_info_payload(conversation_id, "denied"),
         )
         assert bad.status_code == 401, bad.text
 
-        # The sandbox session key creates the conversation.
+        # The system API key creates the conversation.
         created = await ac.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+            f"/webhooks/{config_id}/conversations",
+            headers=_api_key_headers(),
             json=_conversation_info_payload(conversation_id, "e2e webhook conversation"),
         )
         assert created.status_code == 200, created.text
@@ -194,24 +200,24 @@ async def test_webhook_ingestion() -> None:
         # A second call with the same id upserts (renames) instead of
         # duplicating.
         renamed = await ac.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+            f"/webhooks/{config_id}/conversations",
+            headers=_api_key_headers(),
             json=_conversation_info_payload(conversation_id, "renamed"),
         )
         assert renamed.status_code == 200, renamed.text
 
         # Events append; the stats snapshot folds into the conversation metrics.
         events = await ac.post(
-            f"/webhooks/events/{conversation_id}",
-            headers=_session_headers(),
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
+            headers=_api_key_headers(),
             json=_event_payloads(),
         )
         assert events.status_code == 200, events.text
 
         # Events for an unknown/foreign conversation are rejected.
         foreign = await ac.post(
-            f"/webhooks/events/{uuid.uuid4()}",
-            headers=_session_headers(),
+            f"/webhooks/{config_id}/conversations/{uuid.uuid4()}/events",
+            headers=_api_key_headers(),
             json=_event_payloads(),
         )
         assert foreign.status_code == 404, foreign.text

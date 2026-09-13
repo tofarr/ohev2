@@ -1,16 +1,15 @@
 """Route tests for the legacy agent-server webhook adapter (/webhooks/*).
 
-The adapter receives SDK-shaped payloads authenticated with the sandbox
-session key (``X-Session-API-Key``) and translates them into ohev2
-conversations/events rows. All requests here use an unauthenticated client —
-the webhook surface is sandbox-only and deliberately rejects user
-credentials.
+The adapter receives SDK-shaped payloads and translates them into ohev2
+conversations/events rows. Authorization is the standard credential path:
+the default ``client`` fixture acts as the test principal (whose seeded
+admin role permits every action); restricted-principal tests mint a user +
+role and authenticate via ``X-API-Key``.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
@@ -23,16 +22,21 @@ from openhands.sdk.event import ConversationStateUpdateEvent, MessageEvent
 from openhands.sdk.llm import TokenUsage
 from openhands.sdk.llm.utils.metrics import Metrics
 from openhands.sdk.workspace import LocalWorkspace
-from tests.unit._auth_helpers import (
-    make_sandbox_config as _make_sandbox_config,
-)
+from tests.unit._auth_helpers import assign_role, make_principal
+from tests.unit._auth_helpers import make_sandbox_config as _make_sandbox_config
 
 from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation.conversation_security import ConversationAccess
+from openhands.ev2.event.event_security import EventAccess
+from openhands.ev2.security.security_models import (
+    AclPermission,
+    Permission,
+    Permitted,
+)
+from openhands.ev2.util.auth_token import create_auth_token
 from openhands.ev2.webhook import webhook_service
 
 _TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-456789abcdef")
-
-SESSION_KEY = "webhook-session-key"
 
 # The SDK emits a deprecation warning when validating a serialized LLM that
 # carries the (legacy-default) modify_params field — real agent-server
@@ -43,15 +47,22 @@ pytestmark = pytest.mark.filterwarnings(
 
 
 @pytest_asyncio.fixture
-async def sandbox_client(app) -> AsyncGenerator[AsyncClient, None]:
-    """An HTTP client with no user credential; sandbox key set per request."""
+async def noauth_client(app) -> AsyncClient:
+    """An HTTP client WITHOUT the default Bearer credential (anonymous)."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
 
-def _session_headers(key: str = SESSION_KEY) -> dict[str, str]:
-    return {"X-Session-API-Key": key}
+async def _principal_token(session, perms: dict[str, Permission | None]) -> str:
+    """A new user with *perms* on one fresh role; returns an API-key token."""
+    principal = await make_principal(
+        session,
+        email=f"user-{uuid.uuid4().hex[:8]}@example.com",
+        username=f"user-{uuid.uuid4().hex[:8]}",
+    )
+    await assign_role(session, principal.id, perms)
+    return create_auth_token(principal.id)
 
 
 def _stats(cost: float, prompt: int, completion: int) -> ConversationStats:
@@ -120,44 +131,64 @@ async def _make_conversation(session, sandbox_config_id: uuid.UUID) -> Conversat
     return conversation
 
 
-class TestConversationWebhookAuth:
-    async def test_missing_key_401(self, sandbox_client: AsyncClient) -> None:
-        resp = await sandbox_client.post(
-            "/webhooks/conversations", json=_conversation_info_payload()
-        )
-        assert resp.status_code == 401
-
-    async def test_unknown_key_401(self, sandbox_client: AsyncClient, session) -> None:
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+class TestConversationWebhookScope:
+    async def test_missing_credentials_403(self, noauth_client: AsyncClient, session) -> None:
+        """No credential means no roles — the standard guard denies (403)."""
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
-        resp = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers("bogus"),
+        resp = await noauth_client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(),
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 403
 
-    async def test_user_credential_not_accepted(self, client: AsyncClient, session) -> None:
-        """The webhook surface is sandbox-only: a valid user Bearer is a 401."""
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+    async def test_unknown_sandbox_config_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            f"/webhooks/{uuid.uuid4()}/conversations",
+            json=_conversation_info_payload(),
+        )
+        assert resp.status_code == 404
+
+    async def test_create_denied_403(self, client: AsyncClient, session) -> None:
+        """A role with no conversation grant fails the guard (403)."""
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
-        resp = await client.post("/webhooks/conversations", json=_conversation_info_payload())
-        assert resp.status_code == 401
+        token = await _principal_token(session, {"conversation_permission": None})
+        await session.commit()
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
+            json=_conversation_info_payload(),
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
+
+    async def test_create_scoped_policy_403(self, client: AsyncClient, session) -> None:
+        """A deny-filtered role drops straight through the guard (403).
+
+        Service-level in-memory mismatches are covered in
+        ``test_webhook_service.py``; at route level reduced deny filters
+        collapse to ``None`` and fail the guard.
+        """
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+        await session.commit()
+        token = await _principal_token(session, {"conversation_permission": ConversationAccess()})
+        await session.commit()
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
+            json=_conversation_info_payload(),
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
 
 
 class TestConversationWebhookUpsert:
-    async def test_creates_conversation(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
-    ) -> None:
-        config = await _make_sandbox_config(
-            session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY
-        )
+    async def test_creates_conversation(self, client: AsyncClient, session) -> None:
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
 
         conversation_id = uuid.uuid4()
-        resp = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(
                 conversation_id, title="from webhook", stats=_stats(1.5, 100, 50)
             ),
@@ -181,23 +212,21 @@ class TestConversationWebhookUpsert:
         assert body["total_tokens"] == 150
 
     async def test_updates_existing_metadata_and_metrics(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
+        self, client: AsyncClient, session
     ) -> None:
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY)
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         conversation_id = uuid.uuid4()
-        first = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+        first = await client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(
                 conversation_id, title="first", stats=_stats(1.0, 10, 5)
             ),
         )
         assert first.status_code == 200, first.text
 
-        second = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+        second = await client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(
                 conversation_id, title="renamed", stats=_stats(3.0, 30, 15)
             ),
@@ -209,30 +238,49 @@ class TestConversationWebhookUpsert:
         assert body["accumulated_cost"] == 3.0
         assert body["total_tokens"] == 45
 
-    async def test_cross_sandbox_upsert_404(self, sandbox_client: AsyncClient, session) -> None:
-        config_a = await _make_sandbox_config(
-            session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY
-        )
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key="other")
+    async def test_cross_sandbox_upsert_404(self, client: AsyncClient, session) -> None:
+        config_a = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+        config_b = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         conversation = await _make_conversation(session, config_a.id)
         await session.commit()
 
-        resp = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers("other"),
+        # The URL's config is B but the row belongs to A — invisible (404).
+        resp = await client.post(
+            f"/webhooks/{config_b.id}/conversations",
             json=_conversation_info_payload(conversation.id),
         )
         assert resp.status_code == 404
 
-    async def test_deleting_status_is_noop(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
-    ) -> None:
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY)
+    async def test_update_filter_mismatch_404(self, client: AsyncClient, session) -> None:
+        """A granted create whose update filter denies the existing row → 404."""
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+        conversation = await _make_conversation(session, config.id)
+        token = await _principal_token(
+            session,
+            # Full create + full access to ONE unrelated conversation id; the
+            # target row (different id) is denied by the update filter.
+            {
+                "conversation_permission": AclPermission(
+                    item_ids=[uuid.uuid4()],
+                    on_match=Permitted(),
+                    on_create=Permitted(),
+                )
+            },
+        )
+        await session.commit()
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
+            json=_conversation_info_payload(conversation.id),
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 404
+
+    async def test_deleting_status_is_noop(self, client: AsyncClient, session) -> None:
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         conversation_id = uuid.uuid4()
-        resp = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(conversation_id, execution_status="deleting"),
         )
         assert resp.status_code == 200, resp.text
@@ -240,26 +288,22 @@ class TestConversationWebhookUpsert:
 
 
 class TestEventWebhook:
-    async def _setup(self, sandbox_client: AsyncClient, session) -> uuid.UUID:
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY)
+    async def _setup(self, client: AsyncClient, session) -> tuple[uuid.UUID, uuid.UUID]:
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         conversation_id = uuid.uuid4()
-        resp = await sandbox_client.post(
-            "/webhooks/conversations",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations",
             json=_conversation_info_payload(conversation_id),
         )
         assert resp.status_code == 200, resp.text
-        return conversation_id
+        return config.id, conversation_id
 
-    async def test_appends_events_and_folds_stats(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
-    ) -> None:
-        conversation_id = await self._setup(sandbox_client, session)
+    async def test_appends_events_and_folds_stats(self, client: AsyncClient, session) -> None:
+        config_id, conversation_id = await self._setup(client, session)
         stats = _stats(2.5, 200, 100)
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation_id}",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
             json=[_message_event_payload("hi"), _stats_event_payload(stats)],
         )
         assert resp.status_code == 200, resp.text
@@ -279,17 +323,14 @@ class TestEventWebhook:
         assert body["completion_tokens"] == 100
         assert body["total_tokens"] == 300
 
-    async def test_preserves_event_timestamp(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
-    ) -> None:
-        conversation_id = await self._setup(sandbox_client, session)
+    async def test_preserves_event_timestamp(self, client: AsyncClient, session) -> None:
+        config_id, conversation_id = await self._setup(client, session)
         event = MessageEvent(
             source="user",
             llm_message={"role": "user", "content": [{"type": "text", "text": "hi"}]},
         )
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation_id}",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
             json=[event.model_dump(mode="json")],
         )
         assert resp.status_code == 200, resp.text
@@ -298,50 +339,117 @@ class TestEventWebhook:
         assert len(items) == 1
         assert items[0]["timestamp"].startswith(event.timestamp[:19])
 
-    async def test_unknown_conversation_404(self, sandbox_client: AsyncClient, session) -> None:
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key=SESSION_KEY)
+    async def test_unknown_conversation_404(self, client: AsyncClient, session) -> None:
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{uuid.uuid4()}",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config.id}/conversations/{uuid.uuid4()}/events",
             json=[_message_event_payload("hi")],
         )
         assert resp.status_code == 404
 
-    async def test_cross_sandbox_events_404(self, sandbox_client: AsyncClient, session) -> None:
+    async def test_cross_sandbox_events_404(self, client: AsyncClient, session) -> None:
         config_a = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
-        await _make_sandbox_config(session, creator_id=_TEST_USER_ID, session_key="other")
+        config_b = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         conversation = await _make_conversation(session, config_a.id)
         await session.commit()
 
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation.id}",
-            headers=_session_headers("other"),
+        resp = await client.post(
+            f"/webhooks/{config_b.id}/conversations/{conversation.id}/events",
             json=[_message_event_payload("hi")],
         )
         assert resp.status_code == 404
 
-    async def test_missing_key_401(self, sandbox_client: AsyncClient) -> None:
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{uuid.uuid4()}", json=[_message_event_payload("hi")]
+    async def test_missing_credentials_403(self, noauth_client: AsyncClient) -> None:
+        resp = await noauth_client.post(
+            f"/webhooks/{uuid.uuid4()}/conversations/{uuid.uuid4()}/events",
+            json=[_message_event_payload("hi")],
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 403
 
-    async def test_empty_batch_ok(self, sandbox_client: AsyncClient, session) -> None:
-        conversation_id = await self._setup(sandbox_client, session)
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation_id}", headers=_session_headers(), json=[]
+    async def test_event_create_denied_403(self, client: AsyncClient, session) -> None:
+        config_id, conversation_id = await self._setup(client, session)
+        token = await _principal_token(
+            session,
+            {
+                "conversation_permission": Permitted(),
+                # No event grant → the hard Event CREATE guard denies (403).
+                "event_permission": None,
+            },
+        )
+        await session.commit()
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
+            json=[_message_event_payload("hi")],
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
+
+    async def test_event_scoped_policy_403(self, client: AsyncClient, session) -> None:
+        """A scoped (deny-filter) event role drops through the guard (403)."""
+        config_id, conversation_id = await self._setup(client, session)
+        token = await _principal_token(
+            session,
+            {
+                "conversation_permission": Permitted(),
+                "event_permission": EventAccess(),
+            },
+        )
+        await session.commit()
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
+            json=[_message_event_payload("hi")],
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
+
+    async def test_missing_update_filter_skips_stats_fold(
+        self, client: AsyncClient, session
+    ) -> None:
+        """Without Conversation UPDATE the stats fold is skipped (events ok)."""
+        config_id, conversation_id = await self._setup(client, session)
+        token = await _principal_token(
+            session,
+            {
+                # No conversation UPDATE grant (None) — ConversationAccess
+                # denies non-read actions — but full event create.
+                "conversation_permission": AclPermission(
+                    item_ids=[uuid.uuid4()], on_match=Permitted(), on_create=Permitted()
+                ),
+                "event_permission": Permitted(),
+            },
+        )
+        await session.commit()
+
+        stats = _stats(2.5, 200, 100)
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
+            json=[_stats_event_payload(stats)],
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = (await client.get(f"/conversations/{conversation_id}")).json()
+        assert body["accumulated_cost"] == 0
+        assert body["total_tokens"] == 0
+
+        items = (await client.get(f"/conversations/{conversation_id}/events")).json()["items"]
+        assert [item["kind"] for item in items] == ["ConversationStateUpdateEvent"]
+
+    async def test_empty_batch_ok(self, client: AsyncClient, session) -> None:
+        config_id, conversation_id = await self._setup(client, session)
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events", json=[]
         )
         assert resp.status_code == 200, resp.text
 
     async def test_unparseable_stats_value_skips_metrics(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
+        self, client: AsyncClient, session
     ) -> None:
-        conversation_id = await self._setup(sandbox_client, session)
+        config_id, conversation_id = await self._setup(client, session)
         event = ConversationStateUpdateEvent(source="agent", key="stats", value={"garbage": True})
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation_id}",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
             json=[event.model_dump(mode="json")],
         )
         assert resp.status_code == 200, resp.text
@@ -350,15 +458,14 @@ class TestEventWebhook:
         assert row["total_tokens"] == 0
 
     async def test_stats_without_token_usage_updates_cost_only(
-        self, sandbox_client: AsyncClient, client: AsyncClient, session
+        self, client: AsyncClient, session
     ) -> None:
-        conversation_id = await self._setup(sandbox_client, session)
+        config_id, conversation_id = await self._setup(client, session)
         stats = ConversationStats(
             usage_to_metrics={"test-llm": Metrics(model_name="m", accumulated_cost=2.5)}
         )
-        resp = await sandbox_client.post(
-            f"/webhooks/events/{conversation_id}",
-            headers=_session_headers(),
+        resp = await client.post(
+            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
             json=[_stats_event_payload(stats)],
         )
         assert resp.status_code == 200, resp.text
@@ -366,11 +473,36 @@ class TestEventWebhook:
         assert row["accumulated_cost"] == 2.5
         assert row["total_tokens"] == 0
 
+    async def test_unknown_sandbox_config_404(self, client: AsyncClient, session) -> None:
+        config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
+        conversation = await _make_conversation(session, config.id)
+        await session.commit()
+        # The URL's config id must exist but not own the conversation.
+        resp = await client.post(
+            f"/webhooks/{uuid.uuid4()}/conversations/{conversation.id}/events",
+            json=[_message_event_payload("hi")],
+        )
+        assert resp.status_code == 404
+
 
 class TestParsingHelpers:
     def test_stats_from_value_accepts_instance(self) -> None:
         stats = ConversationStats()
         assert webhook_service._stats_from_value(stats) is stats
+
+    def test_stats_from_value_unparseable_dict_returns_none(self) -> None:
+        assert webhook_service._stats_from_value({"usage_to_metrics": 1}) is None
+
+    def test_metrics_from_stats_without_token_usage_cost_only(self) -> None:
+        stats = ConversationStats(
+            usage_to_metrics={"test-llm": Metrics(model_name="m", accumulated_cost=2.5)}
+        )
+        assert webhook_service._metrics_from_stats(stats) == {
+            "accumulated_cost": 2.5,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
     def test_event_timestamp_unparseable_returns_none(self) -> None:
         assert webhook_service._event_timestamp("not-a-date") is None

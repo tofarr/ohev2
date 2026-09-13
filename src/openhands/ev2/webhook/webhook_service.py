@@ -7,10 +7,12 @@ compatibility with sandboxes running the current agent server without a
 client-side change; sandboxes calling the new REST endpoints directly never
 touch this path.
 
-Every mutation is scoped to the :class:`SandboxConfig` resolved from the
-``X-Session-API-Key`` header: a sandbox can only upsert conversations backed
-by its own config and append events to them. Conversation ids are aligned
-with the agent server's ids so the events webhook path parameter resolves.
+The callback URL carries the target ``sandbox_config_id``; authorization is
+the standard role-policy path: the principal's ``conversation_permission``
+CREATE/UPDATE filter must match the prospective (create) or existing
+(refresh) conversation, and their ``event_permission`` CREATE filter must
+match the appended events. A conversation outside the URL's sandbox config
+is invisible (404).
 """
 
 from __future__ import annotations
@@ -35,13 +37,17 @@ from openhands.ev2.event.event_schemas import EventCreate
 from openhands.ev2.event.event_service import EventService
 from openhands.ev2.event.event_store import EventBodyStore
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
-from openhands.ev2.sandbox.sandbox_session import sandbox_scope_filter
+from openhands.ev2.util.search_filter import AllSearchFilter, SearchFilter
 
 logger = logging.getLogger(__name__)
 
 
+class WebhookSandboxNotFoundError(Exception):
+    """Raised when the URL's sandbox config id is unknown (404)."""
+
+
 class WebhookConversationNotFoundError(Exception):
-    """Raised when the target conversation is missing or owned by another sandbox."""
+    """Raised when the target conversation is missing or out of scope (404)."""
 
 
 def _llm_model_for(agent: AgentBase) -> str | None:
@@ -79,10 +85,8 @@ def _metrics_from_stats(stats: ConversationStats | None) -> dict[str, float | in
         return None
     combined = stats.get_combined_metrics()
     usage = combined.accumulated_token_usage
-    if usage is None:
-        return {"accumulated_cost": combined.accumulated_cost}
-    prompt = usage.prompt_tokens
-    completion = usage.completion_tokens
+    prompt = usage.prompt_tokens if usage is not None else 0
+    completion = usage.completion_tokens if usage is not None else 0
     return {
         "accumulated_cost": combined.accumulated_cost,
         "prompt_tokens": prompt,
@@ -106,18 +110,29 @@ def _event_timestamp(raw: str) -> datetime | None:
 
 
 class WebhookService:
-    """Translates legacy webhook payloads into ohev2 rows for one sandbox."""
+    """Translates legacy webhook payloads into ohev2 rows for one sandbox.
+
+    Holds the URL's sandbox config id and the role-policy filters the router
+    resolved for the principal. Any of the three filters may be ``None``
+    (no grant): the operations that need it then fail closed.
+    """
 
     def __init__(
         self,
         session: AsyncSession,
-        sandbox_config: SandboxConfig,
+        config_id: uuid.UUID,
+        conversation_create: SearchFilter[Conversation] | None,
+        conversation_update: SearchFilter[Conversation] | None,
+        event_create: SearchFilter[Event] | None,
         *,
         store: EventBodyStore | None = None,
         body_cap_bytes: int = 262_144,
     ) -> None:
         self._session = session
-        self._sandbox_config = sandbox_config
+        self._config_id = config_id
+        self._conversation_create = conversation_create
+        self._conversation_update = conversation_update
+        self._event_create = event_create
         self._store = store
         self._body_cap_bytes = body_cap_bytes
 
@@ -126,20 +141,29 @@ class WebhookService:
 
         Returns ``None`` when the payload reports a deleting conversation
         (mirrors the enterprise adapter: a tombstone signal, not a delete).
-        Raises :class:`WebhookConversationNotFoundError` when the conversation
-        exists but is backed by a different sandbox config (fail-closed, no
-        existence leak).
+        Raises :class:`WebhookSandboxNotFoundError` when the URL's config is
+        unknown (404), and :class:`WebhookConversationNotFoundError` when
+        the conversation exists but is backed by a different sandbox config
+        or the principal's role policies deny it (fail-closed, no existence
+        leak, 404).
         """
+        await self._require_config()
         if info.execution_status is ConversationExecutionStatus.DELETING:
             return None
         existing = await self._get_unscoped(info.id)
         if existing is not None:
-            if existing.sandbox_config_id != self._sandbox_config.id:
+            if existing.sandbox_config_id != self._config_id:
+                raise WebhookConversationNotFoundError(str(info.id))
+            update = self._conversation_update
+            if update is None or not update.matches(existing):
                 raise WebhookConversationNotFoundError(str(info.id))
             conversation = existing
             self._apply_metadata(conversation, info)
         else:
             conversation = self._create_stub(info)
+            create = self._conversation_create
+            if create is None or not create.matches(conversation):
+                raise WebhookConversationNotFoundError(str(info.id))
         metrics = _metrics_from_stats(info.stats)
         if metrics is not None:
             for field, value in metrics.items():
@@ -154,15 +178,23 @@ class WebhookService:
 
         Each SDK event becomes one projection row (kind = the event's
         discriminator, body = the serialized event, timestamp = the event's
-        own time). A ``ConversationStateUpdateEvent`` with key ``stats`` also
-        updates the conversation's accumulated metric columns.
+        own time). A ``ConversationStateUpdateEvent`` with key ``stats``
+        also updates the conversation's accumulated metric columns when the
+        conversation UPDATE filter allows it (skips otherwise — best-effort,
+        like the enterprise adapter).
         """
+        await self._require_config()
         conversation = await self._get_unscoped(conversation_id)
-        if conversation is None or conversation.sandbox_config_id != self._sandbox_config.id:
+        if conversation is None or conversation.sandbox_config_id != self._config_id:
             raise WebhookConversationNotFoundError(str(conversation_id))
+        candidate = Event(conversation_id=conversation_id, kind="", body={}, size_bytes=0)
+        if self._event_create is None or not self._event_create.matches(candidate):
+            raise WebhookConversationNotFoundError(str(conversation_id))
+        # The event filter above already authorized the append; EventService
+        # requires a non-None filter, so admit-all here.
         event_service = EventService(
             self._session,
-            await sandbox_scope_filter(self._session, Event, self._sandbox_config.id),
+            AllSearchFilter[Event](),
             store=self._store,
             body_cap_bytes=self._body_cap_bytes,
         )
@@ -173,12 +205,21 @@ class WebhookService:
                 timestamp=_event_timestamp(event.timestamp),
             )
             if isinstance(event, ConversationStateUpdateEvent) and event.key == "stats":
+                update = self._conversation_update
+                if update is None or not update.matches(conversation):
+                    continue
                 metrics = _metrics_from_stats(_stats_from_value(event.value))
                 if metrics is not None:
                     for field, value in metrics.items():
                         setattr(conversation, field, value)
                     await self._session.flush()
         return len(events)
+
+    async def _require_config(self) -> None:
+        """The URL's sandbox config must exist (the callback's scope identity)."""
+        config = await self._session.get(SandboxConfig, self._config_id)
+        if config is None:
+            raise WebhookSandboxNotFoundError(str(self._config_id))
 
     async def _get_unscoped(self, conversation_id: uuid.UUID) -> Conversation | None:
         """Fetch a conversation regardless of owner; the caller enforces scope."""
@@ -191,7 +232,7 @@ class WebhookService:
         """A new conversation row aligned with the agent server's id."""
         conversation = Conversation(
             title=info.title or f"Conversation {info.id.hex}",
-            sandbox_config_id=self._sandbox_config.id,
+            sandbox_config_id=self._config_id,
             llm_model=_llm_model_for(info.agent) or "unknown",
             agent_kind=_agent_kind_for(info.agent),
             selected_repository=None,

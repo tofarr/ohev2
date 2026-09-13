@@ -7,8 +7,6 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.auth.auth_models import ApiKey
-from openhands.ev2.auth.auth_tokens import hash_api_key_value
 from openhands.ev2.role.role_models import Role, UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
@@ -67,20 +65,13 @@ async def make_sandbox_config(
     *,
     creator_id: uuid.UUID,
     docker_image_tag: str = "example/agent-server:latest",
-    session_key: str | None = None,
 ) -> SandboxConfig:
     """Create a minimal template + sandbox config owned by *creator_id*.
 
     Writes ORM rows directly so tests for resources that reference
     ``sandbox_configs`` (e.g. conversations) do not depend on the
-    permission-guarded sandbox APIs or a live provider. The plaintext
-    ``session_key`` is what an ``X-Session-API-Key`` header must carry to
-    resolve to this config: a linked system :class:`ApiKey` row is minted
-    exactly like :class:`SandboxConfigService` does at create time. Defaults
-    to a unique value per call (the key hash is unique-indexed).
+    permission-guarded sandbox APIs or a live provider.
     """
-    if session_key is None:
-        session_key = f"session-key-{uuid.uuid4()}"
     template = SandboxTemplate(creator_id=creator_id, docker_image_tag=docker_image_tag)
     session.add(template)
     await session.flush()
@@ -90,16 +81,5 @@ async def make_sandbox_config(
         session_api_key="encrypted-session-key",
     )
     session.add(config)
-    await session.flush()
-    session.add(
-        ApiKey(
-            key_hash=hash_api_key_value(session_key),
-            prefix=session_key[:7],
-            creator_id=creator_id,
-            name=f"Sandbox {config.id} API Key",
-            system=True,
-            sandbox_config_id=config.id,
-        )
-    )
     await session.flush()
     return config

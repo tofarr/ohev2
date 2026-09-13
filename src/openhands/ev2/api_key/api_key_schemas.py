@@ -110,7 +110,6 @@ class ApiKeyRead(BaseModel):
     system: bool = Field(
         description="True for system-minted keys (e.g. per-sandbox-config session keys)."
     )
-    sandbox_config_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 

@@ -146,15 +146,6 @@ class ApiKey(Base):
     # per-sandbox-config session key used on the webhook ingestion path).
     # Never settable via the public CRUD surface.
     system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    # The sandbox config whose webhook-ingestion session key this is (see
-    # sandbox/sandbox_session.py). SET NULL when the config is deleted; a null
-    # link means the key carries no sandbox scoping.
-    sandbox_config_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("sandbox_configs.id", ondelete="SET NULL"),
-        default=None,
-        nullable=True,
-        index=True,
-    )
     expires_at: Mapped[datetime | None] = mapped_column(
         _TZ,
         default=None,

@@ -58,7 +58,8 @@ class SandboxConfig(Base):
     )
     # Encrypted JWE ciphertext of the raw ``oh_...`` API key minted for this
     # config at create time (a system ApiKey row named
-    # "Sandbox {config id} API Key"; see sandbox_session.py). Never exposed in
+    # "Sandbox {config id} API Key" — presented through the standard
+    # X-API-KEY header on the webhook ingestion path). Never exposed in
     # plaintext through the API (SandboxConfigRead omits it; the live Sandbox
     # carries it).
     session_api_key: Mapped[str] = mapped_column(
