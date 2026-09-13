@@ -57,7 +57,7 @@ ADMIN_PASSWORD = os.environ.get("OHE_SEED_ADMIN_PASSWORD", "changeme")
 
 COOKIE_NAME = os.environ.get("OHE_AUTH_COOKIE_NAME", "ohesession")
 
-API_KEY_VALUE = f"e2e-webhook-key-{uuid.uuid4()}"
+API_KEY_VALUE = f"oh_{uuid.uuid4().hex}"
 
 
 async def _login(client: httpx.AsyncClient, username: str, password: str) -> str:
