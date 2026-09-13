@@ -1,18 +1,19 @@
 // Webhook ingestion specification (tofarr/ohev2#125).
 //
-// Models the legacy agent-server webhook adapter (POST /webhooks/conversations,
-// POST /webhooks/events/{conversation_id}) and the scoped ingestion path it
-// shares with PATCH /conversations/{id} and POST /conversations/{id}/events.
-// Invariants checked here:
+// Models the legacy agent-server webhook adapter: the sandbox config id is
+// carried on the URL (POST /webhooks/{sandbox_config_id}/conversations and
+// POST /webhooks/{sandbox_config_id}/conversations/{conversation_id}/events),
+// and authentication/authorization go through the standard permission
+// dependencies (role-policy filters). Invariants checked here:
 //
-//   - a sandbox authenticates with its session API key, a regular ApiKey row
-//     (system) linked to its sandbox config; the key resolves by its stored
-//     hash to at most one config, and an unknown key is rejected (401) —
-//     auth fails closed
-//   - the resolved credential scopes every mutation to conversations whose
-//     sandboxConfigId equals the credential's own config: cross-sandbox
-//     conversation upserts and event appends are rejected (404), so the
-//     sandbox credential is never the creator's user session
+//   - an unknown sandbox config id on the URL is invisible (404) and leaves
+//     the state unchanged
+//   - every mutation is scoped to conversations whose sandboxConfigId equals
+//     the URL's config id: cross-scope upserts and event appends are
+//     rejected (404) and change nothing
+//   - the resolved permission filter must both pass the route guard and
+//     match() the candidate/existing row; a deny at either level is a total
+//     no-op (fail-closed, existence not leaked)
 //   - conversation webhook payloads upsert: an in-scope payload whose id
 //     already exists updates title/metrics instead of duplicating the row;
 //     a payload with executionStatus = "deleting" never creates a row
@@ -21,20 +22,15 @@
 //     events leave the metrics untouched
 //   - total tokens always equal prompt + completion
 //
-// Companion to conversation.qnt (storage + user-side CRUD/scope) and
-// event.qnt (event storage). The user-credential half of the ingestion
-// endpoints is covered by those specs' access policies.
+// The role-policy resolution itself (how a principal's roles reduce to a
+// filter) is specified in rbac.qnt; this spec treats the resolved outcome
+// (authorized) as an input. Companion to conversation.qnt (storage +
+// user-side CRUD/scope) and event.qnt (event storage).
 
 module webhook {
-  // Only the fields the ingestion rules depend on are modeled. The linked
-  // ApiKey (system=true, sandbox_config_id FK) is modeled here just by its
-  // hash - the link is what scopes resolutions; uniqueness holds as in the
-  // api_keys.key_hash unique index.
+  // Only the fields the ingestion rules depend on are modeled.
   type SandboxConfig = {
     id: str,
-    // The stored SHA-256 lookup hash (of the linked ApiKey's raw value).
-    // Two configs never share one (unique index on api_keys.key_hash).
-    keyHash: str,
   }
 
   type Conversation = {
@@ -71,94 +67,84 @@ module webhook {
   // Helpers
   // ------------------------------------------------------------------ #
 
-  // The session key resolves by hash to at most one config; "" stands in
-  // for "no config holds this hash" (unknown key => 401).
-  pure def resolveKey(configs: Set[SandboxConfig], keyHash: str): str =
-    configs.fold("", (acc, sc) => if (sc.keyHash == keyHash) sc.id else acc)
-
-  // A conversation is in scope for a sandbox credential iff it is backed by
-  // the credential's own config.
+  // A conversation is in scope for a webhook URL iff it is backed by the
+  // URL's sandbox config id.
   pure def inScope(c: Conversation, configId: str): bool =
     c.sandboxConfigId == configId
 
   pure def tokensConsistent(c: Conversation): bool =
     c.totalTokens == c.promptTokens + c.completionTokens
 
+  // The URL's config must exist; otherwise the request is a 404 no-op.
+  def urlConfigExists(configId: str): bool =
+    sandboxConfigs.exists(sc => sc.id == configId)
+
   // ------------------------------------------------------------------ #
   // Actions
   // ------------------------------------------------------------------ #
 
-  // Register a sandbox config with a (hash-unique) session key.
-  action createSandboxConfig(sc: SandboxConfig): bool = all {
+  // Register a sandbox config. Authorization for config CRUD is outside the
+  // webhook's concern (modeled in sandbox.qnt).
+  action createConfig(sc: SandboxConfig): bool = all {
     not(sandboxConfigs.exists(x => x.id == sc.id)),
-    not(sandboxConfigs.exists(x => x.keyHash == sc.keyHash)),
     sc.id != "",
-    sc.keyHash != "",
     sandboxConfigs' = sandboxConfigs.union(Set(sc)),
     conversations' = conversations,
     events' = events,
   }
 
-  // POST /webhooks/conversations for a *deleting* execution status: a no-op
-  // that never creates a row.
-  action webhookDelete(keyHash: str, id: str): bool = all {
-    resolveKey(sandboxConfigs, keyHash) != "",
+  // POST /webhooks/{cfg}/conversations with a *deleting* execution status
+  // (and, in general, any payload whose id does not resolve to an existing
+  // row): a no-op that never creates a row.
+  action webhookDeleteStatus(configId: str, id: str, authorized: bool): bool = all {
+    urlConfigExists(configId),
+    authorized,
     not(conversations.exists(c => c.id == id)),
     conversations' = conversations,
     sandboxConfigs' = sandboxConfigs,
     events' = events,
   }
 
-  // POST /webhooks/conversations: upsert. Requires a known key and, when the
-  // conversation already exists, that it is in scope for the credential.
-  // Otherwise the request is rejected (401 unknown key / 404 out of scope)
-  // and the state is unchanged.
-  action webhookUpsert(keyHash: str, c: Conversation): bool = all {
-    val configId = resolveKey(sandboxConfigs, keyHash)
-    all {
-      configId != "",
-      // A created row is always backed by the credential's own config; an
-      // updated row must already belong to it.
-      inScope(c, configId),
-      conversations.forall(x => x.id == c.id implies x.sandboxConfigId == configId),
-      conversations' =
-        if (conversations.exists(x => x.id == c.id))
-          conversations.map(x =>
-            if (x.id == c.id)
-              { ...x, title: c.title, accumulatedCost: c.accumulatedCost,
-                promptTokens: c.promptTokens, completionTokens: c.completionTokens,
-                totalTokens: c.totalTokens }
-            else
-              x)
-        else
-          conversations.union(Set(c)),
-      sandboxConfigs' = sandboxConfigs,
-      events' = events,
-    }
+  // POST /webhooks/{cfg}/conversations: upsert. The route guard
+  // (authorized) and the URL scope must both hold; the URL's config must
+  // own a created row, and an updated row must already belong to it. Any
+  // violation is rejected and the state is unchanged.
+  action webhookUpsert(configId: str, c: Conversation, authorized: bool): bool = all {
+    authorized,
+    inScope(c, configId),
+    conversations.forall(x => x.id == c.id implies x.sandboxConfigId == configId),
+    conversations' =
+      if (conversations.exists(x => x.id == c.id))
+        conversations.map(x =>
+          if (x.id == c.id)
+            { ...x, title: c.title, accumulatedCost: c.accumulatedCost,
+              promptTokens: c.promptTokens, completionTokens: c.completionTokens,
+              totalTokens: c.totalTokens }
+          else
+            x)
+      else
+        conversations.union(Set(c)),
+    sandboxConfigs' = sandboxConfigs,
+    events' = events,
   }
 
-  // POST /webhooks/events/{conversation_id} (and the scoped
-  // POST /conversations/{id}/events): append a batch. Every event must
-  // target a conversation that exists and is in scope for the credential;
-  // stats events fold their absolute snapshot into the conversation metrics.
-  action webhookEvents(keyHash: str, newEvents: Set[Event]): bool = all {
-    val configId = resolveKey(sandboxConfigs, keyHash)
-    all {
-      configId != "",
-      // All-or-nothing scope check: every event targets an in-scope,
-      // existing conversation, or the whole batch is rejected (404) and the
-      // state is unchanged.
-      newEvents.forall(e =>
-        conversations.exists(c => c.id == e.conversationId and inScope(c, configId))),
-      newEvents.forall(e => not(events.exists(x => x.id == e.id))),
-      newEvents.forall(e => e.cost >= 0 and e.prompt >= 0 and e.completion >= 0),
-      events' = events.union(newEvents),
-      conversations' = conversations.map(c =>
-        newEvents.filter(e => e.conversationId == c.id and e.isStats).fold(c, (acc, e) =>
-          { ...acc, accumulatedCost: e.cost, promptTokens: e.prompt,
-            completionTokens: e.completion, totalTokens: e.prompt + e.completion })),
-      sandboxConfigs' = sandboxConfigs,
-    }
+  // POST /webhooks/{cfg}/conversations/{cid}/events: append a batch. All-or-
+  // nothing scope check: every event must target an in-scope, existing
+  // conversation, or the whole batch is rejected (404) and the state is
+  // unchanged. Stats events fold their absolute snapshot into the
+  // conversation metrics.
+  action webhookEvents(configId: str, newEvents: Set[Event], authorized: bool): bool = all {
+    authorized,
+    newEvents.forall(e =>
+      conversations.exists(c => c.id == e.conversationId and inScope(c, configId))),
+    newEvents.forall(e => not(events.exists(x => x.id == e.id))),
+    newEvents.forall(e => e.cost >= 0 and e.prompt >= 0 and e.completion >= 0),
+    events' = events.union(newEvents),
+    conversations' = conversations.map(c =>
+      newEvents.filter(e => e.conversationId == c.id and e.isStats).fold(c, (acc, e) =>
+        { ...acc, accumulatedCost: e.cost, promptTokens: e.prompt,
+          completionTokens: e.completion, totalTokens: e.prompt + e.completion })),
+    sandboxConfigs' = sandboxConfigs,
   }
 
   action step: bool = all {
@@ -170,13 +156,6 @@ module webhook {
   // ------------------------------------------------------------------ #
   // Invariants
   // ------------------------------------------------------------------ #
-
-  // Session key hashes are unique across configs: a key resolves to at most
-  // one config.
-  val keyHashUnique: bool =
-    sandboxConfigs.forall(sc1 =>
-      sandboxConfigs.forall(sc2 =>
-        sc1.keyHash == sc2.keyHash implies sc1 == sc2))
 
   // Every conversation is backed by an existing sandbox config.
   val allBackedByConfig: bool =
@@ -190,24 +169,20 @@ module webhook {
   val allTokensConsistent: bool =
     conversations.forall(c => tokensConsistent(c))
 
-  // Fail-closed auth: an unknown session key admits nothing.
-  val unknownKeyAdmitsNothing: bool =
-    resolveKey(sandboxConfigs, "never-issued") == ""
-
   // ------------------------------------------------------------------ #
   // Tests
   // ------------------------------------------------------------------ #
 
-  val _cfg: SandboxConfig = { id: "cfg1", keyHash: "hash1" }
-  val _other: SandboxConfig = { id: "cfg2", keyHash: "hash2" }
+  val _cfg: SandboxConfig = { id: "cfg1" }
+  val _other: SandboxConfig = { id: "cfg2" }
   val _conv: Conversation = {
     id: "c1", sandboxConfigId: "cfg1", title: "webhook conversation",
     accumulatedCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
   }
 
   run createViaWebhook = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookUpsert("hash1", _conv))
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, true))
       .then(all {
         assert(conversations.exists(c => c.id == "c1" and c.sandboxConfigId == "cfg1")),
         conversations' = conversations,
@@ -216,28 +191,28 @@ module webhook {
       })
   }
 
-  run unknownKeyRejected = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookUpsert("bogus", _conv))
+  run unauthorizedDenied = {
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, false))
       .fail()
   }
 
-  run crossSandboxUpsertRejected = {
-    init.then(createSandboxConfig(_cfg))
-      .then(createSandboxConfig(_other))
-      .then(webhookUpsert("hash1", _conv))
-      // cfg2's key must not be able to update cfg1's conversation.
-      .then(webhookUpsert("hash2", { ..._conv, title: "hijacked" }))
+  run crossScopeUpsertRejected = {
+    init.then(createConfig(_cfg))
+      .then(createConfig(_other))
+      .then(webhookUpsert("cfg1", _conv, true))
+      // The cfg2 URL must not update cfg1's conversation.
+      .then(webhookUpsert("cfg2", { ..._conv, title: "hijacked" }, true))
       .fail()
   }
 
   run upsertUpdatesExisting = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookUpsert("hash1", _conv))
-      .then(webhookUpsert("hash1", {
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, true))
+      .then(webhookUpsert("cfg1", {
         ..._conv, title: "renamed", accumulatedCost: 3,
         promptTokens: 10, completionTokens: 5, totalTokens: 15,
-      }))
+      }, true))
       .then(all {
         assert(conversations.size() == 1),
         assert(conversations.exists(c =>
@@ -249,14 +224,20 @@ module webhook {
   }
 
   run deletingStatusNeverCreates = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookDelete("hash1", "c1"))
+    init.then(createConfig(_cfg))
+      .then(webhookDeleteStatus("cfg1", "c1", true))
       .then(all {
         assert(not(conversations.exists(c => c.id == "c1"))),
         conversations' = conversations,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
+  }
+
+  run deletingStatusUnauthorizedIsNoop = {
+    init.then(createConfig(_cfg))
+      .then(webhookDeleteStatus("cfg1", "c1", false))
+      .fail()
   }
 
   val _msgEvent: Event = {
@@ -267,9 +248,9 @@ module webhook {
   }
 
   run eventsAppendAndStatsFold = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookUpsert("hash1", _conv))
-      .then(webhookEvents("hash1", Set(_msgEvent, _statsEvent)))
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, true))
+      .then(webhookEvents("cfg1", Set(_msgEvent, _statsEvent), true))
       .then(all {
         assert(events.size() == 2),
         assert(conversations.exists(c =>
@@ -282,9 +263,9 @@ module webhook {
   }
 
   run nonStatsEventLeavesMetrics = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookUpsert("hash1", _conv))
-      .then(webhookEvents("hash1", Set(_msgEvent)))
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, true))
+      .then(webhookEvents("cfg1", Set(_msgEvent), true))
       .then(all {
         assert(conversations.exists(c =>
           c.id == "c1" and c.accumulatedCost == 0 and c.totalTokens == 0)),
@@ -294,24 +275,25 @@ module webhook {
       })
   }
 
-  run crossSandboxEventRejected = {
-    init.then(createSandboxConfig(_cfg))
-      .then(createSandboxConfig(_other))
-      .then(webhookUpsert("hash1", _conv))
-      // cfg2's key must not be able to append events to cfg1's conversation.
-      .then(webhookEvents("hash2", Set(_msgEvent)))
+  run crossScopeEventRejected = {
+    init.then(createConfig(_cfg))
+      .then(createConfig(_other))
+      .then(webhookUpsert("cfg1", _conv, true))
+      // The cfg2 URL must not append events to cfg1's conversation.
+      .then(webhookEvents("cfg2", Set(_msgEvent), true))
+      .fail()
+  }
+
+  run unauthorizedEventRejected = {
+    init.then(createConfig(_cfg))
+      .then(webhookUpsert("cfg1", _conv, true))
+      .then(webhookEvents("cfg1", Set(_msgEvent), false))
       .fail()
   }
 
   run eventToUnknownConversationRejected = {
-    init.then(createSandboxConfig(_cfg))
-      .then(webhookEvents("hash1", Set(_msgEvent)))
-      .fail()
-  }
-
-  run duplicateKeyHashRejected = {
-    init.then(createSandboxConfig(_cfg))
-      .then(createSandboxConfig({ id: "cfg3", keyHash: "hash1" }))
+    init.then(createConfig(_cfg))
+      .then(webhookEvents("cfg1", Set(_msgEvent), true))
       .fail()
   }
 }
