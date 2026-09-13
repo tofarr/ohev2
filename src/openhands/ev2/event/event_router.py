@@ -27,6 +27,7 @@ from openhands.ev2.config import get_config
 from openhands.ev2.db import SessionDep
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.event.event_schemas import (
+    EventBatchWriteRequest,
     EventCreate,
     EventRead,
     EventSearchFilter,
@@ -40,6 +41,7 @@ from openhands.ev2.event.event_service import (
     EventService,
 )
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.schemas import BatchWriteResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(
@@ -132,6 +134,46 @@ async def search_events(
         next_cursor=_encode_cursor(next_cursor) if next_cursor is not None else None,
         limit=limit,
     )
+
+
+@router.post(
+    "/batch",
+    response_model=BatchWriteResult[EventRead],
+    status_code=status.HTTP_201_CREATED,
+)
+async def write_events_batch(
+    conversation_id: uuid.UUID,
+    payload: EventBatchWriteRequest,
+    session: SessionDep,
+    perm_filter: Annotated[
+        SearchFilter[Event],
+        Depends(depends_permissions(Event, Action.CREATE)),
+    ],
+) -> BatchWriteResult[EventRead]:
+    """Append events atomically (AGENTS.md §3).
+
+    Events are immutable, so the batch accepts create ops only; a single
+    ``commit`` at the end makes the whole batch all-or-nothing. Declared
+    before ``/{event_id}`` so the static ``/batch`` path matches ahead of the
+    UUID path param.
+    """
+    service = _service(session, perm_filter)
+    events: list[Event] = []
+    try:
+        for op in payload.operations:
+            events.append(await service.create(conversation_id, op.data))
+    except ConversationNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation not found: {exc}",
+        ) from exc
+    except EventPermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Event falls outside your create scope: {exc}",
+        ) from exc
+    await session.commit()
+    return BatchWriteResult(items=[EventRead.model_validate(e) for e in events])
 
 
 @router.get("/{event_id}", response_model=EventRead)

@@ -75,6 +75,61 @@ class TestCreateRoute:
         assert resp.status_code == 404
 
 
+class TestBatchWriteRoute:
+    async def test_batch_create(
+        self, client: AsyncClient, session: AsyncSession, conversation
+    ) -> None:
+        resp = await client.post(
+            f"/conversations/{conversation.id}/events/batch",
+            json={
+                "operations": [
+                    {"data": {"kind": "test-signal", "body": {"i": 1}}},
+                    {"op": "create", "data": {"kind": "test-signal", "body": {"i": 2}}},
+                ]
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        items = resp.json()["items"]
+        assert [i["body"]["i"] for i in items] == [1, 2]
+        assert all(i["conversation_id"] == str(conversation.id) for i in items)
+
+    async def test_batch_unknown_conversation_404(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            f"/conversations/{uuid.uuid4()}/events/batch",
+            json={"operations": [{"data": {"kind": "k", "body": {}}}]},
+        )
+        assert resp.status_code == 404
+
+    async def test_batch_empty_operations_422(self, client: AsyncClient, conversation) -> None:
+        resp = await client.post(
+            f"/conversations/{conversation.id}/events/batch",
+            json={"operations": []},
+        )
+        assert resp.status_code == 422
+
+    async def test_batch_create_denied_403(
+        self, client: AsyncClient, session: AsyncSession, conversation
+    ) -> None:
+        """A principal with no event create grant fails the guard (403)."""
+        from tests.unit._auth_helpers import assign_role, make_principal
+
+        from openhands.ev2.util.auth_token import create_auth_token
+
+        principal = await make_principal(
+            session,
+            email=f"user-{uuid.uuid4().hex[:8]}@example.com",
+            username=f"user-{uuid.uuid4().hex[:8]}",
+        )
+        await assign_role(session, principal.id, {"event_permission": None})
+        await session.commit()
+        resp = await client.post(
+            f"/conversations/{conversation.id}/events/batch",
+            json={"operations": [{"data": {"kind": "k", "body": {}}}]},
+            headers={"Authorization": f"Bearer {create_auth_token(principal.id)}"},
+        )
+        assert resp.status_code == 403
+
+
 class TestListRoute:
     async def test_list_paginated(
         self, client: AsyncClient, session: AsyncSession, conversation

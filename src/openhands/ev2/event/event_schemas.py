@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -47,6 +47,28 @@ class EventRead(BaseModel):
     timestamp: datetime
     body: dict[str, Any]
     size_bytes: int
+
+
+# Batch write: POST /conversations/{id}/events/batch applies creates
+# atomically (AGENTS.md §3). Events are immutable, so the only op is
+# create — no update/delete ops exist.
+
+
+class EventBatchCreate(BaseModel):
+    """Create operation within an event batch write."""
+
+    op: Literal["create"] = "create"
+    data: EventCreate
+
+
+class EventBatchWriteRequest(BaseModel):
+    """Request body for ``POST /conversations/{id}/events/batch``."""
+
+    operations: list[EventBatchCreate] = Field(
+        min_length=1,
+        max_length=100,
+        description="Create operations to apply atomically.",
+    )
 
 
 class EventSearchFilter(BaseSearchFilter[Event]):

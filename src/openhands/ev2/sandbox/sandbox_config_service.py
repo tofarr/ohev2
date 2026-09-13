@@ -101,8 +101,9 @@ class SandboxConfigService:
 
         The key is a regular :class:`ApiKey` row (``system=True``, named
         ``"Sandbox {id} API Key"``); its raw ``oh_...`` value is encrypted
-        into ``session_api_key``. The empty placeholder below is immediately
-        replaced — the ApiKey name needs the flush-assigned config id.
+        into ``session_api_key``. The config id is generated up front so the
+        ApiKey name and the encrypted key are both set before the single
+        flush — no placeholder row / second save.
         """
         template = await self._get_template(payload.sandbox_template_id)
         snapshot_on_deactivate = (
@@ -120,10 +121,9 @@ class SandboxConfigService:
             snapshot_on_deactivate=snapshot_on_deactivate,
             meta=payload.meta,
         )
+        config.id = uuid.uuid4()
         if not self._perm_filter.matches(config):
             raise SandboxConfigPermissionScopeError(str(payload.sandbox_template_id))
-        self._session.add(config)
-        await self._session.flush()
 
         token_service = TokenService(self._session)
         raw_key, _ = await token_service.create_api_key(
@@ -132,6 +132,7 @@ class SandboxConfigService:
             system=True,
         )
         config.session_api_key = self._enc.encrypt_value(raw_key)
+        self._session.add(config)
         await self._session.flush()
         await self._session.refresh(config)
         return config
