@@ -223,12 +223,8 @@ async def update_conversation(
     conversation_id: uuid.UUID,
     payload: ConversationUpdate,
     session: SessionDep,
-    # The ingestion path also publishes conversation updates; sandboxes call
-    # the webhook adapter (``/webhooks/...``) instead. Authorization is the
-    # standard role-policy filter, matching every other route.
     perm_filter: Annotated[
-        SearchFilter[Conversation],
-        Depends(depends_permissions(Conversation, Action.UPDATE)),
+        SearchFilter[Conversation], Depends(depends_permissions(Conversation, Action.UPDATE))
     ],
 ) -> ConversationRead:
     service = ConversationService(session, perm_filter)
