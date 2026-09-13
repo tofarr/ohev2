@@ -37,15 +37,6 @@ _PUBLIC_PATHS = {
 }
 
 
-# Sandbox-only ingestion surface (legacy agent-server webhook adapter).
-# These routes authenticate exclusively via the X-Session-API-Key header
-# (SandboxSessionKey scheme) — user credentials are deliberately not accepted.
-_SANDBOX_SESSION_PATHS = {
-    "/webhooks/conversations",
-    "/webhooks/events/{conversation_id}",
-}
-
-
 def _protected_ops(spec: dict[str, object]) -> list[tuple[str, str, dict[str, object]]]:
     out: list[tuple[str, str, dict[str, object]]] = []
     for path, methods in spec["paths"].items():  # type: ignore[index]
@@ -90,11 +81,8 @@ def test_protected_endpoints_carry_security(
         security = op.get("security")  # type: ignore[union-attr]
         assert security, f"{path} missing security requirement"
         scheme_names = {name for req in security for name in req}  # type: ignore[index]
-        if path in _SANDBOX_SESSION_PATHS:
-            assert "SandboxSessionKey" in scheme_names
-        else:
-            assert "ApiKey" in scheme_names
-            assert "BearerAuth" in scheme_names
+        assert "ApiKey" in scheme_names
+        assert "BearerAuth" in scheme_names
 
 
 def test_health_and_auth_token_endpoints_are_public(openapi_spec: dict[str, object]) -> None:

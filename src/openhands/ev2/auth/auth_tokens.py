@@ -115,8 +115,7 @@ def _generate_api_key_value() -> str:
 def hash_api_key_value(raw: str) -> str:
     """SHA-256 hex digest of the raw key value (stored for auth-time lookup).
 
-    Public so non-auth lookups (e.g. the sandbox-session ingestion path)
-    resolve a presented raw key without duplicating the hash convention.
+    Public so tests can seed ApiKey rows from a known plaintext.
     """
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

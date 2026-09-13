@@ -135,7 +135,7 @@ async def on_event(
 def _import_all_tools() -> None:
     """Import all tools so custom event kinds deserialize in webhooks."""
     for _, name, is_pkg in pkgutil.walk_packages(tools.__path__, tools.__name__ + "."):
-        if is_pkg:  # Check if it's a subpackage
+        if is_pkg:
             try:
                 importlib.import_module(name)
             except ImportError:
