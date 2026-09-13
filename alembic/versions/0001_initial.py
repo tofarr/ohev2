@@ -22,7 +22,8 @@ Tables:
 * ``allowed_origins``        — CORS allow-list.
 * ``roles``                  — named role bundling per-entity Permission policies.
 * ``user_roles``             — role-to-user assignments.
-* ``secrets``                — named secrets with encrypted values (optional ``creator_id`` owner).
+* ``secret_providers``       — governed secret-source configurations (retrieval-only).
+* ``static_secrets``         — DB-backed secret store for the ``static`` provider.
 * ``mcp_server_configs``    — stored MCP server configurations.
 * ``mcp_usage``             — raw proxied MCP tool-invocation records (daily-partitioned).
 * ``mcp_aggregated_usage``  — per-minute, per-user rollup of mcp_usage.
@@ -367,20 +368,16 @@ def upgrade() -> None:
             comment="Permission policy for cors_origin resources; null = deny.",
         ),
         sa.Column(
-            "secret_permission",
+            "secret_provider_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Permission policy for secret resources; null = deny.",
+            comment="Permission policy for secret_provider resources; null = deny.",
         ),
         sa.Column(
-            "secret_value_permission",
+            "static_secret_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment=(
-                "Permission policy for the /secret-values reveal projection; "
-                "null = deny. Not registered 1:1 (governs a projection); "
-                "resolved by name via resolve_permission_filter_for_column."
-            ),
+            comment="Permission policy for static_secret resources; null = deny.",
         ),
         sa.Column(
             "mcp_server_config_permission",
@@ -517,14 +514,19 @@ def upgrade() -> None:
     op.create_index("ix_user_roles_user_id", "user_roles", ["user_id"], unique=False)
 
     # ------------------------------------------------------------------ #
-    # secrets
+    # secret_providers (governed, multi-provider secret source rows)
     # ------------------------------------------------------------------ #
     op.create_table(
-        "secrets",
+        "secret_providers",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("code", sa.String(length=255), nullable=False),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("creator_id", sa.Uuid(), nullable=True),
+        sa.Column("kind", sa.String(length=64), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "data",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            comment="Provider-specific configuration (vault id, name prefix, credentials).",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -540,28 +542,32 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["creator_id"],
             ["users.id"],
-            ondelete="SET NULL",
-            name="fk_secrets_creator_id_users",
+            ondelete="CASCADE",
+            name="fk_secret_providers_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("code"),
+        comment="Governed secret-source configurations (retrieval-only)",
     )
-    op.create_index("ix_secrets_code", "secrets", ["code"], unique=True)
-    op.create_index("ix_secrets_creator_id", "secrets", ["creator_id"])
+    op.create_index(
+        "ix_secret_providers_creator_id", "secret_providers", ["creator_id"], unique=False
+    )
 
     # ------------------------------------------------------------------ #
-    # secret_details
+    # static_secrets (DB-backed store for the kind="static" provider)
     # ------------------------------------------------------------------ #
     op.create_table(
-        "secret_details",
+        "static_secrets",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("secret_id", sa.Uuid(), nullable=False),
+        sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column(
             "value",
             sa.Text(),
             nullable=False,
-            comment="Encrypted value (JWE ciphertext).",
+            comment="Encrypted plaintext (JWE ciphertext) of the secret value.",
         ),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("valid_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -575,16 +581,17 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["secret_id"],
-            ["secrets.id"],
+            ["creator_id"],
+            ["users.id"],
             ondelete="CASCADE",
-            name="fk_secret_details_secret_id_secrets",
+            name="fk_static_secrets_creator_id_users",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("secret_id", name="uq_secret_details_secret_id"),
-        comment="Encrypted plaintext for secrets",
+        sa.UniqueConstraint("name"),
+        comment="DB-backed secret store for the static provider",
     )
-    op.create_index("ix_secret_details_secret_id", "secret_details", ["secret_id"], unique=True)
+    op.create_index("ix_static_secrets_creator_id", "static_secrets", ["creator_id"], unique=False)
+    op.create_index("ix_static_secrets_name", "static_secrets", ["name"], unique=True)
 
     # ------------------------------------------------------------------ #
     # mcp_server_configs
@@ -1517,11 +1524,11 @@ def downgrade() -> None:
     op.drop_table("provider_connections")
     op.drop_index("ix_mcp_server_configs_creator_id", table_name="mcp_server_configs")
     op.drop_table("mcp_server_configs")
-    op.drop_index("ix_secret_details_secret_id", table_name="secret_details")
-    op.drop_table("secret_details")
-    op.drop_index("ix_secrets_code", table_name="secrets")
-    op.drop_index("ix_secrets_creator_id", table_name="secrets")
-    op.drop_table("secrets")
+    op.drop_index("ix_static_secrets_name", table_name="static_secrets")
+    op.drop_index("ix_static_secrets_creator_id", table_name="static_secrets")
+    op.drop_table("static_secrets")
+    op.drop_index("ix_secret_providers_creator_id", table_name="secret_providers")
+    op.drop_table("secret_providers")
     op.drop_index("ix_user_roles_user_id", table_name="user_roles")
     op.drop_index("ix_user_roles_role_id", table_name="user_roles")
     op.drop_table("user_roles")

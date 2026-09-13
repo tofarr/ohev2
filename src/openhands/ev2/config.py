@@ -21,10 +21,6 @@ from openhands.ev2.sandbox.sandbox_service import (
     SandboxService,
     resolve_sandbox_service_class,
 )
-from openhands.ev2.secret.secret_service import (
-    SecretsService,
-    resolve_secrets_service_class,
-)
 
 
 class EncryptionKeyConfig(BaseModel):
@@ -179,7 +175,7 @@ class EventConfig(BaseModel):
     ``events`` table) plus a backing object store holding every event's full
     body at a derivable key (``<date>/<event_id[:2]>/<event_id>.json``). The
     body store class is resolved by fully qualified class name like the
-    sandbox/secrets services; the default is the filesystem implementation
+    sandbox services; the default is the filesystem implementation
     writing under ``body_dir``. When the serialized body exceeds
     ``body_cap_bytes`` the row stores a self-describing truncation stub
     (``{"_truncated": true, "original_size_bytes", "preview"}``) instead of
@@ -392,10 +388,6 @@ class AppConfig(BaseModel):
     # async context manager, not configuration.
     _sandbox_service: SandboxService | None = PrivateAttr(default=None)
 
-    # Cached SecretsService built by ``get_secrets_service`` — same rationale
-    # as ``_sandbox_service`` above.
-    _secrets_service: SecretsService | None = PrivateAttr(default=None)
-
     # Cached EventBodyStore built by ``get_event_store`` — a plain handle on
     # the backing directory/bucket, not a per-request value.
     _event_store: EventBodyStore | None = PrivateAttr(default=None)
@@ -430,18 +422,6 @@ class AppConfig(BaseModel):
         default="openhands.ev2.sandbox.docker_sandbox_service.DockerSandboxService",
         description=(
             "Fully qualified class name of the SandboxService implementation "
-            "instantiated at server startup."
-        ),
-    )
-    # Fully qualified class name of the SecretsService implementation to
-    # instantiate at server startup (an async context manager tied to the
-    # app lifespan). Later implementations (AWS Secrets Manager, 1Password,
-    # ...) register their own FQCN here; the default selects the SQL-backed
-    # implementation.
-    secrets_service_class: str = Field(
-        default="openhands.ev2.secret.sql_secrets_service.SqlSecretsService",
-        description=(
-            "Fully qualified class name of the SecretsService implementation "
             "instantiated at server startup."
         ),
     )
@@ -582,25 +562,6 @@ class AppConfig(BaseModel):
         if service.base_url is None:
             service.base_url = self.base_url
         self._sandbox_service = service
-        return service
-
-    def get_secrets_service(self) -> SecretsService:
-        """Build the configured :class:`SecretsService` from the environment.
-
-        Resolves ``secrets_service_class`` then instantiates that concrete
-        class by parsing environment variables under the ``OHE_SECRETS``
-        prefix onto it (so each implementation can read its own
-        provider-specific knobs). The built service is cached on this config
-        so callers reuse the same instance — the service is a long-lived
-        async context manager tied to the app lifespan, not a per-request
-        value.
-        """
-        cached = self._secrets_service
-        if cached is not None:
-            return cached
-        service_class = resolve_secrets_service_class(self.secrets_service_class)
-        service = cast(SecretsService, from_env(service_class, "OHE_SECRETS"))
-        self._secrets_service = service
         return service
 
     def get_event_store(self) -> EventBodyStore:

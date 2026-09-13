@@ -50,17 +50,13 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
-    secret_permission: Permission | None = Field(
+    secret_provider_permission: Permission | None = Field(
         default=None,
-        description="Permission policy for secret resources; null = deny.",
+        description="Permission policy for secret_provider resources; null = deny.",
     )
-    secret_value_permission: Permission | None = Field(
+    static_secret_permission: Permission | None = Field(
         default=None,
-        description=(
-            "Permission policy for the /secret-values reveal projection; "
-            "null = deny. Not registered 1:1 (governs a projection); resolved "
-            "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
-        ),
+        description="Permission policy for static_secret resources; null = deny.",
     )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
@@ -162,17 +158,13 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for cors_origin resources; null = deny.",
     )
-    secret_permission: Permission | None = Field(
+    secret_provider_permission: Permission | None = Field(
         default=None,
-        description="Permission policy for secret resources; null = deny.",
+        description="Permission policy for secret_provider resources; null = deny.",
     )
-    secret_value_permission: Permission | None = Field(
+    static_secret_permission: Permission | None = Field(
         default=None,
-        description=(
-            "Permission policy for the /secret-values reveal projection; "
-            "null = deny. Not registered 1:1 (governs a projection); resolved "
-            "by name via resolve_permission_filter_for_column (AGENTS.md §12)."
-        ),
+        description="Permission policy for static_secret resources; null = deny.",
     )
     mcp_server_config_permission: Permission | None = Field(
         default=None,
@@ -259,8 +251,8 @@ class RoleRead(BaseModel):
     api_key_permission: Permission | None
     oauth_client_permission: Permission | None
     cors_origin_permission: Permission | None
-    secret_permission: Permission | None
-    secret_value_permission: Permission | None
+    secret_provider_permission: Permission | None
+    static_secret_permission: Permission | None
     mcp_server_config_permission: Permission | None
     provider_connection_permission: Permission | None
     llm_permission: Permission | None

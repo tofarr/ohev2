@@ -1,16 +1,16 @@
-"""Pydantic schemas for the secret feature.
+"""Pydantic schemas for the secret provider feature (AGENTS.md §12/§13).
 
 Resources:
 
-* ``/secrets`` — full CRUD (GET paginated, POST, GET/PATCH/DELETE /{id}) plus
-  batch read/write. Responses return metadata only — the ``value`` is never
-  exposed here. The ``value`` is received as a :class:`SecretStr` on create
-  /update (so it is never logged carelessly) and stored encrypted in a detail
-  table by the service.
-* ``/secret-values`` — read-only projection that reveals decrypted plaintext,
-  governed by the separate ``secret_value_permission`` column; a secret is
-  revealed only when the principal has both read access to the secret and the
-  value-reveal permission (defense in depth, AGENTS.md §12).
+* ``/secret-providers`` — full CRUD over governed secret-source rows
+  (``kind`` + ``data``). ``data`` is a secret-bearing JSONB map: the service
+  stores each value as JWE ciphertext and the read surface decrypts-then-masks
+  it (plaintext only when the §13 ``expose_secrets`` context flag is set).
+* ``/static-secrets`` — full CRUD over the DB-backed store for the
+  ``kind="static"`` provider. The ``value`` is a :class:`SecretStr`; responses
+  never include it (reveal happens through ``/secret-values``).
+* ``/secret-values`` — read-only projection of :class:`SecretValue` served by
+  providers, gated by a single USE on the provider.
 """
 
 from __future__ import annotations
@@ -18,184 +18,298 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_serializer, field_validator
 
-from openhands.ev2.secret.secret_models import Secret
+from openhands.ev2.secret.secret_models import SecretProvider, StaticSecret
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
-# A secret code is letters, digits, and underscores only (like a feature-flag
-# key). Stable, human-readable, and safe to use as a reference key.
-_CODE_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# A secret name is env-var compatible: uppercase letters, digits, and
+# underscores; first character a letter or underscore.
+_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _validate_name(value: str) -> str:
+    value = value.strip()
+    if not value or not _NAME_RE.match(value):
+        raise ValueError("name must match [A-Z_][A-Z0-9_]* (uppercase, digits, underscores)")
+    return value
 
 
 # --------------------------------------------------------------------------- #
-# Secret
+# SecretProvider
 # --------------------------------------------------------------------------- #
 
 
-class SecretCreate(BaseModel):
-    """Payload to create a secret.
+class SecretProviderCreate(BaseModel):
+    """Payload to create a secret provider row.
 
-    ``value`` is a :class:`SecretStr` so the plaintext is treated as sensitive
-    in transit (it is not repr'd/logged by default); it is encrypted at rest
-    by the service before persistence.
+    ``data`` values are plaintext in transit; the service encrypts each to JWE
+    ciphertext before storage. ``data`` keys are treated as literal strings.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    code: str = Field(min_length=1, max_length=255, description="Letters, digits, underscores.")
-    value: SecretStr = Field(min_length=1, description="The secret payload (plaintext in transit).")
-    description: str | None = Field(default=None, max_length=4096)
+    kind: Literal["static"] = Field(description="Discriminator selecting the provider.")
 
-    @field_validator("code")
+    data: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        description="Provider-specific configuration; values encrypted at rest.",
+    )
+
+    @field_validator("data", mode="before")
     @classmethod
-    def _validate_code(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("code must be a non-empty string")
-        if not _CODE_RE.match(v):
-            raise ValueError("code may only contain letters, digits, and underscores")
-        return v
+    def _validate_data(cls, value: Any) -> dict[str, SecretStr] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("data must be an object")
+        return {str(key): load_secret_str_entry(item) for key, item in value.items()}
 
 
-class SecretUpdate(BaseModel):
-    """Partial update of a secret. All fields optional."""
+def load_secret_str_entry(item: Any) -> SecretStr:
+    """Coerce a single ``data`` entry to :class:`SecretStr` for in-memory use."""
+    if isinstance(item, SecretStr):
+        return item
+    return SecretStr(str(item))
+
+
+class SecretProviderUpdate(BaseModel):
+    """Payload to partially update a secret provider row."""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    code: str | None = Field(default=None, min_length=1, max_length=255)
-    value: SecretStr | None = Field(default=None, min_length=1)
-    description: str | None = Field(default=None, max_length=4096)
+    data: dict[str, SecretStr] | None = Field(
+        default=None,
+        description="Provider-specific configuration; values encrypted at rest.",
+    )
 
-    @field_validator("code")
+    @field_validator("data", mode="before")
     @classmethod
-    def _validate_code(cls, v: str | None) -> str | None:
-        if v is None:
+    def _validate_data(cls, value: Any) -> dict[str, SecretStr] | None:
+        if value is None:
             return None
-        v = v.strip()
-        if not v:
-            raise ValueError("code must be a non-empty string")
-        if not _CODE_RE.match(v):
-            raise ValueError("code may only contain letters, digits, and underscores")
-        return v
+        if not isinstance(value, dict):
+            raise ValueError("data must be an object")
+        return {str(key): load_secret_str_entry(item) for key, item in value.items()}
 
 
-class SecretRead(BaseModel):
-    """Secret metadata returned by the ``/secrets`` surface.
+class SecretProviderRead(BaseModel):
+    """Secret provider representation returned by the API.
 
-    The ``value`` is intentionally absent — decrypted plaintext is revealed
-    only through the ``/secret-values`` projection (AGENTS.md §12).
+    Stored ``data`` values are JWE ciphertext; the serializer decrypts them and
+    re-wraps as :class:`SecretStr`, so values serialize as ``**********`` by
+    default. Only a caller that explicitly passes the §13 ``expose_secrets``
+    context flag sees plaintext.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    code: str
-    description: str | None
-    creator_id: uuid.UUID | None
+    kind: str
+
+    @field_serializer("data")
+    def _serialize_data(self, value: dict[str, Any], info: Any) -> dict[str, str]:
+        ctx = getattr(info, "context", None)
+        expose = bool(ctx.get("expose_secrets")) if isinstance(ctx, dict) else False
+        return {str(key): str(item) if expose else "**********" for key, item in value.items()}
+
+    data: dict[str, Any]
+    creator_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
 
 
-class SecretSearchFilter(BaseSearchFilter[Secret]):
-    """Optional filter clauses for ``GET /secrets``."""
+class SecretProviderSearchFilter(BaseSearchFilter[SecretProvider]):
+    """Optional filter clauses for ``GET /secret-providers``."""
 
-    code__contains: str | None = Field(default=None, description="Case-insensitive code substring.")
-    code__eq: str | None = Field(default=None, description="Exact code match.")
-    created_at__gte: datetime | None = Field(
-        default=None, description="ISO 8601; created at or after."
-    )
-    created_at__lt: datetime | None = Field(default=None, description="ISO 8601; created before.")
-    created_at__gt: datetime | None = Field(
-        default=None, description="ISO 8601; created strictly after."
-    )
-    created_at__lte: datetime | None = Field(
-        default=None, description="ISO 8601; created at or before."
-    )
+    kind__eq: str | None = Field(default=None)
+    creator_id__eq: uuid.UUID | None = Field(default=None)
+    created_at__gte: datetime | None = Field(default=None)
+    created_at__lt: datetime | None = Field(default=None)
+    created_at__gt: datetime | None = Field(default=None)
+    created_at__lte: datetime | None = Field(default=None)
 
 
-class SecretSearchResult(BaseModel):
-    """Paginated collection of secret metadata."""
+class SecretProviderSearchResult(BaseModel):
+    """Paginated collection of secret providers."""
 
-    items: list[SecretRead]
-    next_cursor: str | None = Field(
-        default=None,
-        description="Opaque cursor for the next page; null when no more results.",
-    )
+    items: list[SecretProviderRead]
+    next_cursor: str | None = Field(default=None)
     limit: int
 
 
-# --------------------------------------------------------------------------- #
-# Secret value reveal (/secret-values)
-# --------------------------------------------------------------------------- #
-
-
-class SecretValueRead(BaseModel):
-    """A decrypted secret value returned by the ``/secret-values`` projection.
-
-    This is the only API shape that carries plaintext. A principal receives it
-    only when they have both read access to the secret (``secret_permission``)
-    and the value-reveal permission (``secret_value_permission``).
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    code: str
-    value: str
-
-
-class SecretValueSearchResult(BaseModel):
-    """Paginated collection of revealed secret values."""
-
-    items: list[SecretValueRead]
-    next_cursor: str | None = Field(
-        default=None,
-        description="Opaque cursor for the next page; null when no more results.",
-    )
-    limit: int
-
-
-# --------------------------------------------------------------------------- #
-# Secret batch write
-# --------------------------------------------------------------------------- #
-
-
-class SecretBatchCreate(BaseModel):
-    """Create operation within a secret batch write."""
+class SecretProviderBatchCreate(BaseModel):
+    """Create operation within a secret provider batch write."""
 
     op: Literal["create"] = "create"
-    data: SecretCreate
+    data: SecretProviderCreate
 
 
-class SecretBatchUpdate(BaseModel):
-    """Update operation within a secret batch write."""
+class SecretProviderBatchUpdate(BaseModel):
+    """Update operation within a secret provider batch write."""
 
     op: Literal["update"] = "update"
     id: uuid.UUID
-    data: SecretUpdate
+    data: SecretProviderUpdate
 
 
-class SecretBatchDelete(BaseModel):
-    """Delete operation within a secret batch write."""
+class SecretProviderBatchDelete(BaseModel):
+    """Delete operation within a secret provider batch write."""
 
     op: Literal["delete"] = "delete"
     id: uuid.UUID
 
 
-SecretBatchOp = Annotated[
-    SecretBatchCreate | SecretBatchUpdate | SecretBatchDelete,
+SecretProviderBatchOp = Annotated[
+    SecretProviderBatchCreate | SecretProviderBatchUpdate | SecretProviderBatchDelete,
     Field(discriminator="op"),
 ]
 
 
-class SecretBatchWriteRequest(BaseModel):
-    """Request body for ``POST /secrets/batch``."""
+class SecretProviderBatchWriteRequest(BaseModel):
+    """Request body for ``POST /secret-providers/batch``."""
 
-    operations: list[SecretBatchOp] = Field(
-        min_length=1,
-        max_length=100,
-        description="Operations to apply atomically; create/update/delete mixed.",
-    )
+    operations: list[SecretProviderBatchOp] = Field(min_length=1, max_length=100)
+
+
+# --------------------------------------------------------------------------- #
+# StaticSecret
+# --------------------------------------------------------------------------- #
+
+
+class StaticSecretCreate(BaseModel):
+    """Payload to create a static secret."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    value: SecretStr = Field(min_length=1, description="The secret payload (plaintext in transit).")
+    valid_at: datetime | None = Field(default=None)
+    expires_at: datetime | None = Field(default=None)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _validate_name(value)
+
+
+class StaticSecretUpdate(BaseModel):
+    """Payload to partially update a static secret. All fields optional."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    value: SecretStr | None = Field(default=None, min_length=1)
+    valid_at: datetime | None = Field(default=None)
+    expires_at: datetime | None = Field(default=None)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_name(value)
+
+
+class StaticSecretRead(BaseModel):
+    """Static secret metadata returned by the CRUD surface.
+
+    The ``value`` is intentionally absent — plaintext is revealed only through
+    the ``/secret-values`` projection (single USE gate on the provider).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    creator_id: uuid.UUID
+    valid_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StaticSecretSearchFilter(BaseSearchFilter[StaticSecret]):
+    """Optional filter clauses for ``GET /static-secrets``."""
+
+    name__contains: str | None = Field(default=None)
+    name__eq: str | None = Field(default=None)
+    creator_id__eq: uuid.UUID | None = Field(default=None)
+    created_at__gte: datetime | None = Field(default=None)
+    created_at__lt: datetime | None = Field(default=None)
+    created_at__gt: datetime | None = Field(default=None)
+    created_at__lte: datetime | None = Field(default=None)
+
+
+class StaticSecretSearchResult(BaseModel):
+    """Paginated collection of static secrets."""
+
+    items: list[StaticSecretRead]
+    next_cursor: str | None = Field(default=None)
+    limit: int
+
+
+class StaticSecretBatchCreate(BaseModel):
+    """Create operation within a static secret batch write."""
+
+    op: Literal["create"] = "create"
+    data: StaticSecretCreate
+
+
+class StaticSecretBatchUpdate(BaseModel):
+    """Update operation within a static secret batch write."""
+
+    op: Literal["update"] = "update"
+    id: uuid.UUID
+    data: StaticSecretUpdate
+
+
+class StaticSecretBatchDelete(BaseModel):
+    """Delete operation within a static secret batch write."""
+
+    op: Literal["delete"] = "delete"
+    id: uuid.UUID
+
+
+StaticSecretBatchOp = Annotated[
+    StaticSecretBatchCreate | StaticSecretBatchUpdate | StaticSecretBatchDelete,
+    Field(discriminator="op"),
+]
+
+
+class StaticSecretBatchWriteRequest(BaseModel):
+    """Request body for ``POST /static-secrets/batch``."""
+
+    operations: list[StaticSecretBatchOp] = Field(min_length=1, max_length=100)
+
+
+# --------------------------------------------------------------------------- #
+# SecretValue (read-only reveal projection)
+# --------------------------------------------------------------------------- #
+
+
+class SecretValueRead(BaseModel):
+    """A single secret value served by the ``/secret-values`` projection.
+
+    ``id`` is the composite ``{provider_id}/{internal_id}`` string. ``name`` is
+    the env-var-compatible handle; ``value`` is the decrypted plaintext — this
+    surface exists precisely to reveal it.
+    """
+
+    id: str
+    provider_id: uuid.UUID
+    internal_id: str
+    name: str
+    value: str
+    valid_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class SecretValueSearchResult(BaseModel):
+    """Paginated collection of secret values from a single provider."""
+
+    items: list[SecretValueRead]
+    next_cursor: str | None = Field(default=None)
+    limit: int

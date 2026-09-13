@@ -382,9 +382,10 @@ column.**
 > (`secret_grant_permission`, `mcp_server_config_grant_permission`,
 > `sandbox_template_grant_permission`) have been removed. Item-level access
 > control is now expressed via the generic `AclPermission` policy stored in
-> the role's per-entity JSONB column (e.g. `secret_permission`), which
-> enumerates permitted item ids per action. See §12 for the secrets
-> projection that still uses `secret_value_permission` for value reveal.
+> the role's per-entity JSONB column (e.g. `secret_provider_permission`),
+> which enumerates permitted item ids per action. See §12 for the secrets
+> projection, which is gated by a single USE permission on the parent
+> provider.
 
 ## 10. Review checklist (for agents reviewing PRs)
 
@@ -404,76 +405,101 @@ column.**
 
 ## 12. Secrets & the value-reveal projection
 
-Every secret holds one opaque plaintext value (an API key, token, cert,
-…). The `secrets` table carries metadata only (`code`, `description`,
-`creator_id`, timestamps); the JWE-encrypted payload lives in
-`secret_details` (1:1 with `secrets`, `ON DELETE CASCADE`). There is no
-secret type discriminator — external OAuth providers are integrated
-completely separately from secrets (e.g. the federated-IdP token tables in
-`auth/`, §9), never as a kind of secret.
+The secrets surface is **multi-provider and retrieval-oriented**. A
+`SecretProvider` is a governed CRUD row (`secret/secret_provider.py`,
+`secret/secret_models.py::SecretProvider`) selecting a retrieval-only
+implementation via its `kind` discriminator; the built-in `static` kind
+reads from the DB-backed `static_secrets` store (`StaticSecret`). There is
+no app-scoped `SecretsService` abstract factory and no
+`secrets_service_class` config knob — providers are ordinary governed
+resources, so external vaults (AWS Secrets Manager, 1Password, …) can be
+registered/revoked through the API without a second admin surface.
 
-### 12.0 The secrets control plane is polymorphic
+### 12.0 The `SecretProvider` ABC is session-aware
 
-Like the sandbox control plane (§8), secrets are served by a pluggable
-`SecretsService` ABC (`secret/secret_service.py`) selected via the
-`secrets_service_class` config value (a fully qualified class name) and
-constructed once by `AppConfig.get_secrets_service()` as an async context
-manager tied to the app lifespan; routers resolve it from
-`app.state.secrets_service` and pass per-principal permission filters to
-each call. The service surface exchanges the Pydantic `Secret`
-(`secret/secret_models.py`) — never an ORM row — so external stores (AWS
-Secrets Manager, 1Password, …) can be implemented without leaking client
-types. The default implementation is `SqlSecretsService`
-(`secret/sql_secrets_service.py`), which owns the ORM models
-(`secret/sql_secrets_models.py`: `SqlSecret`, `SqlSecretDetail`) and
-translates internally; each operation runs in a session from
-`get_session_factory()`, and a contextvar-carried session lets `apply_batch`
-share one session and one commit across its operations (atomic batches,
-§3). Permission/search filters are applied in memory (`matches`), never
-pushed into provider-specific queries — the same convention as sandboxes.
+The provider interface (`secret/secret_provider.py`) exposes **read paths
+only** (no create/update/delete) — customers administer an external vault in
+their own console/CLI, and this API adds retrieval with permission gating,
+not a second admin surface. Every method receives the caller's
+`AsyncSession` so provider reads happen **inside the caller's transaction**
+(per-test savepoints, batch commits). Providers that do not need the
+database may ignore it.
 
-### 12.1 Value reveal is a separate projection
+Provider implementations are selected at request time from
+`secret_providers.kind` via `secret_provider_registry.py`
+(`register_provider_factory`). Client objects are constructed lazily per
+row and cached (`SecretProviderCache`); because they are read-only there is
+no explicit cleanup on shutdown. The static provider
+(`secret/static_secret_provider.py`) reads `static_secrets` and decrypts
+`value` via `EncryptionService` at read time.
 
-The secret tables (`secrets`, `secret_details`) **never**
-expose their sensitive values through their own CRUD endpoints. `SecretRead`
-omits `value` entirely; `/secrets` returns metadata only.
+The REST surface (AGENTS.md §3):
 
-Decrypted plaintext is revealed solely through the **`/secret-values`**
-projection, a read-only umbrella surface (`GET /secret-values`,
-`GET /secret-values/batch`, `GET /secret-values/{id}`) backed by the
-value-reveal methods on `SecretsService` (`get_secret_value`,
-`get_secret_values`, `search_secret_values`). A secret is revealed only when
-the principal has **both**:
+* `GET/POST/PATCH/DELETE /secret-providers` — CRUD on the governed provider
+  rows. `data` is provider-specific config whose values are encrypted to
+  JWE ciphertext on create/update and decrypted on read
+  (`SecretProviderRead.data` masks by default).
+* `GET/POST/PATCH/DELETE /static-secrets` (`kind="static"` only) — CRUD on
+  the DB-backed store. `StaticSecretRead` never carries `value`.
+* `GET /secret-values` (+ `/{id}`, `/batch`) — read-only reveal projection.
 
-1. read access to the secret (the `secret_permission` filter — same grant
-   logic as `/secrets`), **and**
-2. the value-reveal permission (`secret_value_permission`).
+`secret_provider_permission` and `static_secret_permission` are ordinary
+entity columns in `ROLE_ENTITY_COLUMNS` registered 1:1 via
+`register_resource_policy` (both in `auth_dependencies.py`), exactly like
+every other governed entity (§11).
 
-`SecretsService` ANDs the two filters (`AndSearchFilter(filters=[read,
-value])`); either being `None`/denying yields 404 (fail-closed — a 404, not
-a 403, so existence is not leaked). The Quint spec mirrors this in
-`canRevealValue` / `valueRevealRequiresBothPerms` (`specs/secret.qnt`).
+### 12.1 Value reveal is gated by a single USE on the provider
 
-### 12.2 `secret_value_permission` is the documented registry exception
+The secret tables **never** expose their sensitive values through their own
+CRUD endpoints — `StaticSecretRead` omits `value` entirely, and
+`/static-secrets` returns metadata only. Decrypted plaintext is revealed
+solely through the **`/secret-values`** projection, a read-only surface
+(`GET /secret-values`, `GET /secret-values/batch`, `GET /secret-values/{id}`)
+backed by `secret_value_service.py::SecretValueSession`, which resolves the
+composite id to a provider and reads through the provider implementation.
 
-`secret_value_permission` is a real entity column in `ROLE_ENTITY_COLUMNS`
-(and `Role`, the migration, and `RoleCreate`/`RoleUpdate`/`RoleRead`), so
-the admin seed role automatically receives `Permitted()` on it and
-`RoleService.create`/`update` copy it generically like every other column.
+The composite secret id is `{provider_id}/{internal_id}`
+(`SecretValue.split_id`), so a caller can identify both the provider and the
+secret in one token. `internal_id` is opaque (the static provider uses the
+stringified row UUID).
 
-It is **intentionally NOT registered** via
-`register_resource_policy(Secret, "secret_value_permission")`. The
-`_RESOURCE_POLICY` registry maps a model type to exactly one column, and
-`Secret` is already mapped to `secret_permission`. `secret_value_permission`
-governs a cross-type *projection* (`/secret-values`), not a table, so it is
-resolved **by column name** via
-`resolve_permission_filter_for_column("secret_value_permission", Action.READ,
-…)` and the `depends_secret_value_permission()` FastAPI dependency (which
-raises 403 when the resolved filter is `None`).
+A secret is revealed when the principal has the **`USE` action on the parent
+`SecretProvider`** — there is **no separate value-reveal permission** and no
+per-secret link table. Providers that admit USE disclose every value they
+can read; per-item narrowing is expressed through the provider's
+`AclPermission` filter being ANDed into the USE resolution. Failing the USE
+filter yields 404 (fail-closed — a 404, not a 403, so existence is not
+leaked). The Quint spec mirrors this in `canReveal` / `specs/secret.qnt`.
 
-`tests/unit/test_role_service.py::TestEntityColumnParity::test_model_and_registry_cover_every_entity_column`
-subtracts a documented `non_registered = {"secret_value_permission"}` set
-from the equality assertion and asserts `depends_secret_value_permission`
-is callable, so the column cannot be silently ungoverned. This is the only
-documented exception to the "every entity column is registered 1:1" rule in
-§11; do not add more without updating that test and this section.
+### 12.2 Sensitive `data` is encrypted at rest (§13)
+
+`SecretProvider.data` values are plaintext in transit and JWE ciphertext at
+rest: the service layer encrypts each value on create/update (`encrypt_secret_map`)
+and decrypts on read (`decrypt_secret_map`), exactly matching the MCP server
+config pattern. `StaticSecret.value` is likewise JWE ciphertext, decrypted
+by the static provider at read time. The read schemas mask `data` values as
+`**********` by default; only callers that pass the §13 `expose_secrets`
+context flag see plaintext.
+
+## 13. SecretStr serialization standard
+
+Sensitive fields that travel as `SecretStr` are serialized through a uniform
+pydantic-context convention implemented in
+`util/secret_serialization.py` (AGENTS.md §12.2) and used from
+`field_serializer` / `field_validator` decorators on the owning models.
+
+* An **optional context object** is passed when serializing/deserializing.
+* If the context carries an `encryption_service` (an `EncryptionService`),
+  `SecretStr` values are **encrypted on dump** via
+  `EncryptionService.encrypt_value` and **decrypted on load** via
+  `EncryptionService.decrypt_value` (the column stores JWE ciphertext).
+* Otherwise, if the context carries `expose_secrets: true`, secrets are
+  dumped in plaintext.
+* Otherwise (no context / neither flag), secrets are **redacted** (Pydantic's
+  default `str(SecretStr)` → `**********`).
+
+Encryption wins over plaintext exposure, which wins over redaction — an
+explicit encryption request must never leak plaintext through a stray flag.
+The helpers accept the pydantic `ValidationInfo` / `SerializationInfo` when
+available so the context flows through `model_dump(..., context=...)` and
+`model_validate(..., context=...)`.

@@ -4,12 +4,13 @@ Seeds the database with the admin user (all permissions via ``seed_db``),
 logs in as the admin via ``POST /auth/dev/login``, then exercises the secrets
 surface over HTTP:
 
-1. ``POST /secrets`` creates a secret — the response carries metadata only
-   (never the value).
-2. ``GET /secrets/{id}`` returns the same metadata.
-3. ``GET /secret-values/{id}`` reveals the decrypted plaintext, which must
-   match the value supplied on create.
-4. ``DELETE /secrets/{id}`` removes the secret (and the next reveal is 404).
+1. ``POST /secret-providers`` creates a ``static`` provider.
+2. ``POST /static-secrets`` creates a secret under it — the response carries
+   metadata only (never the value).
+3. ``GET /static-secrets/{id}`` returns the same metadata.
+4. ``GET /secret-values/{provider_id}/{secret_id}`` reveals the decrypted
+   plaintext, which must match the value supplied on create.
+5. ``DELETE /static-secrets/{id}`` removes the secret (and the next reveal is 404).
 
 Run: uv run pytest tests/e2e -q
 Requires the app + Postgres to be up (``docker compose up -d``) and migrations
@@ -25,7 +26,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.ev2.scripts.seed_db import seed_db
-from openhands.ev2.secret.sql_secrets_models import SqlSecret
+from openhands.ev2.secret.secret_models import StaticSecret
 
 BASE_URL = os.environ.get("OHE_BASE_URL", "http://localhost:8000")
 
@@ -40,13 +41,13 @@ ADMIN_PASSWORD = os.environ.get("OHE_SEED_ADMIN_PASSWORD", "changeme")
 
 COOKIE_NAME = os.environ.get("OHE_AUTH_COOKIE_NAME", "ohesession")
 
-SECRET_CODE = "E2E_API_KEY"
+SECRET_NAME = "E2E_API_KEY"
 SECRET_VALUE = "e2e-secret-value-hunter2"
 
 
 async def test_admin_can_create_and_reveal_a_secret() -> None:
     # 1. Seed the admin so a real enabled user exists to log in as. Clean up
-    #    any prior-run secret first so a re-run cannot hit a 409 on the code.
+    #    any prior-run secret first so a re-run cannot hit a 409 on the name.
     db_url = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     engine = create_async_engine(db_url)
     try:
@@ -66,36 +67,46 @@ async def test_admin_can_create_and_reveal_a_secret() -> None:
         cookie = await _login(ac, ADMIN_USERNAME, ADMIN_PASSWORD)
         headers = {"Cookie": f"{COOKIE_NAME}={cookie}"}
 
-        # 2. Create the secret. The metadata response must never carry the value.
+        # 2. Create a static provider.
+        provider_resp = await ac.post(
+            "/secret-providers",
+            json={"kind": "static", "data": {}},
+            headers=headers,
+        )
+        assert provider_resp.status_code == 201, provider_resp.text
+        provider_id = provider_resp.json()["id"]
+
+        # 3. Create the secret. The metadata response must never carry the value.
         create_resp = await ac.post(
-            "/secrets",
-            json={"code": SECRET_CODE, "value": SECRET_VALUE, "description": "e2e"},
+            "/static-secrets",
+            json={"name": SECRET_NAME, "value": SECRET_VALUE, "expires_at": None},
             headers=headers,
         )
         assert create_resp.status_code == 201, create_resp.text
         created = create_resp.json()
-        assert created["code"] == SECRET_CODE
+        assert created["name"] == SECRET_NAME
         assert "value" not in created
         secret_id = created["id"]
 
-        # 3. The same metadata is retrievable from /secrets/{id}.
-        get_resp = await ac.get(f"/secrets/{secret_id}", headers=headers)
+        # 4. The same metadata is retrievable from /static-secrets/{id}.
+        get_resp = await ac.get(f"/static-secrets/{secret_id}", headers=headers)
         assert get_resp.status_code == 200, get_resp.text
-        assert get_resp.json()["code"] == SECRET_CODE
+        assert get_resp.json()["name"] == SECRET_NAME
         assert "value" not in get_resp.json()
 
-        # 4. The /secret-values projection reveals the exact value created.
-        reveal_resp = await ac.get(f"/secret-values/{secret_id}", headers=headers)
+        # 5. The /secret-values projection reveals the exact value created.
+        composite_id = f"{provider_id}/{secret_id}"
+        reveal_resp = await ac.get(f"/secret-values/{composite_id}", headers=headers)
         assert reveal_resp.status_code == 200, reveal_resp.text
         revealed = reveal_resp.json()
-        assert revealed["id"] == secret_id
-        assert revealed["code"] == SECRET_CODE
+        assert revealed["id"] == composite_id
+        assert revealed["name"] == SECRET_NAME
         assert revealed["value"] == SECRET_VALUE
 
-        # 5. Cleanup: deleting the secret also removes the revealable value.
-        delete_resp = await ac.delete(f"/secrets/{secret_id}", headers=headers)
+        # 6. Cleanup: deleting the secret also removes the revealable value.
+        delete_resp = await ac.delete(f"/static-secrets/{secret_id}", headers=headers)
         assert delete_resp.status_code == 204, delete_resp.text
-        gone_resp = await ac.get(f"/secret-values/{secret_id}", headers=headers)
+        gone_resp = await ac.get(f"/secret-values/{composite_id}", headers=headers)
         assert gone_resp.status_code == 404, gone_resp.text
 
 
@@ -117,10 +128,9 @@ async def _reset_e2e_artifacts(session: AsyncSession) -> None:
     """Delete the prior run's secret so the test is hermetic across re-runs.
 
     The secret is created over the API and is not idempotent — a re-run would
-    hit a 409 on the unique ``code``. Deleting it first (the FK cascades the
-    detail row) keeps the test hermetic.
+    hit a 409 on the unique ``name``. Deleting it first keeps the test hermetic.
     """
-    await session.execute(delete(SqlSecret).where(SqlSecret.code == SECRET_CODE))
+    await session.execute(delete(StaticSecret).where(StaticSecret.name == SECRET_NAME))
     await session.commit()
 
 

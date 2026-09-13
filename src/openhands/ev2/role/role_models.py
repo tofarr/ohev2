@@ -40,8 +40,8 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "api_key_permission",
     "oauth_client_permission",
     "cors_origin_permission",
-    "secret_permission",
-    "secret_value_permission",
+    "secret_provider_permission",
+    "static_secret_permission",
     "mcp_server_config_permission",
     "provider_connection_permission",
     "llm_permission",
@@ -108,20 +108,15 @@ class Role(Base):
         default=None,
         comment="Permission policy for cors_origin resources; null = deny.",
     )
-    secret_permission: Mapped[Permission | None] = mapped_column(
+    secret_provider_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
         default=None,
-        comment="Permission policy for secret resources; null = deny.",
+        comment="Permission policy for secret_provider resources; null = deny.",
     )
-    secret_value_permission: Mapped[Permission | None] = mapped_column(
+    static_secret_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
         default=None,
-        comment=(
-            "Permission policy for the /secret-values reveal projection; "
-            "null = deny. Not registered 1:1 via register_resource_policy "
-            "(governs a projection, not a table) — resolved by name via "
-            "resolve_permission_filter_for_column (AGENTS.md §12)."
-        ),
+        comment="Permission policy for static_secret resources; null = deny.",
     )
     mcp_server_config_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
