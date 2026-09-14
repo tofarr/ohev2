@@ -464,6 +464,12 @@ def upgrade() -> None:
             comment="Permission policy for conversation resources; null = deny.",
         ),
         sa.Column(
+            "conversation_template_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for conversation_template resources; null = deny.",
+        ),
+        sa.Column(
             "event_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
@@ -1426,6 +1432,113 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ #
+    # conversation_templates
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "conversation_templates",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column(
+            "creator_id",
+            sa.Uuid(),
+            nullable=False,
+            comment="User id that created the template.",
+        ),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column(
+            "agent_kind",
+            sa.String(length=32),
+            nullable=False,
+            server_default=sa.text("'openhands'"),
+            comment="SDK AgentSettings discriminator (default 'openhands').",
+        ),
+        sa.Column(
+            "llm_id",
+            sa.Uuid(),
+            nullable=True,
+            comment="FK to the governed StoredLLM to use; null after the LLM is deleted.",
+        ),
+        sa.Column(
+            "mcp_server_config_ids",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column(
+            "secret_provider_ids",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column(
+            "static_secret_ids",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column(
+            "agent_config",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+        sa.Column(
+            "conversation_config",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+        sa.Column(
+            "system_message_suffix",
+            sa.Text(),
+            nullable=True,
+            comment="Optional static suffix appended by the start service.",
+        ),
+        sa.Column(
+            "default_callbacks",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+            comment="EventCallbackProcessor specs auto-attached by the start service.",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["llm_id"],
+            ["llms.id"],
+            ondelete="SET NULL",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Reusable conversation launch profiles (admin-governed)",
+    )
+    op.create_index(
+        "ix_conversation_templates_creator_id",
+        "conversation_templates",
+        ["creator_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_conversation_templates_llm_id",
+        "conversation_templates",
+        ["llm_id"],
+        unique=False,
+    )
+
+    # ------------------------------------------------------------------ #
     # events (range-partitioned parent by timestamp; partitions are created
     # by the background partition manager at runtime — see README 'Event
     # storage'. A DEFAULT partition is created here so inserts never fail
@@ -1462,6 +1575,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_events_conversation_id", table_name="events")
     op.drop_table("events")
+    op.drop_index("ix_conversation_templates_llm_id", table_name="conversation_templates")
+    op.drop_index("ix_conversation_templates_creator_id", table_name="conversation_templates")
+    op.drop_table("conversation_templates")
     op.drop_index("ix_conversations_sandbox_config_id", table_name="conversations")
     op.drop_table("conversations")
     op.drop_index("ix_sandbox_usage_sandbox_config_id", table_name="sandbox_usage")

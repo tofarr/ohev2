@@ -56,6 +56,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "group_permission",
     "group_user_permission",
     "conversation_permission",
+    "conversation_template_permission",
     "event_permission",
 )
 
@@ -187,6 +188,11 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for conversation resources; null = deny.",
+    )
+    conversation_template_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for conversation_template resources; null = deny.",
     )
     event_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
