@@ -46,6 +46,8 @@ module secret {
     providers' = Set(),
     staticSecrets' = Set(),
     providerIdsUserCanUse' = Set(),
+    oauthSessions' = Set(),
+    sessionIdsUserCanUse' = Set(),
   }
 
   // ---- Actions --------------------------------------------------------------
@@ -56,6 +58,8 @@ module secret {
     providers' = providers.union(Set(provider)),
     staticSecrets' = staticSecrets,
     providerIdsUserCanUse' = providerIdsUserCanUse,
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -64,6 +68,8 @@ module secret {
     providers' = providers.filter(p => p.id != id),
     staticSecrets' = staticSecrets,
     providerIdsUserCanUse' = providerIdsUserCanUse.filter(pid => pid != id),
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -73,6 +79,8 @@ module secret {
     providers' = providers,
     staticSecrets' = staticSecrets,
     providerIdsUserCanUse' = providerIdsUserCanUse.union(Set(id)),
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -83,6 +91,8 @@ module secret {
     providers' = providers,
     staticSecrets' = staticSecrets.union(Set(secret)),
     providerIdsUserCanUse' = providerIdsUserCanUse,
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -91,6 +101,8 @@ module secret {
     providers' = providers,
     staticSecrets' = staticSecrets.filter(s => s.id != id),
     providerIdsUserCanUse' = providerIdsUserCanUse,
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -98,6 +110,8 @@ module secret {
     providers' = providers,
     staticSecrets' = staticSecrets.filter(s => s.creatorId != userId),
     providerIdsUserCanUse' = providerIdsUserCanUse,
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -126,6 +140,8 @@ module secret {
     providers' = providers,
     staticSecrets' = staticSecrets,
     providerIdsUserCanUse' = providerIdsUserCanUse,
+    oauthSessions' = oauthSessions,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
     true,
   }
 
@@ -198,6 +214,89 @@ module secret {
       .then(all {
         assert(not(canReveal(("p1", "s1")))),
         assert(not(providers.exists(p => p.id == "p1"))),
+        assertNoStateChange,
+      })
+  }
+
+  // ---- OAuth provider kind (sub-issue #145) -------------------------------
+
+  // The ``oauth`` kind serves OAuth session tokens. Its composite id encodes
+  // ``{oauth_provider_id}/{oauth_session_id}``. The USE-on-session gate is
+  // modeled as a separate set (``sessionIdsUserCanUse``); the single USE on
+  // the parent ``SecretProvider`` (kind ``oauth``) is still required.
+  type OAuthSession = {
+    id: str,
+    oauthProviderId: str,
+    creatorId: str,
+    accessToken: str,
+    tolerateInvalid: bool,
+  }
+
+  var oauthSessions: Set[OAuthSession]
+  var sessionIdsUserCanUse: Set[str]
+
+  action createOAuthSession(session: OAuthSession): bool = all {
+    not(oauthSessions.exists(s => s.id == session.id)),
+    oauthSessions' = oauthSessions.union(Set(session)),
+    providers' = providers,
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse,
+    true,
+  }
+
+  action grantSessionUse(id: str): bool = all {
+    oauthSessions.exists(s => s.id == id),
+    not(sessionIdsUserCanUse.contains(id)),
+    oauthSessions' = oauthSessions,
+    providers' = providers,
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse.union(Set(id)),
+    true,
+  }
+
+  // OAuth composite id: (oauthProviderId, oauthSessionId).
+  type OAuthCompositeId = (str, str)
+
+  // Reveal of an OAuth token requires USE on the parent SecretProvider
+  // (kind ``oauth``) AND the session exists AND USE on the session.
+  def canRevealOAuth(providerId: str, composite: OAuthCompositeId): bool =
+    providerIdsUserCanUse.contains(providerId)
+      and oauthSessions.exists(s => s.id == composite._2 and s.oauthProviderId == composite._1)
+      and sessionIdsUserCanUse.contains(composite._2)
+
+  run oauthRevealRequiresProviderAndSessionUse = {
+    init
+      .then(createProvider({ id: "op", kind: "oauth", creatorId: "u1" }))
+      .then(createOAuthSession({ id: "s1", oauthProviderId: "gh", creatorId: "u1", accessToken: "tok1", tolerateInvalid: false }))
+      .then(all {
+        // Without USE on the provider or session, reveal is denied.
+        assert(not(canRevealOAuth("op", ("gh", "s1")))),
+        assertNoStateChange,
+      })
+      .then(grantProviderUse("op"))
+      .then(all {
+        // Provider USE alone is not enough — session USE is also required.
+        assert(not(canRevealOAuth("op", ("gh", "s1")))),
+        assertNoStateChange,
+      })
+      .then(grantSessionUse("s1"))
+      .then(all {
+        assert(canRevealOAuth("op", ("gh", "s1"))),
+        assertNoStateChange,
+      })
+  }
+
+  run oauthTolerateInvalidOmits = {
+    init
+      .then(createProvider({ id: "op", kind: "oauth", creatorId: "u1" }))
+      .then(createOAuthSession({ id: "s1", oauthProviderId: "gh", creatorId: "u1", accessToken: "tok1", tolerateInvalid: true }))
+      .then(grantProviderUse("op"))
+      .then(grantSessionUse("s1"))
+      .then(all {
+        // With tolerate_invalid=true the session is revealed when valid.
+        assert(canRevealOAuth("op", ("gh", "s1"))),
         assertNoStateChange,
       })
   }

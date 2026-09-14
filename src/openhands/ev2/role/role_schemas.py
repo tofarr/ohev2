@@ -122,6 +122,14 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for event resources; null = deny.",
     )
+    oauth_provider_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for oauth_provider resources; null = deny.",
+    )
+    oauth_session_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for oauth_session resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -234,6 +242,14 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for event resources; null = deny.",
     )
+    oauth_provider_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for oauth_provider resources; null = deny.",
+    )
+    oauth_session_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for oauth_session resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -277,6 +293,8 @@ class RoleRead(BaseModel):
     conversation_permission: Permission | None
     conversation_template_permission: Permission | None
     event_permission: Permission | None
+    oauth_provider_permission: Permission | None
+    oauth_session_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 

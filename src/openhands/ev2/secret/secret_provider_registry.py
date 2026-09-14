@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING
 
 from openhands.ev2.secret.secret_models import STATIC_PROVIDER_KIND
 
+# The ``oauth`` kind discriminator for the OAuthSecretsProvider (sub-issue #145).
+OAUTH_PROVIDER_KIND = "oauth"
+
 if TYPE_CHECKING:
     from openhands.ev2.encryption.encryption_service import EncryptionService
     from openhands.ev2.secret.secret_provider import SecretProvider
@@ -37,6 +40,15 @@ def _static_provider_factory(data: dict[str, object], enc: EncryptionService) ->
 
 # The static provider needs no config beyond the encryption service.
 register_provider_factory(STATIC_PROVIDER_KIND, _static_provider_factory)
+
+
+def _oauth_provider_factory(data: dict[str, object], enc: EncryptionService) -> SecretProvider:
+    from openhands.ev2.secret.oauth_secret_provider import OAuthSecretsProvider
+
+    return OAuthSecretsProvider(enc)
+
+
+register_provider_factory(OAUTH_PROVIDER_KIND, _oauth_provider_factory)
 
 
 class SecretProviderCache:

@@ -68,6 +68,10 @@ PERMISSION_DEPENDENCY_OVERRIDES: set[tuple[str, str]] = {
     ("POST", "/auth/dev/login"),
     ("POST", "/auth/dev/token"),
     ("POST", "/auth/dev/refresh"),
+    # OAuth provider callback — public IdP redirect target (sub-issue #144).
+    # The signed state token binds the callback to the originating user +
+    # provider; client credentials are not applicable on the redirect.
+    ("GET", "/oauth/providers/{provider_id}/callback"),
 }
 
 

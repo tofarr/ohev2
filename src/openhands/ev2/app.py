@@ -47,6 +47,9 @@ from openhands.ev2.mcp_server_config.mcp_proxy_router import (
 from openhands.ev2.mcp_server_config.mcp_server_config_router import (
     router as mcp_server_config_router,
 )
+from openhands.ev2.oauth.oauth_provider_router import router as oauth_provider_router
+from openhands.ev2.oauth.oauth_session_router import flow_router as oauth_flow_router
+from openhands.ev2.oauth.oauth_session_router import router as oauth_session_router
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
 from openhands.ev2.sandbox.sandbox_config_router import router as sandbox_config_router
@@ -422,6 +425,14 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "DB-backed sandbox snapshots - create from a sandbox or import a file.",
     },
     {
+        "name": "oauth-providers",
+        "description": "Governed external OAuth provider configurations.",
+    },
+    {
+        "name": "oauth-sessions",
+        "description": "Per-user OAuth sessions and login/consent flow.",
+    },
+    {
         "name": "webhooks",
         "description": "Legacy agent-server webhook adapter (standard API-key auth).",
     },
@@ -471,6 +482,9 @@ def create_app() -> FastAPI:
     app.include_router(sandbox_sandbox_router)
     app.include_router(sandbox_snapshot_router)
     app.include_router(user_router)
+    app.include_router(oauth_provider_router)
+    app.include_router(oauth_session_router)
+    app.include_router(oauth_flow_router)
     app.include_router(webhook_router)
     # Mount the built-in dev identity provider when the configured IdP URL is the
     # dev sentinel. Read the env var directly (rather than get_config()) so app

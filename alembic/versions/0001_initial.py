@@ -476,6 +476,18 @@ def upgrade() -> None:
             comment="Permission policy for event resources; null = deny.",
         ),
         sa.Column(
+            "oauth_provider_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for oauth_provider resources; null = deny.",
+        ),
+        sa.Column(
+            "oauth_session_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for oauth_session resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("clock_timestamp()"),
@@ -598,6 +610,102 @@ def upgrade() -> None:
     )
     op.create_index("ix_static_secrets_creator_id", "static_secrets", ["creator_id"], unique=False)
     op.create_index("ix_static_secrets_name", "static_secrets", ["name"], unique=True)
+
+    # ------------------------------------------------------------------ #
+    # oauth_providers (governed external OAuth provider configurations)
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "oauth_providers",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("url", sa.String(length=2048), nullable=False),
+        sa.Column("client_id", sa.String(length=255), nullable=False),
+        sa.Column("client_secret", sa.Text(), nullable=False),
+        sa.Column("scopes", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("user_id_field", sa.String(length=255), nullable=True),
+        sa.Column("email_field", sa.String(length=255), nullable=True),
+        sa.Column("role_field", sa.String(length=255), nullable=True),
+        sa.Column("expire_drift_tolerance", sa.Integer(), nullable=False),
+        sa.Column("authorize_path", sa.String(length=255), nullable=False),
+        sa.Column("token_path", sa.String(length=255), nullable=False),
+        sa.Column("refresh_path", sa.String(length=255), nullable=False),
+        sa.Column("revocation_path", sa.String(length=255), nullable=True),
+        sa.Column("access_token_expires_in", sa.Integer(), nullable=False),
+        sa.Column("refresh_token_expires_in", sa.Integer(), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default="true", nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_oauth_providers_creator_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("name"),
+        comment="Governed external OAuth provider configurations",
+    )
+    op.create_index("ix_oauth_providers_name", "oauth_providers", ["name"], unique=True)
+    op.create_index(
+        "ix_oauth_providers_creator_id", "oauth_providers", ["creator_id"], unique=False
+    )
+
+    # ------------------------------------------------------------------ #
+    # oauth_sessions (per-user OAuth tokens for a governed provider)
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "oauth_sessions",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("oauth_provider_id", sa.Uuid(), nullable=False),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("refresh_token", sa.Text(), nullable=False),
+        sa.Column("access_token", sa.Text(), nullable=False),
+        sa.Column("access_token_expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("refresh_token_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("tolerate_invalid", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default="true", nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["oauth_provider_id"],
+            ["oauth_providers.id"],
+            ondelete="RESTRICT",
+            name="fk_oauth_sessions_oauth_provider_id_oauth_providers",
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"],
+            ["users.id"],
+            ondelete="CASCADE",
+            name="fk_oauth_sessions_creator_id_users",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        comment="Per-user OAuth tokens for a governed provider",
+    )
+    op.create_index(
+        "ix_oauth_sessions_oauth_provider_id", "oauth_sessions", ["oauth_provider_id"], unique=False
+    )
+    op.create_index("ix_oauth_sessions_creator_id", "oauth_sessions", ["creator_id"], unique=False)
 
     # ------------------------------------------------------------------ #
     # mcp_server_configs
@@ -1640,6 +1748,12 @@ def downgrade() -> None:
     op.drop_table("provider_connections")
     op.drop_index("ix_mcp_server_configs_creator_id", table_name="mcp_server_configs")
     op.drop_table("mcp_server_configs")
+    op.drop_index("ix_oauth_sessions_creator_id", table_name="oauth_sessions")
+    op.drop_index("ix_oauth_sessions_oauth_provider_id", table_name="oauth_sessions")
+    op.drop_table("oauth_sessions")
+    op.drop_index("ix_oauth_providers_creator_id", table_name="oauth_providers")
+    op.drop_index("ix_oauth_providers_name", table_name="oauth_providers")
+    op.drop_table("oauth_providers")
     op.drop_index("ix_static_secrets_name", table_name="static_secrets")
     op.drop_index("ix_static_secrets_creator_id", table_name="static_secrets")
     op.drop_table("static_secrets")

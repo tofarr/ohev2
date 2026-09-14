@@ -601,6 +601,8 @@ from openhands.ev2.mcp_server_config.mcp_server_config_models import (  # noqa: 
 from openhands.ev2.mcp_server_config.mcp_usage_models import (  # noqa: E402
     McpAggregatedUsage as _McpAggregatedUsage,
 )
+from openhands.ev2.oauth.oauth_provider_models import OAuthProvider as _OAuthProvider  # noqa: E402
+from openhands.ev2.oauth.oauth_session_models import OAuthSession as _OAuthSession  # noqa: E402
 from openhands.ev2.role.role_models import Role as _Role  # noqa: E402
 from openhands.ev2.role.role_models import UserRole as _UserRole  # noqa: E402
 from openhands.ev2.sandbox.sandbox_config_models import (  # noqa: E402
@@ -657,6 +659,10 @@ register_resource_policy(_ConversationTemplate, "conversation_template_permissio
 # sandbox config's creator (EventAccess); events are immutable and written by
 # the ingestion path.
 register_resource_policy(_Event, "event_permission")
+# OAuth providers (sub-issue #143) and sessions (sub-issue #144) are governed
+# entities with their own per-entity Role columns.
+register_resource_policy(_OAuthProvider, "oauth_provider_permission")
+register_resource_policy(_OAuthSession, "oauth_session_permission")
 
 
 def depends_permissions(
