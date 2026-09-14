@@ -129,7 +129,7 @@ class TestOAuthSecretsProvider:
         assert len(values) >= 1
         assert any(v.value == "ghp_12345" for v in values)
 
-    async def test_derive_name(self, session: AsyncSession, user_id: uuid.UUID) -> None:
+    async def test_derive_name(self, session: AsyncSession) -> None:
         user_id = await _seed_user(session)
         provider, oauth_session = await _seed_provider_and_session(session, user_id)
         secrets_provider = OAuthSecretsProvider(get_encryption_service())

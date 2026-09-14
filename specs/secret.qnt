@@ -256,6 +256,16 @@ module secret {
     true,
   }
 
+  action deleteOAuthSession(id: str): bool = all {
+    oauthSessions.exists(s => s.id == id),
+    oauthSessions' = oauthSessions.filter(s => s.id != id),
+    providers' = providers,
+    staticSecrets' = staticSecrets,
+    providerIdsUserCanUse' = providerIdsUserCanUse,
+    sessionIdsUserCanUse' = sessionIdsUserCanUse.filter(sid => sid != id),
+    true,
+  }
+
   // OAuth composite id: (oauthProviderId, oauthSessionId).
   type OAuthCompositeId = (str, str)
 
