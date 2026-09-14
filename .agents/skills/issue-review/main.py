@@ -17,6 +17,14 @@ Environment (injected by the automation service at run time):
   AUTOMATION_CALLBACK_API_KEY     -- callback auth key
   AUTOMATION_RUN_ID     -- this run's id (for the callback)
 GITHUB_TOKEN is fetched from the agent server secret store at run time.
+
+Optional config (env):
+  OHE_REPO               -- target repo (default: tofarr/ohev2)
+  OHE_AGENT_PROFILE      -- agent profile name (default: default)
+  OHE_WORKSPACE_ROOT     -- root for cloned repo workspaces
+  MAX_ISSUES_PER_RUN     -- max issues per run (default: 5)
+  STALE_HOURS            -- stale-claim rescue threshold (default: 2)
+  CONV_TIMEOUT           -- per-conversation timeout seconds (default: 600)
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -35,6 +44,7 @@ REPO = os.environ.get("OHE_REPO", "tofarr/ohev2")
 MAX_ISSUES_PER_RUN = int(os.environ.get("MAX_ISSUES_PER_RUN", "5"))
 STALE_HOURS = int(os.environ.get("STALE_HOURS", "2"))
 CONVERSATION_TIMEOUT_S = int(os.environ.get("CONV_TIMEOUT", "600"))
+WORKSPACE_ROOT = os.environ.get("OHE_WORKSPACE_ROOT", "/tmp/issue-review-workspaces")
 
 AUTO_REFINE_RE = re.compile(r"^auto_refine_(\d+)$")
 
@@ -141,23 +151,66 @@ def set_labels(token: str, issue_number: int, add: list[str], remove: list[str])
 # --- OpenHands conversation helpers ---
 
 
-def start_conversation(prompt: str, repo: str, token: str) -> str:
-    """Start an OpenHands conversation via the agent server API. Returns conversation id.
+def resolve_agent_profile_id() -> str:
+    """Resolve the agent profile id to use for spawned conversations.
 
-    The automation service clones the repo into the sandbox workspace before
-    this script runs, so the conversation uses a LocalWorkspace at the default
-    working dir. GITHUB_TOKEN is passed as a conversation secret so the agent
-    can read/write issue labels.
+    The agent server requires one of `agent`, `agent_settings`, or
+    `agent_profile_id` on the create payload. We resolve by name (defaulting
+    to the `default` profile) and return its stored id.
     """
     base = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
     key = os.environ.get("SESSION_API_KEY", "")
+    name = os.environ.get("OHE_AGENT_PROFILE", "default")
+    req = urllib.request.Request(
+        f"{base}/api/agent-profiles/{name}",
+        headers={"X-Session-API-Key": key},
+    )
+    with urllib.request.urlopen(req) as r:
+        data = json.loads(r.read().decode())
+    profile = data.get("profile", data)
+    pid = profile.get("id")
+    if not pid:
+        raise RuntimeError(f"agent profile '{name}' has no id")
+    return pid
+
+
+def clone_repo(repo: str, dest: str, token: str) -> None:
+    """Clone the target repo into dest so AGENTS.md/.agents/specs load."""
+    if os.path.isdir(os.path.join(dest, ".git")):
+        return
+    os.makedirs(dest, exist_ok=True)
+    url = f"https://{token}@github.com/{repo}.git"
+    subprocess.run(
+        ["git", "clone", "--depth", "1", url, dest],
+        check=True,
+        capture_output=True,
+    )
+
+
+def start_conversation(prompt: str, repo: str, token: str) -> str:
+    """Start an OpenHands conversation via the agent server API. Returns conversation id.
+
+    Clones the repo into a per-issue workspace so AGENTS.md and
+    .agents/skills/ load for the review. GITHUB_TOKEN is passed as a
+    conversation secret (StaticSecret-typed) so the agent can read/write
+    issue labels.
+    """
+    base = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
+    key = os.environ.get("SESSION_API_KEY", "")
+
+    workspace_dir = os.path.join(WORKSPACE_ROOT, repo.replace("/", "_"))
+    clone_repo(repo, workspace_dir, token)
+    profile_id = resolve_agent_profile_id()
+
     body = {
+        "workspace": {"kind": "LocalWorkspace", "working_dir": workspace_dir},
+        "agent_profile_id": profile_id,
         "initial_message": {
             "role": "user",
             "content": [{"type": "text", "text": prompt}],
             "run": True,
         },
-        "secrets": {"GITHUB_TOKEN": token},
+        "secrets": {"GITHUB_TOKEN": {"kind": "StaticSecret", "value": token}},
         "tags": {"automation": "issue-review", "repo": repo},
     }
     req = urllib.request.Request(
@@ -170,7 +223,7 @@ def start_conversation(prompt: str, repo: str, token: str) -> str:
         },
     )
     with urllib.request.urlopen(req) as r:
-        return json.loads(r.read().decode())["conversation_id"]
+        return json.loads(r.read().decode())["id"]
 
 
 def read_prompt_template() -> str:
