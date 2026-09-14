@@ -715,26 +715,38 @@ def give_up(token: str, pr_number: int, conv_id: str) -> None:
 # --- Stale-claim rescue ---
 
 
-def rescue_stale(token: str, prs: list[dict]) -> None:
-    """Re-queue PRs claimed by a conversation that has stalled."""
-    for pr in prs:
-        labels = [label["name"] for label in pr.get("labels", [])]
-        if LABEL_REVIEWING not in labels:
-            continue
-        comments = list_comments(token, pr["number"])
+def rescue_stale(token: str, reviewing_prs: list[dict]) -> None:
+    """Re-queue PRs claimed by a conversation that has stalled.
+
+    Iterates over PRs that currently have the `agent_reviewing` label. If the
+    conversation has had no new events for > STALE_THRESHOLD, the claim is
+    released: `agent_reviewing` is removed and `ready_for_review` re-added so
+    the PR re-enters the fresh-start scan set. The attempts budget is
+    preserved (it was never removed at claim time).
+    """
+    for pr in reviewing_prs:
+        num = pr["number"]
+        comments = list_comments(token, num)
         marker = find_marker_comment(comments)
         if not marker:
+            # Claimed but no marker — stale claim from a crashed run. Re-queue.
+            print(f"  #{num}: stale claim (no marker), re-queueing")
+            set_labels(token, num, add=[LABEL_READY], remove=[LABEL_REVIEWING])
             continue
         conv_url = extract_conversation_url(marker)
         if not conv_url:
+            print(f"  #{num}: stale claim (bad marker), re-queueing")
+            set_labels(token, num, add=[LABEL_READY], remove=[LABEL_REVIEWING])
             continue
         conv_id = extract_conversation_id(conv_url)
         if not conv_id:
+            print(f"  #{num}: stale claim (bad conv id), re-queueing")
+            set_labels(token, num, add=[LABEL_READY], remove=[LABEL_REVIEWING])
             continue
         if not is_stalled(conv_id):
             continue
-        print(f"  #{pr['number']}: stale claim, re-queueing")
-        set_labels(token, pr["number"], add=[LABEL_READY], remove=[LABEL_REVIEWING])
+        print(f"  #{num}: stale claim (stalled conversation), re-queueing")
+        set_labels(token, num, add=[LABEL_READY], remove=[LABEL_REVIEWING])
 
 
 # --- Main dispatch ---
@@ -744,13 +756,40 @@ def main() -> None:
     token = get_secret("GITHUB_TOKEN")
     print(f"=== PR review dispatch: repo={REPO} max={MAX_PRS_PER_RUN} ===")
 
-    prs = gh_get_prs_with_label(token, LABEL_READY)
-    print(f"Found {len(prs)} PRs with {LABEL_READY}")
+    # PRs waiting for review (eligible for fresh start).
+    ready_prs = gh_get_prs_with_label(token, LABEL_READY)
+    print(f"Found {len(ready_prs)} PRs with {LABEL_READY}")
 
-    rescue_stale(token, prs)
+    # PRs currently being reviewed (need check-up or rescue).
+    reviewing_prs = gh_get_prs_with_label(token, LABEL_REVIEWING)
+    print(f"Found {len(reviewing_prs)} PRs with {LABEL_REVIEWING}")
+
+    # Rescue stalled claims first (re-queues them into ready_prs for next run).
+    rescue_stale(token, reviewing_prs)
 
     acted = 0
-    for pr in prs:
+
+    # Process in-flight reviews: check up on conversations that have finished
+    # or stalled, resolving the outcome (approve / changes / re-queue / give-up).
+    for pr in reviewing_prs:
+        if acted >= MAX_PRS_PER_RUN:
+            print(f"  hit per-run cap ({MAX_PRS_PER_RUN}), stopping")
+            break
+        num = pr["number"]
+        comments = list_comments(token, num)
+        marker = find_marker_comment(comments)
+        if not marker:
+            # No marker on a reviewing PR — rescue_stale already re-queued it.
+            continue
+        try:
+            print(f"  #{num}: marker present -> check up")
+            check_up(token, pr, marker)
+            acted += 1
+        except Exception as e:
+            print(f"  #{num}: ERROR: {e}", file=sys.stderr)
+
+    # Process fresh starts: PRs with ready_for_review that have no marker.
+    for pr in ready_prs:
         if acted >= MAX_PRS_PER_RUN:
             print(f"  hit per-run cap ({MAX_PRS_PER_RUN}), stopping")
             break
@@ -770,8 +809,10 @@ def main() -> None:
                 print(f"  #{num}: no marker -> fresh start")
                 fresh_start(token, pr)
             else:
-                print(f"  #{num}: marker present -> check up")
-                check_up(token, pr, marker)
+                # Has ready_for_review AND a marker — a rescue re-queued it.
+                # Treat as a fresh start (the old conversation is stale).
+                print(f"  #{num}: marker present but re-queued -> fresh start")
+                fresh_start(token, pr)
             acted += 1
         except Exception as e:
             print(f"  #{num}: ERROR: {e}", file=sys.stderr)
