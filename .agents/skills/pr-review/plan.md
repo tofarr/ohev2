@@ -49,21 +49,27 @@ to the CI and review-state filters in §4).
 
 ## 4. Eligibility filter (per run)
 
-Enumerate open PRs with the `ready_for_review` label. Then drop a PR if **any**
-of these hold:
+The script fetches **two** lists of PRs each run:
 
-- It has the `agent_reviewing` label (already in flight).
-- It has a `CHANGES_REQUESTED` review from anyone (GitHub
-  `GET /repos/{repo}/pulls/{n}/reviews`, filtered to `state == "CHANGES_REQUESTED"`).
-  A changes-requested review means the author must push new commits before
-  re-review.
-- Its combined CI status is not `success` (GitHub
-  `GET /repos/{repo}/commits/{sha}/check-runs` + `/statuses`; see §5). A PR
-  with pending or failing checks is skipped this run — it will be picked up
-  next hour when checks finish.
+1. **`ready_for_review` PRs** — eligible for fresh start. Dropped if any hold:
+   - `agent_reviewing` label (already in flight — should not happen since the
+     label was removed at claim time, but guarded defensively).
+   - A `CHANGES_REQUESTED` review from anyone (GitHub
+     `GET /repos/{repo}/pulls/{n}/reviews`, filtered to `state ==
+     "CHANGES_REQUESTED"`). A changes-requested review means the author must
+     push new commits before re-review.
+   - Combined CI status is not `success` (§5). A PR with pending or failing
+     checks is skipped this run — it will be picked up next hour when checks
+     finish.
+
+2. **`agent_reviewing` PRs** — in-flight reviews. These are processed through
+   `check_up` (resolve outcome) or `rescue_stale` (re-queue if stalled). This
+   list is critical: once a PR is claimed (`ready_for_review` removed,
+   `agent_reviewing` added), it is **only** visible via this second list.
+   Without it, the PR would be stuck in `agent_reviewing` forever.
 
 Cap: **at most 3 PRs acted on per run** (`MAX_PRS_PER_RUN`, default 3)
-across both branches (fresh-start + check-up), to bound token/sandbox cost.
+across both branches (check-up + fresh-start), to bound token/sandbox cost.
 
 ## 5. CI check (combined status)
 
