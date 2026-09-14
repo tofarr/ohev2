@@ -107,7 +107,7 @@ echo "--- Creating automation ---"
 EXISTING=$(curl -s \
   -H "X-Session-API-Key: $OPENHANDS_AUTOMATION_API_KEY" \
   "${AUTOMATION_HOST}/api/automation/v1?limit=50")
-EXISTING_ID=$(echo "$EXISTING" | jq -r ".items[]? | select(.name == \"Issue Review Automation\") | .id" | head -1)
+EXISTING_ID=$(echo "$EXISTING" | jq -r ".automations[]? | select(.name == \"Issue Review Automation\") | .id" | head -1)
 
 if [ -n "$EXISTING_ID" ]; then
   echo "  Found existing automation ($EXISTING_ID), updating..."
@@ -136,8 +136,7 @@ else
         \"schedule\": \"0 * * * *\",
         \"timezone\": \"UTC\"
       },
-      \"timeout\": 1800,
-      \"enabled\": true
+      \"timeout\": 1800
     }" \
     "${AUTOMATION_HOST}/api/automation/v1")
 fi
