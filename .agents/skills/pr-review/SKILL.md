@@ -38,15 +38,22 @@ the author must push new commits before re-review.
 
 ### Dispatch-side transitions (deterministic, script — not the LLM)
 
-1. **Enumerate** eligible PRs, up to `MAX_PRS_PER_RUN` (default 3).
-2. **Rescue** (each run, after enumeration): PRs with `agent_reviewing` AND no
-   new conversation events for > `STALE_THRESHOLD` (default 20 min) → remove
-   `agent_reviewing`, re-add `ready_for_review`. N is preserved because
-   `agent_attempts_remaining_<N>` was never removed at claim time.
-3. For each eligible PR, look for the canonical marker comment
-   (`<!-- openhands-automation: pr-review -->`):
-   - **No marker** → **fresh start** (§Fresh start).
-   - **Marker present** → **check up** (§Check up).
+1. **Enumerate** two sets of PRs:
+   - `ready_for_review` PRs (eligible for fresh start), up to `MAX_PRS_PER_RUN`
+     (default 3).
+   - `agent_reviewing` PRs (in-flight — need check-up or rescue).
+2. **Rescue** (each run, after enumeration): PRs with `agent_reviewing` whose
+   conversation has had no new events for > `STALE_THRESHOLD` (default 20 min)
+   → remove `agent_reviewing`, re-add `ready_for_review`. N is preserved
+   because `agent_attempts_remaining_<N>` was never removed at claim time.
+   PRs with `agent_reviewing` but no valid marker comment are also re-queued
+   (stale claim from a crashed run).
+3. **Check up** on `agent_reviewing` PRs (up to the cap): find the marker
+   comment, validate the conversation id, query the agent server for
+   `execution_status`, and resolve the outcome (§Verdict).
+4. **Fresh start** on `ready_for_review` PRs (up to the cap) that have no
+   marker (or were just rescued): verify CI, claim, start a review
+   conversation, post the marker.
 
 ### Fresh start (no marker)
 
