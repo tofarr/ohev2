@@ -137,3 +137,35 @@ class TestOAuthSecretsProvider:
         result = await secrets_provider.get(session, provider.id, internal_id)
         assert result is not None
         assert "GITHUB_SECRETS_TEST_TOKEN" in result.name or "TOKEN" in result.name
+
+    async def test_batch_get_mismatched_lengths_raises(self, session: AsyncSession) -> None:
+        secrets_provider = OAuthSecretsProvider(get_encryption_service())
+        with pytest.raises(ValueError, match="equal length"):
+            await secrets_provider.batch_get(session, [uuid.uuid4()], ["id1", "id2"])
+
+    async def test_get_nonexistent_provider_returns_none(self, session: AsyncSession) -> None:
+        user_id = await _seed_user(session)
+        _provider, oauth_session = await _seed_provider_and_session(session, user_id)
+        secrets_provider = OAuthSecretsProvider(get_encryption_service())
+        internal_id = f"{uuid.uuid4()}/{oauth_session.id}"
+        result = await secrets_provider.get(session, uuid.uuid4(), internal_id)
+        assert result is None
+
+    async def test_get_malformed_uuid_in_internal_id_returns_none(
+        self, session: AsyncSession
+    ) -> None:
+        user_id = await _seed_user(session)
+        provider, _oauth_session = await _seed_provider_and_session(session, user_id)
+        secrets_provider = OAuthSecretsProvider(get_encryption_service())
+        result = await secrets_provider.get(session, provider.id, "not-a-uuid/also-not-a-uuid")
+        assert result is None
+
+    async def test_search_with_disabled_provider_skips(self, session: AsyncSession) -> None:
+        user_id = await _seed_user(session)
+        provider, _oauth_session = await _seed_provider_and_session(session, user_id)
+        provider.enabled = False
+        await session.flush()
+        secrets_provider = OAuthSecretsProvider(get_encryption_service())
+        values, _ = await secrets_provider.search(session, provider.id)
+        assert all(v is not None for v in values)
+        assert len(values) == 0

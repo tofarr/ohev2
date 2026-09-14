@@ -544,7 +544,10 @@ class OAuthSessionService:
         return self._enc.create_jwe_token(payload, expires_in=_PENDING_AUTH_TTL)
 
     def _decode_pending_auth(self, state: str) -> dict[str, Any]:
-        payload = self._enc.decrypt_jwe_token(state)
+        try:
+            payload = self._enc.decrypt_jwe_token(state)
+        except Exception as exc:
+            raise OAuthProviderError("invalid state") from exc
         if not isinstance(payload, dict):
             raise OAuthProviderError("invalid state")
         if payload.get(_STATE_VERIFIER_CLAIM) is None:
