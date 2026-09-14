@@ -26,9 +26,9 @@ import os
 import re
 import sys
 import time
-import urllib.request
 import urllib.error
 import urllib.parse
+import urllib.request
 
 # --- Config ---
 REPO = os.environ.get("OHE_REPO", "tofarr/ohev2")
@@ -46,13 +46,16 @@ LABEL_NEEDS_REFINE = "needs_refinement"
 
 # --- No-LLM helpers (from the automation skill) ---
 
+
 def get_secret(name: str) -> str:
     url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
     key = os.environ.get("SESSION_API_KEY") or os.environ.get("OH_SESSION_API_KEYS_0", "")
-    with urllib.request.urlopen(urllib.request.Request(
-        f"{url}/api/settings/secrets/{name}",
-        headers={"X-Session-API-Key": key},
-    )) as r:
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"{url}/api/settings/secrets/{name}",
+            headers={"X-Session-API-Key": key},
+        )
+    ) as r:
         return r.read().decode().strip()
 
 
@@ -64,50 +67,63 @@ def fire_callback(status: str = "COMPLETED", error: str | None = None) -> None:
     if error:
         body["error"] = error
     try:
-        urllib.request.urlopen(urllib.request.Request(
-            url,
-            data=json.dumps(body).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {os.environ.get('AUTOMATION_CALLBACK_API_KEY', '')}",
-            },
-        ))
+        urllib.request.urlopen(
+            urllib.request.Request(
+                url,
+                data=json.dumps(body).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {os.environ.get('AUTOMATION_CALLBACK_API_KEY', '')}",
+                },
+            )
+        )
     except Exception as e:
         print(f"Callback error: {e}", file=sys.stderr)
 
 
 # --- GitHub API helpers ---
 
+
 def gh_request(method: str, path: str, token: str, body: dict | None = None) -> dict:
     url = f"https://api.github.com/repos/{REPO}/{path}"
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, method=method, data=data, headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
+    req = urllib.request.Request(
+        url,
+        method=method,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     with urllib.request.urlopen(req) as r:
         raw = r.read().decode()
         return json.loads(raw) if raw else {}
 
 
-def gh_get_issues_with_labels(token: str, labels: list[str], exclude_label: str | None = None) -> list[dict]:
-    label_query = " ".join(f'label:"{l}"' for l in labels)
-    query = f'repo:{REPO} is:issue is:open {label_query}'
+def gh_get_issues_with_labels(
+    token: str, labels: list[str], exclude_label: str | None = None
+) -> list[dict]:
+    label_query = " ".join(f'label:"{label}"' for label in labels)
+    query = f"repo:{REPO} is:issue is:open {label_query}"
     if exclude_label:
         query += f' -label:"{exclude_label}"'
     url = f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}&per_page=50"
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    })
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
     with urllib.request.urlopen(req) as r:
         return json.loads(r.read().decode()).get("items", [])
 
 
 def parse_n(labels: list[str]) -> int:
-    ns = [int(m.group(1)) for l in labels for m in [AUTO_REFINE_RE.match(l)] if m]
+    ns = [int(m.group(1)) for label in labels for m in [AUTO_REFINE_RE.match(label)] if m]
     return min(ns) if ns else 0
 
 
@@ -123,6 +139,7 @@ def set_labels(token: str, issue_number: int, add: list[str], remove: list[str])
 
 
 # --- OpenHands conversation helpers ---
+
 
 def start_conversation(prompt: str, repo: str, token: str) -> str:
     """Start an OpenHands conversation via the agent server API. Returns conversation id.
@@ -160,7 +177,8 @@ def read_prompt_template() -> str:
     # The prompt template lives in the skill directory shipped with this script.
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "AUTOMATION_PROMPT.md")
-    raw = open(path).read()
+    with open(path) as f:
+        raw = f.read()
     # Extract the fenced code block (between ``` markers)
     start = raw.index("```\n") + 4
     end = raw.rindex("\n```")
@@ -172,6 +190,7 @@ def render_prompt(template: str, issue_url: str, n: int) -> str:
 
 
 # --- Rescue stale claims ---
+
 
 def rescue_stale_claims(token: str) -> int:
     """Re-queue issues stuck in agent_reviewing for > STALE_HOURS."""
@@ -189,6 +208,7 @@ def rescue_stale_claims(token: str) -> int:
 
 
 # --- Main dispatch ---
+
 
 def main() -> None:
     token = get_secret("GITHUB_TOKEN")
@@ -210,12 +230,17 @@ def main() -> None:
     dispatched = 0
     for issue in issues[:MAX_ISSUES_PER_RUN]:
         num = issue["number"]
-        labels = [l["name"] for l in issue.get("labels", [])]
+        labels = [label["name"] for label in issue.get("labels", [])]
         n = parse_n(labels)
         issue_url = issue["html_url"]
 
         # Claim: swap ready -> reviewing
-        set_labels(token, num, add=[LABEL_REVIEWING], remove=[LABEL_READY, LABEL_APPROVED, LABEL_NEEDS_REFINE])
+        set_labels(
+            token,
+            num,
+            add=[LABEL_REVIEWING],
+            remove=[LABEL_READY, LABEL_APPROVED, LABEL_NEEDS_REFINE],
+        )
         print(f"  claimed #{num} (N={n})")
 
         # Render the prompt and start a conversation
