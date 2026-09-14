@@ -54,9 +54,7 @@ CONV_ID_RE = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
 MARKER_PREFIX = "<!-- openhands-automation: implementation -->"
-MARKER_BODY_RE = re.compile(
-    r"An Agent is working on this in conversation: (\S+)", re.IGNORECASE
-)
+MARKER_BODY_RE = re.compile(r"An Agent is working on this in conversation: (\S+)", re.IGNORECASE)
 
 LABEL_READY = "ready_for_implementation"
 LABEL_APPROVED = "agent_approved"
@@ -109,9 +107,7 @@ def fire_callback(status: str = "COMPLETED", error: str | None = None) -> None:
 # --- GitHub API helpers ---
 
 
-def gh_request(
-    method: str, path: str, token: str, body: dict | None = None
-) -> dict:
+def gh_request(method: str, path: str, token: str, body: dict | None = None) -> dict:
     url = f"https://api.github.com/repos/{REPO}/{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
@@ -133,10 +129,7 @@ def gh_request(
 def gh_get_issues_with_labels(token: str, labels: list[str]) -> list[dict]:
     label_query = " ".join(f'label:"{label}"' for label in labels)
     query = f"repo:{REPO} is:issue is:open {label_query}"
-    url = (
-        f"https://api.github.com/search/issues"
-        f"?q={urllib.parse.quote(query)}&per_page=50"
-    )
+    url = f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}&per_page=50"
     req = urllib.request.Request(
         url,
         headers={
@@ -149,18 +142,11 @@ def gh_get_issues_with_labels(token: str, labels: list[str]) -> list[dict]:
 
 
 def parse_attempts(labels: list[str]) -> int:
-    ns = [
-        int(m.group(1))
-        for label in labels
-        for m in [REMAINING_RE.match(label)]
-        if m
-    ]
+    ns = [int(m.group(1)) for label in labels for m in [REMAINING_RE.match(label)] if m]
     return min(ns) if ns else 0
 
 
-def set_labels(
-    token: str, issue_number: int, add: list[str], remove: list[str]
-) -> None:
+def set_labels(token: str, issue_number: int, add: list[str], remove: list[str]) -> None:
     for label in remove:
         try:
             gh_request(
@@ -241,9 +227,7 @@ def has_open_linked_pr(token: str, issue_number: int) -> bool:
 
 def find_marker_comment(comments: list[dict]) -> dict | None:
     """Return the latest canonical marker comment, or None."""
-    marker_comments = [
-        c for c in comments if MARKER_PREFIX in (c.get("body") or "")
-    ]
+    marker_comments = [c for c in comments if MARKER_PREFIX in (c.get("body") or "")]
     if not marker_comments:
         return None
     # GitHub returns comments oldest-first; take the last.
@@ -370,8 +354,7 @@ def last_event_timestamp(conv_id: str) -> str | None:
     try:
         data = agent_request(
             "GET",
-            f"/api/conversations/{conv_id}/events/search"
-            "?limit=1&sort_order=TIMESTAMP_DESC",
+            f"/api/conversations/{conv_id}/events/search?limit=1&sort_order=TIMESTAMP_DESC",
         )
     except urllib.error.HTTPError as e:
         if e.code == 404:
