@@ -55,6 +55,7 @@ user_overrides
 # ---- Role per-entity permission columns (AGENTS.md §11; copied generically) ----
 api_key_permission
 conversation_permission
+conversation_template_permission
 cors_origin_permission
 event_permission
 feature_flag_permission

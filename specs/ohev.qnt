@@ -12,6 +12,7 @@
 //   api_key.qnt      — API key entity: owner, prefix, hash-at-rest, revocation
 //   auth.qnt         — federated OAuth/OIDC auth state machine + token lifetimes
 //   batch.qnt        — batch write semantics: atomicity, authorization, CUD mix
+//   conversation_template.qnt — reusable conversation launch profiles (issue #132)
 //   cors.qnt         — CORS allow-list: add/remove origins
 //   encryption.qnt   — encryption key config + encryptionKeyInDecryptionKeys invariant
 //   feature_flag.qnt — feature flags: global, role, and user-specific assignments
@@ -35,5 +36,5 @@
 
 module ohev {
   // Index of available spec modules. See header comment for invocation.
-  pure val specModules: str = "api_key, auth, batch, cors, encryption, feature_flag, mcp_server_config, rbac, rest, role, sandbox, search_filter, secret, user"
+  pure val specModules: str = "api_key, auth, batch, conversation_template, cors, encryption, feature_flag, mcp_server_config, rbac, rest, role, sandbox, search_filter, secret, user"
 }

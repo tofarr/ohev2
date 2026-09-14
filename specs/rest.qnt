@@ -175,6 +175,8 @@ module rest {
     assert(isStandard(batchRoute("feature-flag-user-assignments"))),
     assert(isStandard(batchRoute("mcp-server-configs"))),
     assert(isStandard(batchRoute("role-mcp-server-config-permissions"))),
+    assert(isStandard(batchRoute("conversation-templates"))),
+    assert(isStandard(batchWriteRoute("conversation-templates"))),
     assert(isStandard(batchWriteRoute("users"))),
     assert(isStandard(batchWriteRoute("roles"))),
     assert(isStandard(batchWriteRoute("user-roles"))),

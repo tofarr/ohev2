@@ -92,6 +92,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     # Importing the model modules registers every table on ``Base.metadata``.
     import openhands.ev2.auth.auth_models
     import openhands.ev2.conversation.conversation_models
+    import openhands.ev2.conversation_template.conversation_template_models
     import openhands.ev2.cors.cors_models
     import openhands.ev2.event.event_models
     import openhands.ev2.feature_flag.feature_flag_models
