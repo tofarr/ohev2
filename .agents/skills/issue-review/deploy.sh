@@ -15,8 +15,10 @@
 # Usage:
 #   bash deploy.sh
 #
-# After deployment, label issues with `ready_for_agent_review` (optionally
-# `auto_refine_3`) to have them reviewed on the next hourly run.
+# After deployment, label issues with `ready_for_agent_review` to have them
+# reviewed on the next hourly run. A failing issue goes straight to
+# `needs_refinement` -- refine it interactively with the `refine-issue` skill,
+# then re-apply `ready_for_agent_review` to re-queue.
 
 set -euo pipefail
 
@@ -36,10 +38,7 @@ LABELS=(
   "ready_for_agent_review:3B82F6:Pending agent review"
   "agent_reviewing:F59E0B:Currently being reviewed by an agent"
   "agent_approved:22C55E:Approved for agent implementation"
-  "needs_refinement:EF4444:Needs human refinement"
-  "auto_refine_1:8B5CF6:Auto-refine budget: 1 remaining"
-  "auto_refine_2:8B5CF6:Auto-refine budget: 2 remaining"
-  "auto_refine_3:8B5CF6:Auto-refine budget: 3 remaining"
+  "needs_refinement:EF4444:Needs human refinement (use refine-issue skill)"
 )
 
 for entry in "${LABELS[@]}"; do
@@ -86,7 +85,7 @@ UPLOAD_RESPONSE=$(curl -s \
   -H "X-Session-API-Key: $OPENHANDS_AUTOMATION_API_KEY" \
   -H "Content-Type: application/octet-stream" \
   --data-binary "@$TARBALL" \
-  "${AUTOMATION_HOST}/api/automation/v1/uploads?name=issue-review-automation&description=Issue%20review%20and%20refinement%20automation")
+  "${AUTOMATION_HOST}/api/automation/v1/uploads?name=issue-review-automation&description=Issue%20review%20automation")
 
 TARBALL_PATH=$(echo "$UPLOAD_RESPONSE" | jq -r '.tarball_path // empty')
 UPLOAD_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.id // empty')
@@ -160,17 +159,15 @@ echo "The automation runs hourly (cron: '0 * * * *')."
 echo ""
 echo "To use it:"
 echo "  1. Label issues with 'ready_for_agent_review' to queue them."
-echo "  2. Optionally add 'auto_refine_3' to give the agent 3 refinement"
-echo "     attempts before escalating to 'needs_refinement'."
-echo "  3. Without an auto_refine_N label, a failing issue goes straight"
-echo "     to 'needs_refinement' (single iteration)."
+echo "  2. A failing issue goes straight to 'needs_refinement'."
+echo "  3. Refine interactively with the 'refine-issue' skill, then re-apply"
+echo "     'ready_for_agent_review' to re-queue."
 echo ""
 echo "Labels created:"
 echo "  ready_for_agent_review  -- queue for review"
 echo "  agent_reviewing         -- in-flight (claim token)"
 echo "  agent_approved          -- passed review"
-echo "  needs_refinement        -- failed, needs human"
-echo "  auto_refine_1/2/3       -- refinement budget"
+echo "  needs_refinement        -- failed; refine interactively then re-queue"
 echo ""
 echo "To trigger a manual run now:"
 echo "  curl -X POST -H 'X-Session-API-Key: \$OPENHANDS_AUTOMATION_API_KEY' \\"

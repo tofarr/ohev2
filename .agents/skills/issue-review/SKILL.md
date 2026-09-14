@@ -11,6 +11,11 @@ Invoke this skill when asked to review a GitHub issue for readiness, clarity,
 and implementability -- specifically the issue-review automation run, or when a
 human asks "is this issue ready to implement?".
 
+This skill reviews issues only; it does not touch PRs or code. When a review
+fails, it posts findings and escalates to a human -- it does not attempt to
+rewrite the issue body. Refining an issue is an interactive, human-in-the-loop
+process handled by the `refine-issue` skill.
+
 ## Labels (state machine)
 
 | Label | Meaning |
@@ -18,15 +23,14 @@ human asks "is this issue ready to implement?".
 | `ready_for_agent_review` | Pending review -- eligible for the next run. |
 | `agent_reviewing` | In-flight claim token -- a conversation is reviewing this. Persists through crashes. |
 | `agent_approved` | Done -- approved for implementation. |
-| `needs_refinement` | Done -- escalate to a human. |
-| `auto_refine_<N>` (N >= 1) | Refinement budget remaining. Decremented on each failed review. **No bare `auto_refine`** -- absence of an `auto_refine_<N>` label means N = 0 (single iteration: no fixes, comment + final label only). |
+| `needs_refinement` | Done -- escalate to a human (use the `refine-issue` skill interactively). |
 
 ### Dispatch-side transitions (deterministic, script -- not the LLM)
 
 1. **Enumerate** issues with `ready_for_agent_review` AND NOT `agent_reviewing`, up to `max_issues_per_run` (default 5).
-2. **Claim** each: remove `ready_for_agent_review`, `agent_approved`, `needs_refinement`; add `agent_reviewing`. **Leave** any `auto_refine_<N>`. Parse N (minimum if multiple present; default 0 if none).
-3. **Start** one conversation per claimed issue, passing the issue URL + N.
-4. **Rescue** (each run, after enumeration): issues with `agent_reviewing` AND `updated:<2h-ago` (stale -- conversation died) -> remove `agent_reviewing`, re-add `ready_for_agent_review`. N is preserved because `auto_refine_<N>` was never removed at claim time.
+2. **Claim** each: remove `ready_for_agent_review`, `agent_approved`, `needs_refinement`; add `agent_reviewing`.
+3. **Start** one conversation per claimed issue, passing the issue URL.
+4. **Rescue** (each run, after enumeration): issues with `agent_reviewing` AND `updated:<2h-ago` (stale -- conversation died) -> remove `agent_reviewing`, re-add `ready_for_agent_review`.
 
 ### Conversation-side transitions (LLM -- see prompt)
 
@@ -34,40 +38,12 @@ Always post a findings comment first, then:
 
 | Outcome | Label changes |
 |---|---|
-| **Pass** | remove `agent_reviewing` + `auto_refine_<N>`; add `agent_approved`. |
-| **Fail, N <= 0** | remove `agent_reviewing` + `auto_refine_<N>`; add `needs_refinement`. |
-| **Fail, N > 0** | **refine** (see below), then: remove `agent_reviewing` + `auto_refine_<N>`; add `auto_refine_<N-1>` + `ready_for_agent_review`. |
+| **Pass** | remove `agent_reviewing`; add `agent_approved`. |
+| **Fail** | remove `agent_reviewing`; add `needs_refinement`. |
 
-### Refine step (N > 0, fail)
-
-The refine step **reads all comments** (prior findings + human comments) and
-**attempts to fix the found problems**, then re-queues at N-1. Fixes may be:
-
-- **Body update** -- rewrite the issue body to address the findings: add
-  missing acceptance criteria, clarify ambiguous terms, resolve inconsistencies.
-  You may **replace** content that is no longer relevant or where a decision
-  has changed -- do not just accumulate append-only notes, or repeated
-  refinement will bloat the issue into incoherence. The goal is a clean,
-  coherent issue body that a fresh reader can understand without reading the
-  comment history. Preserve the original intent and any still-relevant context;
-  replace only what is stale or superseded.
-- **Split** -- if scope is genuinely too large for one PR, create 2-6
-  sub-issues. Sub-issues **inherit `auto_refine_<N-1>` + `ready_for_agent_review`**
-  (the counter is never reset) and are linked with `blocks` / `is blocked by`
-  issue links.
-
-If the issue cannot be cleanly decomposed (fewer than 2 sensible sub-issues, or
-a sub-issue that itself fails clarity), fall through to the **body-update** path
-rather than forcing a bad split. If even a body update can't address the
-findings, re-queue anyway at N-1 -- the countdown ensures eventual escalation.
-
-> **Note:** This refine behavior is intentionally experimental. Allowing the
-> agent to rewrite issue bodies (rather than append-only) risks losing context
-> if the agent makes poor edits. The findings comments remain the auditable
-> record of what each review concluded, so the history is never truly lost --
-> but if a body rewrite goes wrong, a human may need to restore from the issue
-> edit history. The countdown bounds how many times this can happen before
-> escalation.
+A failed review is terminal from the automation's perspective -- the issue is
+escalated to a human, who runs the `refine-issue` skill to address the findings
+interactively and then re-applies `ready_for_agent_review` to re-queue.
 
 ## Review procedure
 
@@ -125,12 +101,10 @@ criterion -- an issue is approved only if **all** criteria pass.
 After evaluating all criteria, classify the issue:
 
 - **`agent_approved`** -- every criterion passes.
-- **`needs_refinement`** (N <= 0) -- one or more criteria fail and no refinement
-  budget remains (or was never set). Post the findings comment and apply the
-  `needs_refinement` label.
-- **Refine then re-queue** (N > 0) -- one or more criteria fail and refinement
-  budget remains. Post the findings comment, then perform the refine step
-  (body update and/or split), then re-queue at N-1.
+- **`needs_refinement`** -- one or more criteria fail. Post the findings
+  comment and apply the `needs_refinement` label. The findings comment is the
+  hand-off: it lists every failing criterion with enough detail for the
+  `refine-issue` skill (or a human) to address each one interactively.
 
 ## Output templates
 
@@ -139,7 +113,7 @@ After evaluating all criteria, classify the issue:
 ```markdown
 ## Agent review findings
 
-**Verdict:** {approved | needs_refinement | refine_attempted (N -> N-1)}
+**Verdict:** {approved | needs_refinement}
 
 ### Findings
 - [PASS/FAIL] **[criterion name]**: [detail, with a quote or reference to the issue text]
@@ -149,21 +123,6 @@ After evaluating all criteria, classify the issue:
 1. [if failing: concrete action to make this implementable; if passing: "Ready for implementation."]
 ```
 
-### Body-edit rules (refine step)
-
-- Rewrite the issue body to produce a clean, coherent issue that a fresh reader
-  can understand without reading the comment history.
-- You may **replace** content that is no longer relevant or where a decision has
-  changed -- do not just append notes on top of notes, or repeated refinement
-  will bloat the issue into incoherence.
-- Preserve the original intent and any still-relevant context; replace only what
-  is stale or superseded.
-- The findings comments (posted every review) remain the auditable record of
-  what each review concluded. The issue edit history also retains prior body
-  versions, so a human can restore if a rewrite goes wrong.
-- Keep sub-issue granularity reasonable: target 1-6 sub-issues; if you cannot
-  produce at least 2, do not split -- do a body update instead.
-- Each sub-issue must itself pass the clarity criteria (summary + acceptance
-  criteria) so the next run can approve it.
-- Sub-issues inherit `auto_refine_<N-1>` + `ready_for_agent_review` -- the
-  counter is **never reset**.
+When the verdict is `needs_refinement`, the "Next steps" section must list each
+failing criterion with a specific question or gap to resolve. This is what the
+`refine-issue` skill walks through with the author interactively.
