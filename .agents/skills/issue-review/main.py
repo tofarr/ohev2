@@ -3,7 +3,12 @@
 
 Runs hourly via cron. For each issue labeled `ready_for_agent_review` (and not
 `agent_reviewing`), claims it via label swap, starts an OpenHands conversation
-with the review prompt, and lets the conversation apply the outcome labels.
+with the review prompt, and lets the conversation apply the outcome labels
+(`agent_approved` or `needs_refinement`).
+
+A failed review is terminal from the automation's perspective -- the issue is
+escalated to a human via `needs_refinement`, who refines it interactively
+using the `refine-issue` skill and then re-applies `ready_for_agent_review`.
 
 Also rescues stale claims: issues stuck in `agent_reviewing` for >2h get
 re-queued.
@@ -31,7 +36,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -45,8 +49,6 @@ MAX_ISSUES_PER_RUN = int(os.environ.get("MAX_ISSUES_PER_RUN", "5"))
 STALE_HOURS = int(os.environ.get("STALE_HOURS", "2"))
 CONVERSATION_TIMEOUT_S = int(os.environ.get("CONV_TIMEOUT", "600"))
 WORKSPACE_ROOT = os.environ.get("OHE_WORKSPACE_ROOT", "/tmp/issue-review-workspaces")
-
-AUTO_REFINE_RE = re.compile(r"^auto_refine_(\d+)$")
 
 LABEL_READY = "ready_for_agent_review"
 LABEL_REVIEWING = "agent_reviewing"
@@ -130,11 +132,6 @@ def gh_get_issues_with_labels(
     )
     with urllib.request.urlopen(req) as r:
         return json.loads(r.read().decode()).get("items", [])
-
-
-def parse_n(labels: list[str]) -> int:
-    ns = [int(m.group(1)) for label in labels for m in [AUTO_REFINE_RE.match(label)] if m]
-    return min(ns) if ns else 0
 
 
 def set_labels(token: str, issue_number: int, add: list[str], remove: list[str]) -> None:
@@ -238,8 +235,8 @@ def read_prompt_template() -> str:
     return raw[start:end]
 
 
-def render_prompt(template: str, issue_url: str, n: int) -> str:
-    return template.replace("{ISSUE_URL}", issue_url).replace("{N}", str(n))
+def render_prompt(template: str, issue_url: str) -> str:
+    return template.replace("{ISSUE_URL}", issue_url)
 
 
 # --- Rescue stale claims ---
@@ -283,8 +280,6 @@ def main() -> None:
     dispatched = 0
     for issue in issues[:MAX_ISSUES_PER_RUN]:
         num = issue["number"]
-        labels = [label["name"] for label in issue.get("labels", [])]
-        n = parse_n(labels)
         issue_url = issue["html_url"]
 
         # Claim: swap ready -> reviewing
@@ -294,10 +289,10 @@ def main() -> None:
             add=[LABEL_REVIEWING],
             remove=[LABEL_READY, LABEL_APPROVED, LABEL_NEEDS_REFINE],
         )
-        print(f"  claimed #{num} (N={n})")
+        print(f"  claimed #{num}")
 
         # Render the prompt and start a conversation
-        prompt = render_prompt(prompt_template, issue_url, n)
+        prompt = render_prompt(prompt_template, issue_url)
         try:
             conv_id = start_conversation(prompt, REPO, token)
             print(f"  started conversation {conv_id} for #{num}")
