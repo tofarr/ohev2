@@ -485,6 +485,17 @@ class AppConfig(BaseModel):
             "by an external scheduler (cron); see README 'ACL pruning'."
         ),
     )
+    # Lock timeout (seconds) for the DB row lock held during an OAuth session
+    # lazy refresh. Mirrors the IdP refresh lock (idp.refresh_lock_timeout_seconds).
+    oauth_session_refresh_lock_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Max seconds to wait for the row lock during a concurrent OAuth "
+            "session token refresh. On timeout the refresh is abandoned "
+            "(fail-closed) so the caller can retry."
+        ),
+    )
     sandbox_warm_refresh_interval: float = Field(
         default=60.0,
         ge=0,

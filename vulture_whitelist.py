@@ -68,6 +68,8 @@ llm_permission
 mcp_aggregated_usage_permission
 mcp_server_config_permission
 oauth_client_permission
+oauth_provider_permission
+oauth_session_permission
 provider_connection_permission
 role_permission
 sandbox_permission
@@ -93,8 +95,13 @@ S3EventBodyStore
 
 # ---- Pydantic request/response schemas (serialized by FastAPI; not called) ----
 AuthorizeRequest
+AuthorizeResponse
 LoginResponse
 UserLogin
+
+# ---- Pydantic response schema fields (set via kwargs, not by name) ----
+authorize_url
+decode_pending_auth
 
 # ---- Type used only in a string annotation (cast("CursorResult[Any]", ...)) ----
 CursorResult

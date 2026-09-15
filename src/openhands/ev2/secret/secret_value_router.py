@@ -16,9 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from openhands.ev2.auth.auth_dependencies import (
     depends_permissions,
+    depends_permissions_or_none,
     depends_user_id,
 )
 from openhands.ev2.db import SessionDep
+from openhands.ev2.oauth.oauth_session_models import OAuthSession
 from openhands.ev2.secret.secret_models import SecretProvider
 from openhands.ev2.secret.secret_schemas import SecretValueRead, SecretValueSearchResult
 from openhands.ev2.secret.secret_value import SecretValue
@@ -53,6 +55,10 @@ async def search_secret_values(
         SearchFilter[SecretProvider],
         Depends(depends_permissions(SecretProvider, Action.USE)),
     ],
+    session_filter: Annotated[
+        SearchFilter[OAuthSession] | None,
+        Depends(depends_permissions_or_none(OAuthSession, Action.USE)),
+    ],
     provider_id: Annotated[uuid.UUID, Query(description="Provider to page secrets from.")],
     cursor: Annotated[str | None, Query(description="Opaque provider cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -69,6 +75,7 @@ async def search_secret_values(
             provider_filter,
             limit=limit,
             cursor=cursor,
+            session_filter=session_filter,
         )
     except SecretValueNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -88,6 +95,10 @@ async def get_secret_values_batch(
         SearchFilter[SecretProvider],
         Depends(depends_permissions(SecretProvider, Action.USE)),
     ],
+    session_filter: Annotated[
+        SearchFilter[OAuthSession] | None,
+        Depends(depends_permissions_or_none(OAuthSession, Action.USE)),
+    ],
     # Declared before `/{composite_id}` so the static `/batch` path matches
     # ahead of the composite-id path param.
     ids: Annotated[list[str], Query(default_factory=list)],
@@ -103,7 +114,7 @@ async def get_secret_values_batch(
             detail="ids: at most 100 ids are allowed per batch read.",
         )
     service = SecretValueSession(session)
-    values = await service.get_many(ids, provider_filter)
+    values = await service.get_many(ids, provider_filter, session_filter=session_filter)
     return BatchReadResult(items=[_to_read(v) if v is not None else None for v in values])
 
 
@@ -116,6 +127,10 @@ async def get_secret_value(
         SearchFilter[SecretProvider],
         Depends(depends_permissions(SecretProvider, Action.USE)),
     ],
+    session_filter: Annotated[
+        SearchFilter[OAuthSession] | None,
+        Depends(depends_permissions_or_none(OAuthSession, Action.USE)),
+    ],
 ) -> SecretValueRead:
     if user_id is None:
         raise HTTPException(
@@ -124,7 +139,7 @@ async def get_secret_value(
         )
     service = SecretValueSession(session)
     try:
-        value = await service.get(composite_id, provider_filter)
+        value = await service.get(composite_id, provider_filter, session_filter=session_filter)
     except SecretValueNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

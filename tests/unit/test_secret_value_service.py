@@ -8,6 +8,7 @@ and the :class:`SecretValueSession` reveal service (AGENTS.md §12).
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -255,6 +256,146 @@ class TestSecretValueSession:
                 NoneSearchFilter[SecretProvider](),
                 limit=5,
             )
+
+
+async def _seed_oauth_provider_and_session(
+    session: AsyncSession,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed an oauth-kind SecretProvider + OAuthProvider + OAuthSession.
+
+    Returns ``(secret_provider_id, oauth_provider_id, oauth_session_id)``.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from openhands.ev2.encryption.encryption_service import get_encryption_service
+    from openhands.ev2.oauth.oauth_provider_models import OAuthProvider
+    from openhands.ev2.oauth.oauth_session_models import OAuthSession
+
+    user_id = await _seed_user(session, email="oauth-sv-test@example.com", username="oauth-sv-test")
+    enc = get_encryption_service()
+    now = datetime.now(UTC)
+
+    sp = await SecretProviderService(session, AllSearchFilter[SecretProvider]()).create(
+        SecretProviderCreate(kind="oauth", data={}), creator_id=user_id
+    )
+    oauth_provider = OAuthProvider(
+        name="github-sv-test",
+        creator_id=user_id,
+        url="https://github.com/login/oauth",
+        client_id="cid",
+        client_secret=enc.encrypt_value("secret"),
+        scopes=["repo"],
+        expire_drift_tolerance=60,
+        access_token_expires_in=900,
+        refresh_token_expires_in=2_592_000,
+    )
+    session.add(oauth_provider)
+    await session.flush()
+    oauth_session = OAuthSession(
+        oauth_provider_id=oauth_provider.id,
+        creator_id=user_id,
+        access_token=enc.encrypt_value("ghp_svtest"),
+        refresh_token=enc.encrypt_value("refresh_svtest"),
+        access_token_expires_at=now + timedelta(hours=1),
+        refresh_token_expires_at=now + timedelta(days=30),
+    )
+    session.add(oauth_session)
+    await session.flush()
+    return sp.id, oauth_provider.id, oauth_session.id
+
+
+class TestOAuthSessionUseEnforcement:
+    """Per-session USE filter enforcement for oauth-kind secrets (issue #141)."""
+
+    async def test_get_no_session_filter_raises(self, session: AsyncSession) -> None:
+        sp_id, op_id, os_id = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        with pytest.raises(SecretValueNotFoundError):
+            await service.get(
+                f"{sp_id}/{op_id}/{os_id}",
+                AllSearchFilter[SecretProvider](),
+            )
+
+    async def test_get_none_session_filter_raises(self, session: AsyncSession) -> None:
+        sp_id, op_id, os_id = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        with pytest.raises(SecretValueNotFoundError):
+            await service.get(
+                f"{sp_id}/{op_id}/{os_id}",
+                AllSearchFilter[SecretProvider](),
+                session_filter=NoneSearchFilter[Any](),
+            )
+
+    async def test_get_all_session_filter_succeeds(self, session: AsyncSession) -> None:
+        sp_id, op_id, os_id = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        value = await service.get(
+            f"{sp_id}/{op_id}/{os_id}",
+            AllSearchFilter[SecretProvider](),
+            session_filter=AllSearchFilter[Any](),
+        )
+        assert value is not None
+        assert value.value == "ghp_svtest"
+
+    async def test_get_many_filters_unauthorized_oauth(self, session: AsyncSession) -> None:
+        sp_id, op_id, os_id = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        composite = f"{sp_id}/{op_id}/{os_id}"
+        values = await service.get_many(
+            [composite],
+            AllSearchFilter[SecretProvider](),
+            session_filter=NoneSearchFilter[Any](),
+        )
+        assert len(values) == 1
+        assert values[0] is None
+
+    async def test_get_many_allows_authorized_oauth(self, session: AsyncSession) -> None:
+        sp_id, op_id, os_id = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        composite = f"{sp_id}/{op_id}/{os_id}"
+        values = await service.get_many(
+            [composite],
+            AllSearchFilter[SecretProvider](),
+            session_filter=AllSearchFilter[Any](),
+        )
+        assert len(values) == 1
+        assert values[0] is not None
+        assert values[0].value == "ghp_svtest"
+
+    async def test_search_no_session_filter_returns_empty(self, session: AsyncSession) -> None:
+        sp_id, _, _ = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        values, next_cursor = await service.search(
+            sp_id,
+            AllSearchFilter[SecretProvider](),
+            limit=10,
+        )
+        assert values == []
+        assert next_cursor is None
+
+    async def test_search_none_session_filter_returns_empty(self, session: AsyncSession) -> None:
+        sp_id, _, _ = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        values, next_cursor = await service.search(
+            sp_id,
+            AllSearchFilter[SecretProvider](),
+            limit=10,
+            session_filter=NoneSearchFilter[Any](),
+        )
+        assert values == []
+        assert next_cursor is None
+
+    async def test_search_all_session_filter_returns_values(self, session: AsyncSession) -> None:
+        sp_id, _, _ = await _seed_oauth_provider_and_session(session)
+        service = SecretValueSession(session)
+        values, _ = await service.search(
+            sp_id,
+            AllSearchFilter[SecretProvider](),
+            limit=10,
+            session_filter=AllSearchFilter[Any](),
+        )
+        assert len(values) >= 1
+        assert any(v.value == "ghp_svtest" for v in values)
 
 
 class _StubClient:

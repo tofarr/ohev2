@@ -51,7 +51,7 @@ class SecretProviderCreate(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    kind: Literal["static"] = Field(description="Discriminator selecting the provider.")
+    kind: Literal["static", "oauth"] = Field(description="Discriminator selecting the provider.")
 
     data: dict[str, SecretStr] = Field(
         default_factory=dict,

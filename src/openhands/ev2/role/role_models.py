@@ -58,6 +58,8 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "conversation_permission",
     "conversation_template_permission",
     "event_permission",
+    "oauth_provider_permission",
+    "oauth_session_permission",
 )
 
 
@@ -198,6 +200,16 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for event resources; null = deny.",
+    )
+    oauth_provider_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for oauth_provider resources; null = deny.",
+    )
+    oauth_session_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for oauth_session resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,

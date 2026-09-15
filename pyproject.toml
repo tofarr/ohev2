@@ -99,6 +99,7 @@ paths = ["src/openhands/ev2", "vulture_whitelist.py"]
 # FastAPI route handlers — registered via decorators, never called by name.
 ignore_decorators = [
     "@router.*",
+    "@flow_router.*",
     "@clients_router.*",
     "@members_router.*",
     "@overrides_router.*",
@@ -154,6 +155,9 @@ ignore_names = [
     "role_field",
     "refresh_path",
     "max_ciphertext_length",
+    # Auth dependency params: present for side-effect (permission enforcement),
+    # not referenced in the function body.
+    "provider_perm_filter",
 ]
 
 [tool.ruff]

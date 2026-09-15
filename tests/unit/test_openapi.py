@@ -34,6 +34,10 @@ _PUBLIC_PATHS = {
     "/.well-known/oauth-authorization-server",
     "/auth/revoke",
     "/auth/logout",
+    # OAuth provider callback — public IdP redirect target (sub-issue #144).
+    # The signed state token binds the callback to the originating user +
+    # provider; the session is created server-side from the authorization code.
+    "/oauth/providers/{provider_id}/callback",
 }
 
 
