@@ -34,9 +34,6 @@ class OAuthProviderCreate(BaseModel):
         min_length=1, description="Client secret (plaintext in transit)."
     )
     scopes: list[str] = Field(default_factory=list)
-    user_id_field: str | None = Field(default=None, max_length=255)
-    email_field: str | None = Field(default=None, max_length=255)
-    role_field: str | None = Field(default=None, max_length=255)
     expire_drift_tolerance: int = Field(default=60, ge=0)
     authorize_path: str = Field(default="/authorize", max_length=255)
     token_path: str = Field(default="/token", max_length=255)
@@ -65,9 +62,6 @@ class OAuthProviderUpdate(BaseModel):
     client_id: str | None = Field(default=None, min_length=1, max_length=255)
     client_secret: SecretStr | None = Field(default=None, min_length=1)
     scopes: list[str] | None = Field(default=None)
-    user_id_field: str | None = Field(default=None, max_length=255)
-    email_field: str | None = Field(default=None, max_length=255)
-    role_field: str | None = Field(default=None, max_length=255)
     expire_drift_tolerance: int | None = Field(default=None, ge=0)
     authorize_path: str | None = Field(default=None, max_length=255)
     token_path: str | None = Field(default=None, max_length=255)
@@ -104,9 +98,6 @@ class OAuthProviderRead(BaseModel):
     client_id: str
     client_secret: str
     scopes: list[str]
-    user_id_field: str | None
-    email_field: str | None
-    role_field: str | None
     expire_drift_tolerance: int
     authorize_path: str
     token_path: str

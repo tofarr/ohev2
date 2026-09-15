@@ -2,10 +2,10 @@
 
 An :class:`OAuthProvider` is a governed CRUD row registering an external
 OAuth/OIDC provider (GitHub, GitLab, Bitbucket, Jira, Linear, …) whose tokens
-can be obtained for downstream use. It is modeled on the :class:`IdpConfig`
-shape but is a **separate, multi-instance, governed CRUD resource**; the
-existing login IdP stays as-is (single, env-configured). IdP = who you log in
-*as*; OAuthProvider = whose tokens you can obtain *for downstream use*.
+can be obtained for downstream use. It is a **separate, multi-instance,
+governed CRUD resource**; the existing login IdP stays as-is (single,
+env-configured). IdP = who you log in *as*; OAuthProvider = whose tokens you
+can obtain *for downstream use*.
 
 The ``client_secret`` is encrypted at rest (JWE ciphertext) and follows the
 §13 serialization standard: masked ``**********`` on read, plaintext only with
@@ -30,9 +30,9 @@ class OAuthProvider(Base):
     """A governed external OAuth/OIDC provider configuration row.
 
     ``client_secret`` stores JWE ciphertext (decrypted on read via the
-    encryption service). The remaining fields mirror :class:`IdpConfig` so a
-    provider row is self-contained: the OAuth login/consent flow (sub-issue
-    #144) reads from this row rather than from the env-configured login IdP.
+    encryption service). The row is self-contained: the OAuth login/consent
+    flow (sub-issue #144) reads from it rather than from the env-configured
+    login IdP.
     """
 
     __tablename__ = "oauth_providers"
@@ -70,24 +70,6 @@ class OAuthProvider(Base):
         JSONB,
         default_factory=list,
         comment="OAuth scopes requested from the external provider.",
-    )
-    user_id_field: Mapped[str | None] = mapped_column(
-        String(255),
-        default=None,
-        nullable=True,
-        comment="Claim name for the stable provider subject; defaults to 'sub'.",
-    )
-    email_field: Mapped[str | None] = mapped_column(
-        String(255),
-        default=None,
-        nullable=True,
-        comment="Claim name for user email; defaults to 'email'.",
-    )
-    role_field: Mapped[str | None] = mapped_column(
-        String(255),
-        default=None,
-        nullable=True,
-        comment="Claim name for role information (reserved for future use).",
     )
     expire_drift_tolerance: Mapped[int] = mapped_column(
         Integer,
