@@ -12,6 +12,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
@@ -43,6 +44,7 @@ from openhands.ev2.feature_flag.feature_flag_router import (
 )
 from openhands.ev2.group.group_router import members_router as group_members_router
 from openhands.ev2.group.group_router import router as group_router
+from openhands.ev2.job.job_router import router as job_router
 from openhands.ev2.llm.llm_router import router as llm_router
 from openhands.ev2.mcp_server_config.mcp_proxy_router import (
     router as mcp_proxy_router,
@@ -64,6 +66,9 @@ from openhands.ev2.secret.secret_value_router import router as secret_value_rout
 from openhands.ev2.secret.static_secret_router import router as static_secret_router
 from openhands.ev2.user.user_router import router as user_router
 from openhands.ev2.webhook.webhook_router import router as webhook_router
+
+if TYPE_CHECKING:
+    from openhands.ev2.job.job_runner_service import JobRunnerService
 
 # Sentinel IdP URL that selects the built-in dev identity provider
 # (auth.dev_router). When idp.url == this value the dev IdP router is mounted so
@@ -330,6 +335,65 @@ async def _event_partition_loop() -> None:
     await _background_sweep(interval, "events partition manager", _sweep_event_partitions)
 
 
+async def _sweep_jobs() -> str | None:
+    """Run one job sweep (dead-runner recovery + timeout cancel + claim + run)."""
+    cfg = get_config()
+    runner: JobRunnerService = _get_job_runner(cfg.job_runner.max_concurrent_jobs)
+    return await runner.sweep_once()
+
+
+async def _sweep_job_partitions() -> str | None:
+    """Manage daily ``jobs`` partitions and return a summary message."""
+    cfg = get_config()
+    runner: JobRunnerService = _get_job_runner(cfg.job_runner.max_concurrent_jobs)
+    return await runner.house_clean_once(
+        preallocate_days=cfg.job_runner.preallocate_days,
+        retention_days=cfg.job_runner.retention_days,
+    )
+
+
+def _get_job_runner(max_concurrent_jobs: int) -> JobRunnerService:
+    """Return the process-wide :class:`JobRunnerService` (lazily created).
+
+    Each process generates one ``runner_id`` so all sweeps in this process
+    share it; the runner is constructed once and reused for the app lifetime.
+    """
+    from openhands.ev2.job.job_runner_service import JobRunnerService
+
+    if _job_runner_instance.service is None:
+        _job_runner_instance.service = JobRunnerService(
+            max_concurrent_jobs=max_concurrent_jobs
+        )
+    return _job_runner_instance.service
+
+
+class _JobRunnerHolder:
+    """Holds the process-wide :class:`JobRunnerService` instance."""
+
+    service: JobRunnerService | None = None
+
+
+_job_runner_instance = _JobRunnerHolder()
+
+
+async def _job_sweep_loop() -> None:
+    """Background sweep that claims and runs jobs."""
+    cfg = get_config()
+    interval = cfg.job_runner.sweep_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "job sweep", _sweep_jobs)
+
+
+async def _job_house_cleaning_loop() -> None:
+    """Background sweep that manages daily ``jobs`` partitions."""
+    cfg = get_config()
+    interval = cfg.job_runner.house_cleaning_interval
+    if interval <= 0:
+        return
+    await _background_sweep(interval, "job house-cleaning", _sweep_job_partitions)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage the background tasks across the app lifetime.
@@ -350,6 +414,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_sandbox_usage_loop(), name="sandbox-usage"),
         asyncio.create_task(_sandbox_usage_partition_loop(), name="sandbox-usage-partition"),
         asyncio.create_task(_event_partition_loop(), name="events-partition"),
+        asyncio.create_task(_job_sweep_loop(), name="job-sweep"),
+        asyncio.create_task(_job_house_cleaning_loop(), name="job-house-cleaning"),
     ]
     try:
         sandbox_service = get_config().get_sandbox_service()
@@ -362,6 +428,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Drain the process-wide job runner's live in-memory tasks.
+        runner = _job_runner_instance.service
+        if runner is not None:
+            with contextlib.suppress(Exception):
+                await runner.aclose()
 
 
 # OpenAPI tag groups, in display order. Each tag carries a short description so
@@ -439,6 +510,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "webhooks",
         "description": "Legacy agent-server webhook adapter (standard API-key auth).",
     },
+    {
+        "name": "jobs",
+        "description": "Durable background jobs (date-partitioned) and the JobRunnerService.",
+    },
 ]
 
 
@@ -467,6 +542,7 @@ def create_app() -> FastAPI:
     app.include_router(conversation_template_router)
     app.include_router(event_router)
     app.include_router(event_callback_router)
+    app.include_router(job_router)
     app.include_router(cors_router)
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)
