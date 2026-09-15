@@ -67,6 +67,7 @@ feature_flag_role_assignment_permission
 feature_flag_user_assignment_permission
 group_permission
 group_user_permission
+job_permission
 llm_aggregated_usage_permission
 llm_permission
 mcp_aggregated_usage_permission
@@ -145,3 +146,13 @@ _.verify_jws_token
 # ---- Event feature: exercised by tests / resolved via config FQCN ----
 _.backfill
 resolve_event_body_store_class
+
+# ---- Job feature: discriminated-union kinds, status constants, the
+# create_runner_owned service method (called by the JobRunnerService), and the
+# job_details_kind discriminator column/mirror field (written by the ORM/Pydantic) ----
+LogJobDetails
+JOB_CLIENT_STATUSES
+JOB_TERMINAL_STATUSES
+JobRunStatus
+job_details_kind
+_.create_runner_owned

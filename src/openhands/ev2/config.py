@@ -232,6 +232,58 @@ class EventConfig(BaseModel):
     )
 
 
+class JobRunnerConfig(BaseModel):
+    """Background job runner configuration (issue #157).
+
+    The ``jobs`` table is daily-partitioned by ``created_at`` (mirroring the
+    usage tables); the house-cleaning sweep keeps ``preallocate_days`` future
+    daily partitions allocated and drops partitions older than
+    ``retention_days``. The job sweep claims ``PENDING`` jobs, recovers dead
+    runners, and cancels overdue live tasks.
+
+    The loop **interval** fields (``sweep_interval`` /
+    ``house_cleaning_interval``) follow the existing ``0 = inactive``
+    convention (an external scheduler must drive the work); the **day-count**
+    fields (``preallocate_days`` / ``retention_days``) follow the existing
+    ``ge=1`` convention used by ``EventConfig`` / ``UsageConfig`` /
+    ``sandbox_usage_*``.
+    """
+
+    sweep_interval: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Seconds between job sweeps (dead-runner recovery + timeout "
+            "cancellation + claim + run). 0 disables the in-process loop "
+            "(drive it with an external scheduler); see README 'Job runner'."
+        ),
+    )
+    house_cleaning_interval: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Seconds between house-cleaning sweeps that allocate future daily "
+            "jobs partitions and drop expired ones. 0 disables the in-process "
+            "loop (drive it with an external scheduler)."
+        ),
+    )
+    max_concurrent_jobs: int = Field(
+        default=1,
+        ge=1,
+        description="Max jobs a single JobRunnerService instance runs concurrently.",
+    )
+    preallocate_days: int = Field(
+        default=7,
+        ge=1,
+        description="How many future daily jobs partitions the manager keeps allocated.",
+    )
+    retention_days: int = Field(
+        default=365,
+        ge=1,
+        description="jobs partitions older than this many days are dropped.",
+    )
+
+
 class IdpConfig(BaseModel):
     """Federated OAuth (auth) — identity provider configuration.
 
@@ -413,6 +465,10 @@ class AppConfig(BaseModel):
     event: EventConfig = Field(
         default_factory=EventConfig,
         description="Event storage configuration (body store, cap, partitions).",
+    )
+    job_runner: JobRunnerConfig = Field(
+        default_factory=JobRunnerConfig,
+        description="Background job runner configuration (sweep, house-cleaning, concurrency).",
     )
     # Fully qualified class name of the SandboxService implementation to
     # instantiate at server startup (an async context manager tied to the

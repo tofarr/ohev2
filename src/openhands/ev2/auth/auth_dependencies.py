@@ -585,6 +585,8 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
 )
 from openhands.ev2.group.group_models import Group as _Group  # noqa: E402
 from openhands.ev2.group.group_models import GroupUser as _GroupUser  # noqa: E402
+from openhands.ev2.job import job_security as _job_security  # noqa: E402,F401
+from openhands.ev2.job.job_models import Job as _Job  # noqa: E402
 from openhands.ev2.llm.llm_models import (  # noqa: E402
     LlmAggregatedUsage as _LlmAggregatedUsage,
 )
@@ -663,6 +665,10 @@ register_resource_policy(_Event, "event_permission")
 # entities with their own per-entity Role columns.
 register_resource_policy(_OAuthProvider, "oauth_provider_permission")
 register_resource_policy(_OAuthSession, "oauth_session_permission")
+# Jobs are governed by their own ``job_permission`` Role column (AGENTS.md §11).
+# The generic CreatorPermission / Permitted / Denied policies cover all cases;
+# no custom Permission subclass is needed.
+register_resource_policy(_Job, "job_permission")
 
 
 def depends_permissions(

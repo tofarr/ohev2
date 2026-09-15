@@ -71,3 +71,19 @@ names already defined at module scope. Keep the public API implicit: every
 non-underscore-prefixed name is importable, and consumers import the names
 they need directly. A `__all__` that merely re-lists the module's public
 symbols adds maintenance burden (easy to drift out of sync) without value.
+
+## PostgreSQL gotchas
+
+* Do not use `UPDATE ... SET ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE
+  SKIP LOCKED)` to claim a bounded number of rows. PostgreSQL's planner may
+  flatten the `IN` subquery and drop the `LIMIT`, so more than *n* rows are
+  updated (observed flakily under PG 17). A CTE carrying `FOR UPDATE` is
+  also rejected (`FOR UPDATE is not allowed in a non-recursive CTE`). The
+  reliable pattern is a two-step claim in one transaction: `SELECT id ...
+  ORDER BY ... LIMIT n` (no `FOR UPDATE`) then `UPDATE ... WHERE id IN (:ids)
+  AND status = 'PENDING'` with the `RETURNING` clause — the `status` re-check
+  makes concurrent claims safe (a row another runner already moved to RUNNING
+  is simply not matched). Do not set `execution_options(synchronize_session=
+  False)` on such a bulk `UPDATE ... RETURNING` against the ORM identity map,
+  or callers will see stale column values (e.g. status `PENDING`) on the
+  returned objects and on subsequent `get()` lookups.

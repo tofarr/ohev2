@@ -130,6 +130,10 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for oauth_session resources; null = deny.",
     )
+    job_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for job resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -250,6 +254,10 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for oauth_session resources; null = deny.",
     )
+    job_permission: Permission | None = Field(
+        default=None,
+        description="Permission policy for job resources; null = deny.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -295,6 +303,7 @@ class RoleRead(BaseModel):
     event_permission: Permission | None
     oauth_provider_permission: Permission | None
     oauth_session_permission: Permission | None
+    job_permission: Permission | None
     created_at: datetime
     updated_at: datetime
 
