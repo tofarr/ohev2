@@ -361,9 +361,7 @@ def _get_job_runner(max_concurrent_jobs: int) -> JobRunnerService:
     from openhands.ev2.job.job_runner_service import JobRunnerService
 
     if _job_runner_instance.service is None:
-        _job_runner_instance.service = JobRunnerService(
-            max_concurrent_jobs=max_concurrent_jobs
-        )
+        _job_runner_instance.service = JobRunnerService(max_concurrent_jobs=max_concurrent_jobs)
     return _job_runner_instance.service
 
 
