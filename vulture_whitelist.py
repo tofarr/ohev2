@@ -101,6 +101,7 @@ UserLogin
 
 # ---- Pydantic response schema fields (set via kwargs, not by name) ----
 authorize_url
+decode_pending_auth
 
 # ---- Type used only in a string annotation (cast("CursorResult[Any]", ...)) ----
 CursorResult

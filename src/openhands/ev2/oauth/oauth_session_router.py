@@ -145,16 +145,15 @@ async def oauth_callback(
             state=state,
             callback_url=_callback_url(provider_id),
         )
+        await session.commit()
+        payload = service.decode_pending_auth(state)
+        redirect_uri = str(payload.get("ruri", ""))
+        client_state = payload.get("cst")
     except OAuthProviderError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     finally:
         await service.aclose()
-    await session.commit()
 
-    enc = service._enc
-    payload = enc.decrypt_jwe_token(state)
-    redirect_uri = str(payload.get("ruri", ""))
-    client_state = payload.get("cst")
     params: dict[str, str] = {"session_id": str(oauth_session.id)}
     if client_state is not None:
         params["state"] = str(client_state)

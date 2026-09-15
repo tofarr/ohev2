@@ -543,6 +543,10 @@ class OAuthSessionService:
             payload[_STATE_CHALLENGE_METHOD_CLAIM] = client_code_method or "plain"
         return self._enc.create_jwe_token(payload, expires_in=_PENDING_AUTH_TTL)
 
+    def decode_pending_auth(self, state: str) -> dict[str, Any]:
+        """Decode and validate a signed state token from the authorize flow."""
+        return self._decode_pending_auth(state)
+
     def _decode_pending_auth(self, state: str) -> dict[str, Any]:
         try:
             payload = self._enc.decrypt_jwe_token(state)
