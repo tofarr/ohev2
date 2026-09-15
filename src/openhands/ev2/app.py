@@ -29,6 +29,9 @@ from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
 from openhands.ev2.event.event_router import router as event_router
+from openhands.ev2.event_callback.event_callback_router import (
+    router as event_callback_router,
+)
 from openhands.ev2.feature_flag.feature_flag_router import (
     overrides_router as feature_flag_role_assignment_router,
 )
@@ -463,6 +466,7 @@ def create_app() -> FastAPI:
     app.include_router(conversation_router)
     app.include_router(conversation_template_router)
     app.include_router(event_router)
+    app.include_router(event_callback_router)
     app.include_router(cors_router)
     app.include_router(feature_flag_router)
     app.include_router(feature_flag_role_assignment_router)
