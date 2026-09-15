@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from openhands.ev2.conversation_template.conversation_template_models import (
     ConversationTemplate,
 )
+from openhands.ev2.event_callback.event_callback_models import EventCallback
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 AgentKind = Literal["openhands", "acp"]
@@ -72,9 +73,9 @@ class ConversationTemplateCreate(BaseModel):
         max_length=65536,
         description="Optional static suffix appended by the start service.",
     )
-    default_callbacks: list[dict[str, Any]] = Field(
+    default_callbacks: list[EventCallback] = Field(
         default_factory=list,
-        description="EventCallbackProcessor specs auto-attached by the start service.",
+        description="EventCallback callables auto-attached by the start service.",
     )
 
     @field_validator("name")
@@ -100,7 +101,7 @@ class ConversationTemplateUpdate(BaseModel):
     agent_config: dict[str, Any] | None = None
     conversation_config: dict[str, Any] | None = None
     system_message_suffix: str | None = Field(default=None, max_length=65536)
-    default_callbacks: list[dict[str, Any]] | None = None
+    default_callbacks: list[EventCallback] | None = None
 
     @field_validator("name")
     @classmethod
@@ -129,7 +130,7 @@ class ConversationTemplateRead(BaseModel):
     agent_config: dict[str, Any]
     conversation_config: dict[str, Any]
     system_message_suffix: str | None
-    default_callbacks: list[dict[str, Any]]
+    default_callbacks: list[EventCallback] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

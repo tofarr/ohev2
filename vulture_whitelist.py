@@ -96,8 +96,9 @@ StaticSecretProvider
 # Selected dynamically via the `event.body_store_class` config FQCN.
 FilesystemEventBodyStore
 S3EventBodyStore
-# Event callback processor (reference implementation, exercised via tests).
-LoggingCallbackProcessor
+# Event callback (reference implementation, exercised via tests; constructed
+# dynamically through the EventCallback discriminated union).
+LoggingCallback
 
 # ---- Pydantic request/response schemas (serialized by FastAPI; not called) ----
 AuthorizeRequest

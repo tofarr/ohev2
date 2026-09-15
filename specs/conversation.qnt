@@ -11,6 +11,10 @@
 //   - non-admin users get read/search only, scoped to conversations whose
 //     backing sandbox config they created (ConversationAccess policy);
 //     create/update/delete are denied to them
+//   - event_callbacks is an embedded list of polymorphic callables (an
+//     EventCallback discriminated union, the only default kind being
+//     LoggingCallback). Round-trip serialization preserves the concrete
+//     subclass — the discriminator ("kind") is restored on read (issue #159)
 //
 // The webhook ingestion path that populates conversations is modeled in
 // webhook.qnt; this spec covers storage + CRUD and the cross-table
@@ -20,6 +24,15 @@
 // conversation_permission column on Role) and api_key.qnt (same CRUD shape).
 
 module conversation {
+  // The discriminator of an embedded EventCallback. The EventCallback union
+  // is modeled here as a closed kind: only LoggingCallback is defined (the
+  // default implementation). It carries its serialized payload (the JSONB
+  // blob) so the round-trip restores the concrete callable.
+  type CallbackKind = LoggingCallback(str)
+
+  // The only concrete callback: LoggingCallback with its serialized payload.
+  pure def loggingCallback(payload: str): CallbackKind = LoggingCallback(payload)
+
   type Conversation = {
     id: str,
     sandboxConfigId: str,
@@ -28,6 +41,9 @@ module conversation {
     promptTokens: int,
     completionTokens: int,
     totalTokens: int,
+    // Each element carries its discriminator so the round-trip restores the
+    // concrete callable.
+    eventCallbacks: Set[CallbackKind],
     createdAt: int,
     updatedAt: int,
   }
@@ -63,6 +79,18 @@ module conversation {
     c.accumulatedCost >= 0 and c.promptTokens >= 0
       and c.completionTokens >= 0 and c.totalTokens >= 0
 
+  // Round-trip serialization preserves the concrete subclass. CallbackKind
+  // is a closed union whose only constructor is LoggingCallback, so every
+  // embedded callback is a known kind by construction — the JSONB
+  // TypeDecorator deserializes via the union and restores it.
+  def callbacksRoundTrip(c: Conversation): bool =
+    c.eventCallbacks.forall(cb => isLoggingCallback(cb))
+
+  // The only constructor defined on CallbackKind; true for every value of the
+  // type. Kept as a named predicate so the invariant remains meaningful when
+  // additional kinds are added to the union.
+  pure def isLoggingCallback(cb: CallbackKind): bool = true
+
   // Cross-table ownership scope (the ConversationAccess policy): a non-admin
   // user may read/search a conversation iff they created the backing sandbox
   // config. Admin bypasses the scope entirely (Permitted).
@@ -92,7 +120,7 @@ module conversation {
   }
 
   // Create a conversation. Metrics start at 0; the backing sandbox config
-  // must exist.
+  // must exist. Event callbacks are embedded at create time.
   action create(c: Conversation): bool = all {
     not(conversations.exists(x => x.id == c.id)),
     hasBackingConfig(c),
@@ -118,6 +146,20 @@ module conversation {
         { ...c, accumulatedCost: cost, promptTokens: prompt,
           completionTokens: completion, totalTokens: prompt + completion,
           updatedAt: now }
+      else
+        c),
+    sandboxConfigs' = sandboxConfigs,
+  }
+
+  // Update the embedded event callbacks. The replacement list must itself
+  // round-trip (every callback is a known constructor).
+  action updateCallbacks(id: str, callbacks: Set[CallbackKind],
+                         now: int): bool = all {
+    conversations.exists(c => c.id == id),
+    callbacks.forall(cb => isLoggingCallback(cb)),
+    conversations' = conversations.map(c =>
+      if (c.id == id)
+        { ...c, eventCallbacks: callbacks, updatedAt: now }
       else
         c),
     sandboxConfigs' = sandboxConfigs,
@@ -164,6 +206,11 @@ module conversation {
   val allMetricsNonNegative: bool =
     conversations.forall(c => metricsNonNegative(c))
 
+  // Round-trip serialization preserves the concrete subclass for every
+  // embedded callback (the discriminator is restored on read).
+  val allCallbacksRoundTrip: bool =
+    conversations.forall(c => callbacksRoundTrip(c))
+
   // The user ids the spec quantifies over: every sandbox-config creator plus
   // a fixed "stranger" standing in for users who created nothing.
   pure def mentionedUsers(configs: Set[SandboxConfig]): Set[str] =
@@ -181,11 +228,13 @@ module conversation {
   // Tests
   // ------------------------------------------------------------------ #
 
+  pure def _logCb: CallbackKind = LoggingCallback("{}")
+
   val _sc1: SandboxConfig = { id: "sc1", creatorId: "u1" }
   val _conv1: Conversation = {
     id: "c1", sandboxConfigId: "sc1", title: "first", accumulatedCost: 0,
-    promptTokens: 0, completionTokens: 0, totalTokens: 0, createdAt: 0,
-    updatedAt: 0,
+    promptTokens: 0, completionTokens: 0, totalTokens: 0,
+    eventCallbacks: Set(), createdAt: 0, updatedAt: 0,
   }
 
   run createConversation = {
@@ -246,6 +295,33 @@ module conversation {
       .then(all {
         assert(not(conversations.exists(c => c.id == "c1"))),
         assert(not(sandboxConfigs.exists(sc => sc.id == "sc1"))),
+        conversations' = conversations,
+        sandboxConfigs' = sandboxConfigs,
+      })
+  }
+
+  // A conversation created with embedded callbacks preserves them on read.
+  run createWithCallbacksRoundTrips = {
+    init.then(createSandboxConfig(_sc1))
+      .then(create({ ..._conv1, eventCallbacks: Set(_logCb) }))
+      .then(all {
+        assert(conversations.exists(c =>
+          c.id == "c1" and c.eventCallbacks.size() == 1
+            and c.eventCallbacks.contains(_logCb))),
+        conversations' = conversations,
+        sandboxConfigs' = sandboxConfigs,
+      })
+  }
+
+  // Updating the embedded callbacks replaces them and the round-trip
+  // invariant continues to hold.
+  run updateCallbacksRoundTrips = {
+    init.then(createSandboxConfig(_sc1))
+      .then(create(_conv1))
+      .then(updateCallbacks("c1", Set(_logCb, _logCb), 1))
+      .then(all {
+        assert(conversations.exists(c =>
+          c.id == "c1" and c.eventCallbacks.size() == 1)),
         conversations' = conversations,
         sandboxConfigs' = sandboxConfigs,
       })

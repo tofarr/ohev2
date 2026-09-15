@@ -574,12 +574,6 @@ from openhands.ev2.event import (  # noqa: E402,F401
 from openhands.ev2.event.event_models import (  # noqa: E402
     Event as _Event,
 )
-from openhands.ev2.event_callback import (  # noqa: E402,F401
-    event_callback_security as _event_callback_security,  # import side-effect
-)
-from openhands.ev2.event_callback.event_callback_models import (  # noqa: E402
-    EventCallback as _EventCallback,
-)
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: E402
     FeatureFlag as _FeatureFlag,
 )
@@ -665,10 +659,6 @@ register_resource_policy(_ConversationTemplate, "conversation_template_permissio
 # sandbox config's creator (EventAccess); events are immutable and written by
 # the ingestion path.
 register_resource_policy(_Event, "event_permission")
-# EventCallback is governed by its own ``event_callback_permission`` Role
-# column (AGENTS.md §11). The generic CreatorPermission / Permitted / Denied
-# policies cover all cases; no custom Permission subclass is needed.
-register_resource_policy(_EventCallback, "event_callback_permission")
 # OAuth providers (sub-issue #143) and sessions (sub-issue #144) are governed
 # entities with their own per-entity Role columns.
 register_resource_policy(_OAuthProvider, "oauth_provider_permission")
