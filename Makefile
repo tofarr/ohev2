@@ -71,7 +71,6 @@ validate-specs:
 		quint test specs/batch.qnt --main=batch; \
 		quint test specs/conversation.qnt --main=conversation; \
 		quint test specs/conversation_template.qnt --main=conversation_template; \
-		quint test specs/event_callback.qnt --main=event_callback; \
 		quint test specs/webhook.qnt --main=webhook; \
 		echo "== validate-specs: invariants =="; \
 		quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100; \
@@ -82,8 +81,6 @@ validate-specs:
 		quint run specs/auth.qnt --main=auth --invariant=cleanupOnlyExpiredInvariant --max-steps=100; \
 		quint run specs/auth.qnt --main=auth --invariant=cookieFlowNeverCodedInvariant --max-steps=100; \
 		quint run specs/batch.qnt --main=batch --invariant=batchAtomicity --max-steps=100; \
-		quint run specs/event_callback.qnt --main=event_callback --invariant=callbackIdsUnique --max-steps=100; \
-		quint run specs/event_callback.qnt --main=event_callback --invariant=callbackEventKindsNonEmpty --max-steps=100; \
 	else \
 		echo "== validate-specs: no specs/ changes — skipping =="; \
 	fi

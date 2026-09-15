@@ -1,10 +1,16 @@
 """ORM model for the conversation resource.
 
 A :class:`Conversation` is the durable record of an agent conversation backed
-by a sandbox (``sandbox_config_id`` → ``sandbox_configs``). Rows are populated
+by a sandbox (``sandbox_config_id`` -> ``sandbox_configs``). Rows are populated
 by the webhook ingestion path; this feature provides storage + CRUD only. The
 metric columns (``accumulated_cost``, ``prompt_tokens``, ``completion_tokens``,
 ``total_tokens``) start at 0 and are updated via ``PATCH`` as events arrive.
+
+``event_callbacks`` is a JSONB list of polymorphic
+:class:`~openhands.ev2.event_callback.event_callback_models.EventCallback`
+callables embedded on the conversation, round-tripped via
+:class:`EventCallbackListType`. Dispatch is out of scope (the future generic
+job queue owns it).
 
 Ownership is deliberately indirect: a conversation has no ``creator_id`` of its
 own. Access for non-admin users derives from the backing sandbox config's
@@ -20,6 +26,10 @@ from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from openhands.ev2.db import Base
+from openhands.ev2.event_callback.event_callback_models import (
+    EventCallback,
+    EventCallbackListType,
+)
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 
 _TZ = DateTime(timezone=True)
@@ -88,6 +98,11 @@ class Conversation(Base):
         default=0,
         server_default="0",
         comment="Accumulated total tokens; updated via PATCH as events arrive.",
+    )
+    event_callbacks: Mapped[list[EventCallback]] = mapped_column(
+        EventCallbackListType,
+        default_factory=list,
+        comment="Embedded polymorphic EventCallback callables for this conversation.",
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,

@@ -41,6 +41,7 @@ _UPDATE_FIELDS: tuple[str, ...] = (
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",
+    "event_callbacks",
 )
 
 
@@ -86,6 +87,7 @@ class ConversationService:
             selected_repository=payload.selected_repository,
             selected_branch=payload.selected_branch,
             trigger=payload.trigger,
+            event_callbacks=payload.event_callbacks,
         )
         if not self._perm_filter.matches(conversation):
             raise ConversationPermissionScopeError(str(payload.sandbox_config_id))

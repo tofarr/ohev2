@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.event_callback.event_callback_models import EventCallback
 from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
@@ -47,6 +48,10 @@ class ConversationCreate(BaseModel):
         min_length=1,
         description="What triggered the conversation (e.g. 'manual', 'webhook', 'automation').",
     )
+    event_callbacks: list[EventCallback] = Field(
+        default_factory=list,
+        description="Embedded polymorphic EventCallback callables to attach.",
+    )
 
     @field_validator("title", "llm_model", "agent_kind", "trigger")
     @classmethod
@@ -77,6 +82,7 @@ class ConversationUpdate(BaseModel):
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
+    event_callbacks: list[EventCallback] | None = None
 
     @field_validator("title", "llm_model", "agent_kind", "trigger")
     @classmethod
@@ -106,6 +112,7 @@ class ConversationRead(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    event_callbacks: list[EventCallback] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
