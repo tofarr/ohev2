@@ -61,6 +61,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "event_callback_permission",
     "oauth_provider_permission",
     "oauth_session_permission",
+    "job_permission",
 )
 
 
@@ -216,6 +217,11 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for oauth_session resources; null = deny.",
+    )
+    job_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for job resources; null = deny.",
     )
     created_at: Mapped[datetime] = mapped_column(
         init=False,

@@ -494,6 +494,12 @@ def upgrade() -> None:
             comment="Permission policy for oauth_session resources; null = deny.",
         ),
         sa.Column(
+            "job_permission",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+            comment="Permission policy for job resources; null = deny.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("clock_timestamp()"),
@@ -1753,8 +1759,67 @@ def upgrade() -> None:
         unique=False,
     )
 
+    # ------------------------------------------------------------------ #
+    # jobs (range-partitioned parent by created_at; partitions are managed by
+    # the background house-cleaning loop — see README 'Job runner'. A DEFAULT
+    # partition is created here so inserts never fail before the manager
+    # allocates the day's partition. Composite PK (id, created_at) is the
+    # partition-key-in-PK requirement, mirroring sandbox_usage / mcp_usage.
+    # ------------------------------------------------------------------ #
+    op.create_table(
+        "jobs",
+        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.Column("creator_id", sa.Uuid(), nullable=False),
+        sa.Column("runner_id", sa.Uuid(), nullable=True),
+        sa.Column(
+            "status",
+            sa.String(length=32),
+            nullable=False,
+            server_default=sa.text("'PENDING'"),
+            comment="Lifecycle status: PENDING/SUSPENDED/RUNNING/COMPLETED/ERROR.",
+        ),
+        sa.Column("detail", sa.Text(), nullable=True),
+        sa.Column(
+            "max_seconds_for_run",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("60"),
+        ),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("job_details_kind", sa.String(length=255), nullable=False),
+        sa.Column("job_details", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["creator_id"], ["users.id"], ondelete="CASCADE", name="fk_jobs_creator_id_users"
+        ),
+        sa.PrimaryKeyConstraint("id", "created_at"),
+        comment="Durable background jobs, daily-partitioned by created_at (governed CRUD)",
+        postgresql_partition_by="RANGE(created_at)",
+    )
+    op.create_index("ix_jobs_created_at", "jobs", ["created_at"], unique=False)
+    op.create_index("ix_jobs_creator_id", "jobs", ["creator_id"], unique=False)
+    op.create_index("ix_jobs_runner_id", "jobs", ["runner_id"], unique=False)
+    op.create_index("ix_jobs_status", "jobs", ["status"], unique=False)
+    op.execute("CREATE TABLE jobs_default PARTITION OF jobs DEFAULT")
+
 
 def downgrade() -> None:
+    op.drop_index("ix_jobs_status", table_name="jobs")
+    op.drop_index("ix_jobs_runner_id", table_name="jobs")
+    op.drop_index("ix_jobs_creator_id", table_name="jobs")
+    op.drop_index("ix_jobs_created_at", table_name="jobs")
+    op.drop_table("jobs")
     op.drop_index("ix_event_callbacks_conversation_template_id", table_name="event_callbacks")
     op.drop_index("ix_event_callbacks_conversation_id", table_name="event_callbacks")
     op.drop_index("ix_event_callbacks_creator_id", table_name="event_callbacks")

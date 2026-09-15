@@ -51,6 +51,7 @@ from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlagUserAssignment,
 )
 from openhands.ev2.group.group_models import Group, GroupUser  # noqa: F401
+from openhands.ev2.job.job_models import Job  # noqa: F401
 from openhands.ev2.llm.llm_models import (  # noqa: F401
     LlmAggregatedUsage,
     LlmUsage,
@@ -101,6 +102,7 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.event_callback.event_callback_models
     import openhands.ev2.feature_flag.feature_flag_models
     import openhands.ev2.group.group_models
+    import openhands.ev2.job.job_models
     import openhands.ev2.llm.llm_models
     import openhands.ev2.mcp_server_config.mcp_server_config_models
     import openhands.ev2.mcp_server_config.mcp_usage_models
@@ -142,6 +144,9 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
                 )
                 await conn.execute(
                     text("CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT")
+                )
+                await conn.execute(
+                    text("CREATE TABLE IF NOT EXISTS jobs_default PARTITION OF jobs DEFAULT")
                 )
         finally:
             await eng.dispose()
@@ -192,6 +197,8 @@ def _set_test_env(
     monkeypatch.setenv("OHE_MCP_USAGE_PARTITION_INTERVAL", "0")
     monkeypatch.setenv("OHE_MCP_USAGE_AGGREGATE_INTERVAL", "0")
     monkeypatch.setenv("OHE_EVENT_PARTITION_INTERVAL", "0")
+    monkeypatch.setenv("OHE_JOB_RUNNER_SWEEP_INTERVAL", "0")
+    monkeypatch.setenv("OHE_JOB_RUNNER_HOUSE_CLEANING_INTERVAL", "0")
 
 
 async def _seed_test_admin_role(session: AsyncSession, user_id: uuid.UUID) -> None:
