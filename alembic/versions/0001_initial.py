@@ -1755,9 +1755,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_event_callbacks_conversation_template_id", table_name="event_callbacks"
-    )
+    op.drop_index("ix_event_callbacks_conversation_template_id", table_name="event_callbacks")
     op.drop_index("ix_event_callbacks_conversation_id", table_name="event_callbacks")
     op.drop_index("ix_event_callbacks_creator_id", table_name="event_callbacks")
     op.drop_table("event_callbacks")
