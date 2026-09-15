@@ -102,8 +102,10 @@ _AGENT_SERVER_IMAGE = f"{_AGENT_SERVER_REGISTRY}/{_AGENT_SERVER_REPOSITORY}"
 # Tag prefix used to identify the seeded default template regardless of which
 # version was latest at seed time (idempotency key for re-seeds).
 _AGENT_SERVER_TAG_PREFIX = f"{_AGENT_SERVER_IMAGE}:"
-# The python+nodejs runtime variant is the default agent-server image.
-_VARIANT_PREFERENCE = "nikolaik_s_python-nodejs"
+# Substrings identifying the python+nodejs runtime variant. The registry uses
+# two tag naming conventions: the old ``nikolaik_s_python-nodejs`` style and
+# the newer ``-python`` suffix. Both denote the same default runtime.
+_VARIANT_PREFERENCES: tuple[str, ...] = ("nikolaik_s_python-nodejs", "-python")
 
 # Exposed ports on the seeded default template: the agent server on 8000 and
 # the VSCode server on 8001 (mirrors the Docker/K8s services' defaults).
@@ -135,10 +137,10 @@ _DEFAULT_TEMPLATE_META: dict[str, Any] = {
 _DEFAULT_WORKING_DIR = "/home/openhands"
 _DEFAULT_SNAPSHOT_DIRS: list[str] = [_DEFAULT_WORKING_DIR]
 
-# Matches a leading semver on a tag, e.g. ``v1.2.3`` or ``v1.0.0a6``. The
-# registry tags carry variant/arch suffixes (``_nikolaik_s_...``, ``-amd64``)
-# after the version; only the leading version is parsed.
-_SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?")
+# Matches a leading semver on a tag, e.g. ``v1.2.3``, ``1.2.3``, or ``1.0.0a6``.
+# The ``v`` prefix is optional — old tags use ``v1.3.0_...`` while newer tags
+# drop it (``1.4.0-python``). Variant/arch suffixes follow the version.
+_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?")
 _REGISTRY_PAGE_SIZE = 1000
 _REGISTRY_MAX_PAGES = 20
 _REGISTRY_TIMEOUT_SECONDS = 30.0
@@ -177,11 +179,11 @@ def _user_role_permissions() -> dict[str, Permission | None]:
 
 
 def _parse_tag_version(tag: str) -> Version | None:
-    """Parse the leading semver out of a registry tag, or ``None`` if none.
+    """Parse the leading semver out of a tag, or ``None`` if none.
 
-    Registry tags carry variant/arch suffixes after the version
-    (``v1.1.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64``); only the
-    leading ``vX.Y.Z[<pre><n>]`` portion is parsed.
+    The ``v`` prefix is optional. Old tags: ``v1.1.0_nikolaik_s_...``; new
+    tags: ``1.4.0-python``. Only the leading ``[v]X.Y.Z[<pre><n>]`` portion
+    is parsed.
     """
     m = _SEMVER_RE.match(tag)
     if m is None:
@@ -200,11 +202,12 @@ def _parse_tag_version(tag: str) -> Version | None:
 def _pick_latest_tag(tags: Sequence[str]) -> str | None:
     """Select the latest version tag from *tags*.
 
-    Filters to tags carrying a leading semver, picks the highest version, and
-    among the tags sharing that version prefers the python+nodejs runtime
-    variant (the default agent-server image) and an arch-agnostic manifest
-    (no ``-amd64``/``-arm64`` suffix) when one exists, falling back to amd64.
-    Returns ``None`` when no version tag is present.
+    Filters to tags carrying a leading semver (``v`` prefix optional), picks
+    the highest version, and among the tags sharing that version prefers the
+    python+nodejs runtime variant — matched by either the old
+    ``nikolaik_s_python-nodejs`` or the new ``-python`` suffix — and an
+    arch-agnostic manifest (no ``-amd64``/``-arm64`` suffix) when one exists,
+    falling back to amd64. Returns ``None`` when no version tag is present.
     """
     versioned = [(ver, tag) for tag in tags if (ver := _parse_tag_version(tag)) is not None]
     if not versioned:
@@ -213,7 +216,7 @@ def _pick_latest_tag(tags: Sequence[str]) -> str | None:
     same_version = [tag for ver, tag in versioned if ver == top]
 
     def _score(tag: str) -> tuple[int, int]:
-        variant = 1 if _VARIANT_PREFERENCE in tag else 0
+        variant = 1 if any(p in tag for p in _VARIANT_PREFERENCES) else 0
         arch_agnostic = 1 if not tag.endswith(("-amd64", "-arm64")) else 0
         return (variant, arch_agnostic)
 

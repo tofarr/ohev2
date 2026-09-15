@@ -492,6 +492,39 @@ class TestPickLatestTag:
             "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64"
         )
 
+    def test_prefers_new_format_over_old(self) -> None:
+        tags = [
+            "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+            "1.4.0-python",
+            "1.4.0-python-amd64",
+            "1.4.0-golang",
+            "main-python",
+        ]
+        assert _pick_latest_tag(tags) == "1.4.0-python"
+
+    def test_new_format_prefers_arch_agnostic(self) -> None:
+        tags = [
+            "1.4.0-python-amd64",
+            "1.4.0-python-arm64",
+            "1.4.0-python",
+        ]
+        assert _pick_latest_tag(tags) == "1.4.0-python"
+
+    def test_new_format_falls_back_to_amd64(self) -> None:
+        tags = [
+            "1.4.0-python-arm64",
+            "1.4.0-python-amd64",
+        ]
+        assert _pick_latest_tag(tags) == "1.4.0-python-amd64"
+
+    def test_new_format_prefers_python_variant(self) -> None:
+        tags = [
+            "1.4.0-golang",
+            "1.4.0-java",
+            "1.4.0-python",
+        ]
+        assert _pick_latest_tag(tags) == "1.4.0-python"
+
     def test_prefers_python_nodejs_variant(self) -> None:
         tags = [
             "v1.3.0_eclipse-temurin_tag_17-jdk-amd64",
@@ -614,6 +647,12 @@ class TestParseTagVersion:
             is not None
         )
 
+    def test_new_format_without_v_prefix(self) -> None:
+        assert _parse_tag_version("1.4.0-python") is not None
+
+    def test_new_format_amd64(self) -> None:
+        assert _parse_tag_version("1.4.0-python-amd64") is not None
+
     def test_no_match_returns_none(self) -> None:
         assert _parse_tag_version("main-python") is None
 
@@ -734,6 +773,26 @@ class TestFetchLatestAgentServerTag:
         monkeypatch.setattr(httpx, "AsyncClient", _factory)
         result = await fetch_latest_agent_server_tag()
         assert result.startswith("ghcr.io/openhands/agent-server:v1.3.0")
+
+    async def test_prefers_new_format_higher_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        transport = _registry_transport(
+            tags_pages=[
+                [
+                    "v1.3.0_nikolaik_s_python-nodejs_tag_python3.12-nodejs22-amd64",
+                    "1.4.0-python",
+                    "1.4.0-python-amd64",
+                    "1.4.0-golang",
+                ]
+            ]
+        )
+        _real_async_client = httpx.AsyncClient
+
+        def _factory(**kwargs: object) -> httpx.AsyncClient:
+            return _real_async_client(transport=transport)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        result = await fetch_latest_agent_server_tag()
+        assert result == "ghcr.io/openhands/agent-server:1.4.0-python"
 
     async def test_no_version_tags_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         transport = _registry_transport(tags_pages=[["main", "sha123"]])
