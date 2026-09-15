@@ -27,12 +27,15 @@ completion_tokens
 context_window
 cpu
 cwd
+detail
 disk
 email_verified
 feature_flag
 icon
 invocations
 keep_alive
+last_event_id
+last_run_at
 members
 per_turn_token
 preferred_username
@@ -57,6 +60,7 @@ api_key_permission
 conversation_permission
 conversation_template_permission
 cors_origin_permission
+event_callback_permission
 event_permission
 feature_flag_permission
 feature_flag_role_assignment_permission
@@ -92,6 +96,8 @@ StaticSecretProvider
 # Selected dynamically via the `event.body_store_class` config FQCN.
 FilesystemEventBodyStore
 S3EventBodyStore
+# Event callback processor (reference implementation, exercised via tests).
+LoggingCallbackProcessor
 
 # ---- Pydantic request/response schemas (serialized by FastAPI; not called) ----
 AuthorizeRequest

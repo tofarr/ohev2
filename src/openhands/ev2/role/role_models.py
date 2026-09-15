@@ -58,6 +58,7 @@ ROLE_ENTITY_COLUMNS: tuple[str, ...] = (
     "conversation_permission",
     "conversation_template_permission",
     "event_permission",
+    "event_callback_permission",
     "oauth_provider_permission",
     "oauth_session_permission",
 )
@@ -200,6 +201,11 @@ class Role(Base):
         PermissionType,
         default=None,
         comment="Permission policy for event resources; null = deny.",
+    )
+    event_callback_permission: Mapped[Permission | None] = mapped_column(
+        PermissionType,
+        default=None,
+        comment="Permission policy for event_callback resources; null = deny.",
     )
     oauth_provider_permission: Mapped[Permission | None] = mapped_column(
         PermissionType,
