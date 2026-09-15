@@ -27,40 +27,28 @@ If a change can't meet a gate, flag it explicitly rather than silently bypassing
 
 ### 2.1 Pre-PR verification — run locally before opening a PR
 
-Do not push a branch and rely on CI to catch failures. Run these commands
-locally and ensure they are green *before* opening (or updating) a pull request:
+Do not push a branch and rely on CI to catch failures. Run these targets and
+ensure they are green *before* opening (or updating) a pull request:
 
-1. **lint-type-coverage** (mirrors the `lint-type-coverage` CI job):
-   ```
-   uv run ruff check .
-   uv run ruff format --check .
-   uv run mypy
-   uv run pylint src/openhands/ev2
-   make test
-   ```
-   `make test` runs the full suite with coverage and the 94% gate (xdist
-   disabled for deterministic coverage attribution). For fast iteration
-   *before* this gate, use `make test-fast ARGS=<path>` (no coverage,
-   testmon-scoped, stops on first failure) or `make test-affected` (only
-   tests touched by the current diff). A bare `uv run pytest` also runs
-   coverage-free and parallelized via xdist, but does not stop early or
-   scope to the diff.
-   `pylint` runs the McCabe cyclomatic complexity check (threshold 5);
-   it must pass — overly complex functions must be refactored.
-2. **e2e** (mirrors the `e2e` CI job; requires Docker for the service stack):
-   ```
-   uv run playwright install --with-deps chromium
-   docker compose up -d
-   OHE_DB_CONFIG_HOST=localhost OHE_DB_CONFIG_PORT=5432 OHE_DB_CONFIG_DB_NAME=ohev \
-   OHE_DB_CONFIG_USERNAME=ohev OHE_DB_CONFIG_PASSWORD=ohev uv run alembic upgrade head
-   uv run pytest tests/e2e -q --no-cov
-   docker compose down
-   ```
-3. **specs** (only when behavior changed, per §7):
-   ```
-   quint typecheck specs/*.qnt
-   quint test specs/<spec>.qnt --main=<spec>
-   ```
+1. **`make validate`** — the complete `lint-type-coverage` gate, in CI order:
+   `ruff check` → `ruff format --check` → `mypy` → `pylint` (McCabe,
+   threshold 5) → `vulture` → unit tests with the 94% coverage gate.
+   It stops on the first failing gate.
+   `make validate` needs `postgres`/`initdb` on PATH for the embedded-Postgres
+   unit suite.
+2. **`make validate-specs`** — the complete `specs` CI job (`quint typecheck`
+   all specs + all `quint test`/invariant runs). Only run it when behavior
+   changed, per §7 — the target skips itself when `specs/` is unchanged.
+3. **`make validate-e2e`** — the complete `e2e` CI job (requires Docker for
+   the service stack). If Docker is unavailable, say so in the PR description
+   rather than skipping it silently.
+
+For fast iteration *between* validation runs, use `make test-fast ARGS=<path>`
+(testmon-scoped, no coverage, stops on first failure) or `make test-affected`
+(only tests touched by the current diff). A bare `uv run pytest` runs
+coverage-free and parallelized via xdist, but does not stop early or scope to
+the diff. All `test*` targets suppress passing-test noise (short tracebacks,
+no summary of passing output) so output stays token-cheap.
 
 If any step fails, fix it before opening the PR — do not open the PR and
 address CI failures reactively. If the environment cannot run a step (e.g.
