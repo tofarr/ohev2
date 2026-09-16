@@ -15,7 +15,7 @@ from tests.unit._auth_helpers import (
     make_sandbox_config as _make_sandbox_config,
 )
 
-from openhands.ev2.conversation.conversation_security import ConversationAccess
+from openhands.ev2.conversation_record.conversation_record_security import ConversationRecordAccess
 from openhands.ev2.security.security_models import Permitted
 from openhands.ev2.util.auth_token import create_auth_token
 
@@ -39,7 +39,7 @@ def _payload(sandbox_config_id: uuid.UUID, **overrides: object) -> dict[str, obj
 async def _create(
     client: AsyncClient, sandbox_config_id: uuid.UUID, **overrides: object
 ) -> dict[str, object]:
-    resp = await client.post("/conversations", json=_payload(sandbox_config_id, **overrides))
+    resp = await client.post("/conversation_records", json=_payload(sandbox_config_id, **overrides))
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -61,7 +61,7 @@ class TestCreateConversationRoute:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         resp = await client.post(
-            "/conversations",
+            "/conversation_records",
             json={
                 "title": "minimal",
                 "sandbox_config_id": str(config.id),
@@ -80,7 +80,7 @@ class TestCreateConversationRoute:
     ) -> None:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
-        resp = await client.post("/conversations", json=_payload(config.id, title="  "))
+        resp = await client.post("/conversation_records", json=_payload(config.id, title="  "))
         assert resp.status_code == 422
 
 
@@ -89,22 +89,22 @@ class TestGetConversationRoute:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         created = await _create(client, config.id)
-        resp = await client.get(f"/conversations/{created['id']}")
+        resp = await client.get(f"/conversation_records/{created['id']}")
         assert resp.status_code == 200
         assert resp.json()["title"] == "route test conversation"
 
     async def test_get_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get(f"/conversations/{uuid.uuid4()}")
+        resp = await client.get(f"/conversation_records/{uuid.uuid4()}")
         assert resp.status_code == 404
 
     async def test_get_invalid_uuid_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.get("/conversations/not-a-uuid")
+        resp = await client.get("/conversation_records/not-a-uuid")
         assert resp.status_code == 422
 
 
 class TestSearchConversationsRoute:
     async def test_search_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/conversations")
+        resp = await client.get("/conversation_records")
         assert resp.status_code == 200
         assert resp.json() == {"items": [], "next_cursor": None, "limit": 50}
 
@@ -114,14 +114,16 @@ class TestSearchConversationsRoute:
         await _create(client, config.id, title="alpha", trigger="manual")
         beta = await _create(client, config.id, title="beta", trigger="webhook")
 
-        resp = await client.get("/conversations", params={"title__contains": "BET"})
+        resp = await client.get("/conversation_records", params={"title__contains": "BET"})
         assert resp.status_code == 200
         assert [i["id"] for i in resp.json()["items"]] == [beta["id"]]
 
-        resp = await client.get("/conversations", params={"trigger__eq": "manual"})
+        resp = await client.get("/conversation_records", params={"trigger__eq": "manual"})
         assert len(resp.json()["items"]) == 1
 
-        resp = await client.get("/conversations", params={"sandbox_config_id__eq": str(config.id)})
+        resp = await client.get(
+            "/conversation_records", params={"sandbox_config_id__eq": str(config.id)}
+        )
         assert len(resp.json()["items"]) == 2
 
     async def test_search_pagination(self, client: AsyncClient, session) -> None:
@@ -130,11 +132,13 @@ class TestSearchConversationsRoute:
         for i in range(3):
             await _create(client, config.id, title=f"c{i}")
 
-        page1 = (await client.get("/conversations", params={"limit": 2})).json()
+        page1 = (await client.get("/conversation_records", params={"limit": 2})).json()
         assert len(page1["items"]) == 2
         assert page1["next_cursor"] is not None
         page2 = (
-            await client.get("/conversations", params={"limit": 2, "cursor": page1["next_cursor"]})
+            await client.get(
+                "/conversation_records", params={"limit": 2, "cursor": page1["next_cursor"]}
+            )
         ).json()
         assert len(page2["items"]) == 1
         assert page2["next_cursor"] is None
@@ -142,10 +146,10 @@ class TestSearchConversationsRoute:
     async def test_count(self, client: AsyncClient, session) -> None:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
-        assert (await client.get("/conversations/count")).json() == {"count": 0}
+        assert (await client.get("/conversation_records/count")).json() == {"count": 0}
         await _create(client, config.id, title="counted")
-        assert (await client.get("/conversations/count")).json() == {"count": 1}
-        resp = await client.get("/conversations/count", params={"title__contains": "zzz"})
+        assert (await client.get("/conversation_records/count")).json() == {"count": 1}
+        resp = await client.get("/conversation_records/count", params={"title__contains": "zzz"})
         assert resp.json() == {"count": 0}
 
 
@@ -155,7 +159,7 @@ class TestUpdateConversationRoute:
         await session.commit()
         created = await _create(client, config.id)
         resp = await client.patch(
-            f"/conversations/{created['id']}",
+            f"/conversation_records/{created['id']}",
             json={
                 "accumulated_cost": 2.5,
                 "prompt_tokens": 10,
@@ -172,14 +176,16 @@ class TestUpdateConversationRoute:
         assert body["title"] == "route test conversation"
 
     async def test_patch_missing_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.patch(f"/conversations/{uuid.uuid4()}", json={"title": "x"})
+        resp = await client.patch(f"/conversation_records/{uuid.uuid4()}", json={"title": "x"})
         assert resp.status_code == 404
 
     async def test_patch_negative_tokens_returns_422(self, client: AsyncClient, session) -> None:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         created = await _create(client, config.id)
-        resp = await client.patch(f"/conversations/{created['id']}", json={"prompt_tokens": -1})
+        resp = await client.patch(
+            f"/conversation_records/{created['id']}", json={"prompt_tokens": -1}
+        )
         assert resp.status_code == 422
 
 
@@ -188,12 +194,12 @@ class TestDeleteConversationRoute:
         config = await _make_sandbox_config(session, creator_id=_TEST_USER_ID)
         await session.commit()
         created = await _create(client, config.id)
-        resp = await client.delete(f"/conversations/{created['id']}")
+        resp = await client.delete(f"/conversation_records/{created['id']}")
         assert resp.status_code == 204
-        assert (await client.get(f"/conversations/{created['id']}")).status_code == 404
+        assert (await client.get(f"/conversation_records/{created['id']}")).status_code == 404
 
     async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
-        assert (await client.delete(f"/conversations/{uuid.uuid4()}")).status_code == 404
+        assert (await client.delete(f"/conversation_records/{uuid.uuid4()}")).status_code == 404
 
 
 class TestBatchReadRoute:
@@ -204,7 +210,7 @@ class TestBatchReadRoute:
         second = await _create(client, config.id, title="second")
         missing = uuid.uuid4()
         resp = await client.get(
-            "/conversations/batch",
+            "/conversation_records/batch",
             params=[("ids", second["id"]), ("ids", str(missing)), ("ids", first["id"])],
         )
         assert resp.status_code == 200
@@ -212,12 +218,14 @@ class TestBatchReadRoute:
         assert [i["id"] if i else None for i in items] == [second["id"], None, first["id"]]
 
     async def test_batch_read_empty(self, client: AsyncClient) -> None:
-        resp = await client.get("/conversations/batch")
+        resp = await client.get("/conversation_records/batch")
         assert resp.status_code == 200
         assert resp.json() == {"items": []}
 
     async def test_batch_read_over_limit_returns_422(self, client: AsyncClient) -> None:
-        resp = await client.get("/conversations/batch", params=[("ids", str(uuid.uuid4()))] * 101)
+        resp = await client.get(
+            "/conversation_records/batch", params=[("ids", str(uuid.uuid4()))] * 101
+        )
         assert resp.status_code == 422
 
 
@@ -228,7 +236,7 @@ class TestBatchWriteRoute:
         existing = await _create(client, config.id, title="existing")
         doomed = await _create(client, config.id, title="doomed")
         resp = await client.post(
-            "/conversations/batch",
+            "/conversation_records/batch",
             json={
                 "operations": [
                     {"op": "create", "data": _payload(config.id, title="new")},
@@ -242,11 +250,11 @@ class TestBatchWriteRoute:
         assert items[0]["title"] == "new"
         assert items[1]["title"] == "renamed"
         assert items[2] is None
-        assert (await client.get(f"/conversations/{doomed['id']}")).status_code == 404
+        assert (await client.get(f"/conversation_records/{doomed['id']}")).status_code == 404
 
     async def test_batch_write_update_missing_returns_404(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/conversations/batch",
+            "/conversation_records/batch",
             json={
                 "operations": [
                     {"op": "update", "id": str(uuid.uuid4()), "data": {"title": "x"}},
@@ -257,14 +265,14 @@ class TestBatchWriteRoute:
 
     async def test_batch_write_delete_missing_returns_404(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/conversations/batch",
+            "/conversation_records/batch",
             json={"operations": [{"op": "delete", "id": str(uuid.uuid4())}]},
         )
         assert resp.status_code == 404
 
 
 class TestConversationAccessPolicy:
-    """Non-admin users with ConversationAccess get scoped read/search only."""
+    """Non-admin users with ConversationRecordAccess get scoped read/search only."""
 
     async def _seed_conversations(self, client: AsyncClient, session):
         """One config+conversation for the restricted user, one for the admin."""
@@ -283,32 +291,32 @@ class TestConversationAccessPolicy:
         await _assign_role(
             session,
             restricted.id,
-            {"conversation_permission": ConversationAccess()},
+            {"conversation_record_permission": ConversationRecordAccess()},
             role_name="restricted-conv",
         )
         await session.commit()
         token = create_auth_token(restricted.id)
         headers = {"Authorization": f"Bearer {token}"}
 
-        resp = await client.get("/conversations", headers=headers)
+        resp = await client.get("/conversation_records", headers=headers)
         assert resp.status_code == 200
         assert [i["id"] for i in resp.json()["items"]] == [own["id"]]
 
-        resp = await client.get(f"/conversations/{own['id']}", headers=headers)
+        resp = await client.get(f"/conversation_records/{own['id']}", headers=headers)
         assert resp.status_code == 200
         # A conversation on someone else's sandbox config is invisible (404,
         # never 403 — existence is not leaked).
-        resp = await client.get(f"/conversations/{foreign['id']}", headers=headers)
+        resp = await client.get(f"/conversation_records/{foreign['id']}", headers=headers)
         assert resp.status_code == 404
 
         resp = await client.get(
-            "/conversations/batch",
+            "/conversation_records/batch",
             params=[("ids", own["id"]), ("ids", foreign["id"])],
             headers=headers,
         )
         assert [i["id"] if i else None for i in resp.json()["items"]] == [own["id"], None]
 
-        resp = await client.get("/conversations/count", headers=headers)
+        resp = await client.get("/conversation_records/count", headers=headers)
         assert resp.json() == {"count": 1}
 
     async def test_writes_denied(self, client: AsyncClient, session) -> None:
@@ -316,7 +324,7 @@ class TestConversationAccessPolicy:
         await _assign_role(
             session,
             restricted.id,
-            {"conversation_permission": ConversationAccess()},
+            {"conversation_record_permission": ConversationRecordAccess()},
             role_name="restricted-conv",
         )
         await session.commit()
@@ -324,16 +332,20 @@ class TestConversationAccessPolicy:
         headers = {"Authorization": f"Bearer {token}"}
 
         assert (
-            await client.post("/conversations", json=_payload(own_config.id), headers=headers)
+            await client.post(
+                "/conversation_records", json=_payload(own_config.id), headers=headers
+            )
         ).status_code == 403
         assert (
-            await client.patch(f"/conversations/{own['id']}", json={"title": "x"}, headers=headers)
+            await client.patch(
+                f"/conversation_records/{own['id']}", json={"title": "x"}, headers=headers
+            )
         ).status_code == 403
         assert (
-            await client.delete(f"/conversations/{own['id']}", headers=headers)
+            await client.delete(f"/conversation_records/{own['id']}", headers=headers)
         ).status_code == 403
         resp = await client.post(
-            "/conversations/batch",
+            "/conversation_records/batch",
             json={"operations": [{"op": "delete", "id": own["id"]}]},
             headers=headers,
         )
@@ -344,24 +356,26 @@ class TestConversationAccessPolicy:
         await _assign_role(
             session,
             restricted.id,
-            {"conversation_permission": Permitted()},
+            {"conversation_record_permission": Permitted()},
             role_name="restricted-admin",
         )
         await session.commit()
         token = create_auth_token(restricted.id)
         headers = {"Authorization": f"Bearer {token}"}
 
-        resp = await client.get("/conversations", headers=headers)
+        resp = await client.get("/conversation_records", headers=headers)
         assert {i["id"] for i in resp.json()["items"]} == {own["id"], foreign["id"]}
         assert (
-            await client.patch(f"/conversations/{own['id']}", json={"title": "x"}, headers=headers)
+            await client.patch(
+                f"/conversation_records/{own['id']}", json={"title": "x"}, headers=headers
+            )
         ).status_code == 200
 
     async def test_no_role_denied(self, client: AsyncClient, session) -> None:
         principal = await _make_principal(session, email="norole@example.com", username="norole")
         await session.commit()
         headers = {"Authorization": f"Bearer {create_auth_token(principal.id)}"}
-        assert (await client.get("/conversations", headers=headers)).status_code == 403
+        assert (await client.get("/conversation_records", headers=headers)).status_code == 403
 
     async def test_anonymous_denied(self, app) -> None:
         from httpx import ASGITransport
@@ -369,7 +383,7 @@ class TestConversationAccessPolicy:
 
         transport = ASGITransport(app=app)
         async with RawClient(transport=transport, base_url="http://test") as ac:
-            assert (await ac.get("/conversations")).status_code == 403
+            assert (await ac.get("/conversation_records")).status_code == 403
 
     async def test_invalid_cursor_returns_400(self, client: AsyncClient) -> None:
-        assert (await client.get("/conversations?cursor=not-a-uuid")).status_code == 400
+        assert (await client.get("/conversation_records?cursor=not-a-uuid")).status_code == 400

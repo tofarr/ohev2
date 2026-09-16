@@ -10,9 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess, ApiKeyAccessFilter
-from openhands.ev2.conversation.conversation_security import (
-    ConversationAccess,
-    ConversationAccessFilter,
+from openhands.ev2.conversation_record.conversation_record_security import (
+    ConversationRecordAccess,
+    ConversationRecordAccessFilter,
 )
 from openhands.ev2.event.event_security import EventAccess
 from openhands.ev2.group.group_models import Group, GroupUser
@@ -169,13 +169,13 @@ class TestSeedDbRegularUser:
         assert isinstance(user_role.sandbox_permission, CreatorPermission)
         assert isinstance(user_role.sandbox_permission.on_match, Permitted)
         assert isinstance(user_role.sandbox_permission.on_create, Permitted)
-        assert isinstance(user_role.conversation_permission, ConversationAccess)
+        assert isinstance(user_role.conversation_record_permission, ConversationRecordAccess)
         assert isinstance(user_role.event_permission, EventAccess)
         # Every other entity column is denied (None).
         granted_cols = (
             "api_key_permission",
             "sandbox_permission",
-            "conversation_permission",
+            "conversation_record_permission",
             "event_permission",
         )
         for col in _ADMIN_COLUMNS:
@@ -272,7 +272,7 @@ class TestSeedDbRegularUser:
     async def test_user_role_conversation_policy_is_scoped_read_only(
         self, session: AsyncSession
     ) -> None:
-        """The seeded user role's ConversationAccess scopes reads to sandbox configs the
+        """The seeded user role's ConversationRecordAccess scopes reads to sandbox configs the
         principal created and denies all writes."""
         await seed_db(
             session,
@@ -284,11 +284,11 @@ class TestSeedDbRegularUser:
             user_password="pw",
         )
         user_role = await _named_role(session, "user")
-        policy = user_role.conversation_permission
-        assert isinstance(policy, ConversationAccess)
+        policy = user_role.conversation_record_permission
+        assert isinstance(policy, ConversationRecordAccess)
         uid = uuid.uuid4()
         filt = policy.to_search_filter(uid, Action.READ)
-        assert isinstance(filt, ConversationAccessFilter)
+        assert isinstance(filt, ConversationRecordAccessFilter)
         assert filt.user_id == uid
         assert policy.to_search_filter(uid, Action.UPDATE) is not None
         # Anonymous is denied (NoneSearchFilter, not None).

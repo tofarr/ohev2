@@ -11,9 +11,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.conversation.conversation_models import Conversation
-from openhands.ev2.conversation.conversation_schemas import ConversationCreate
-from openhands.ev2.conversation.conversation_service import ConversationService
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
+from openhands.ev2.conversation_record.conversation_record_schemas import ConversationRecordCreate
+from openhands.ev2.conversation_record.conversation_record_service import ConversationRecordService
 from openhands.ev2.event import event_router
 from openhands.ev2.event.event_schemas import EventCreate
 from openhands.ev2.event.event_service import EventService
@@ -38,10 +38,10 @@ async def sandbox_config(session: AsyncSession, owner: User) -> SandboxConfig:
 
 
 @pytest.fixture
-async def conversation(session: AsyncSession, sandbox_config: SandboxConfig) -> Conversation:
+async def conversation(session: AsyncSession, sandbox_config: SandboxConfig) -> ConversationRecord:
     """A real parent conversation for the route wiring."""
-    convo_service = ConversationService(session, ALL)
-    payload = ConversationCreate(
+    convo_service = ConversationRecordService(session, ALL)
+    payload = ConversationRecordCreate(
         title="parent",
         sandbox_config_id=sandbox_config.id,
         llm_model="claude-sonnet-4",
@@ -58,18 +58,18 @@ class TestCreateRoute:
         self, client: AsyncClient, session: AsyncSession, conversation
     ) -> None:
         resp = await client.post(
-            f"/conversations/{conversation.id}/events",
+            f"/conversation_records/{conversation.id}/events",
             json=_payload({"outcome": "ok"}),
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["kind"] == "test-signal"
-        assert body["conversation_id"] == str(conversation.id)
+        assert body["conversation_record_id"] == str(conversation.id)
         assert body["body"] == {"outcome": "ok"}
 
     async def test_create_unknown_conversation_404(self, client: AsyncClient) -> None:
         resp = await client.post(
-            f"/conversations/{uuid.uuid4()}/events",
+            f"/conversation_records/{uuid.uuid4()}/events",
             json=_payload({"outcome": "ok"}),
         )
         assert resp.status_code == 404
@@ -80,7 +80,7 @@ class TestBatchWriteRoute:
         self, client: AsyncClient, session: AsyncSession, conversation
     ) -> None:
         resp = await client.post(
-            f"/conversations/{conversation.id}/events/batch",
+            f"/conversation_records/{conversation.id}/events/batch",
             json={
                 "operations": [
                     {"data": {"kind": "test-signal", "body": {"i": 1}}},
@@ -91,18 +91,18 @@ class TestBatchWriteRoute:
         assert resp.status_code == 201, resp.text
         items = resp.json()["items"]
         assert [i["body"]["i"] for i in items] == [1, 2]
-        assert all(i["conversation_id"] == str(conversation.id) for i in items)
+        assert all(i["conversation_record_id"] == str(conversation.id) for i in items)
 
     async def test_batch_unknown_conversation_404(self, client: AsyncClient) -> None:
         resp = await client.post(
-            f"/conversations/{uuid.uuid4()}/events/batch",
+            f"/conversation_records/{uuid.uuid4()}/events/batch",
             json={"operations": [{"data": {"kind": "k", "body": {}}}]},
         )
         assert resp.status_code == 404
 
     async def test_batch_empty_operations_422(self, client: AsyncClient, conversation) -> None:
         resp = await client.post(
-            f"/conversations/{conversation.id}/events/batch",
+            f"/conversation_records/{conversation.id}/events/batch",
             json={"operations": []},
         )
         assert resp.status_code == 422
@@ -123,7 +123,7 @@ class TestBatchWriteRoute:
         await assign_role(session, principal.id, {"event_permission": None})
         await session.commit()
         resp = await client.post(
-            f"/conversations/{conversation.id}/events/batch",
+            f"/conversation_records/{conversation.id}/events/batch",
             json={"operations": [{"data": {"kind": "k", "body": {}}}]},
             headers={"Authorization": f"Bearer {create_auth_token(principal.id)}"},
         )
@@ -137,14 +137,16 @@ class TestListRoute:
         svc = EventService(session, ALL)
         for i in range(3):
             await svc.create(conversation.id, _event_create({"i": i}))
-        resp = await client.get(f"/conversations/{conversation.id}/events", params={"limit": 2})
+        resp = await client.get(
+            f"/conversation_records/{conversation.id}/events", params={"limit": 2}
+        )
         assert resp.status_code == 200, resp.text
         page = resp.json()
         assert len(page["items"]) == 2
         first_cursor = page["next_cursor"]
         assert first_cursor
         resp2 = await client.get(
-            f"/conversations/{conversation.id}/events",
+            f"/conversation_records/{conversation.id}/events",
             params={"limit": 2, "cursor": first_cursor},
         )
         assert resp2.status_code == 200
@@ -155,13 +157,13 @@ class TestListRoute:
 
     async def test_list_invalid_cursor_400(self, client: AsyncClient, conversation) -> None:
         resp = await client.get(
-            f"/conversations/{conversation.id}/events", params={"cursor": "not-a-cursor"}
+            f"/conversation_records/{conversation.id}/events", params={"cursor": "not-a-cursor"}
         )
         assert resp.status_code == 400
 
     async def test_list_malformed_cursor_parts_400(self, client: AsyncClient, conversation) -> None:
         resp = await client.get(
-            f"/conversations/{conversation.id}/events", params={"cursor": "junk|junk"}
+            f"/conversation_records/{conversation.id}/events", params={"cursor": "junk|junk"}
         )
         assert resp.status_code == 400
 
@@ -170,12 +172,12 @@ class TestGetRoute:
     async def test_get(self, client: AsyncClient, session: AsyncSession, conversation) -> None:
         svc = EventService(session, ALL)
         event = await svc.create(conversation.id, _event_create({"outcome": "ok"}))
-        resp = await client.get(f"/conversations/{conversation.id}/events/{event.id}")
+        resp = await client.get(f"/conversation_records/{conversation.id}/events/{event.id}")
         assert resp.status_code == 200, resp.text
         assert resp.json()["id"] == str(event.id)
 
     async def test_get_missing_404(self, client: AsyncClient, conversation) -> None:
-        resp = await client.get(f"/conversations/{conversation.id}/events/{uuid.uuid4()}")
+        resp = await client.get(f"/conversation_records/{conversation.id}/events/{uuid.uuid4()}")
         assert resp.status_code == 404
 
     async def test_wrong_conversation_404(
@@ -183,7 +185,7 @@ class TestGetRoute:
     ) -> None:
         svc = EventService(session, ALL)
         event = await svc.create(conversation.id, _event_create({"outcome": "ok"}))
-        resp = await client.get(f"/conversations/{uuid.uuid4()}/events/{event.id}")
+        resp = await client.get(f"/conversation_records/{uuid.uuid4()}/events/{event.id}")
         assert resp.status_code == 404
 
 
@@ -193,7 +195,7 @@ class TestBodyRoute:
     ) -> None:
         svc = EventService(session, ALL)
         event = await svc.create(conversation.id, _event_create({"outcome": "ok"}))
-        resp = await client.get(f"/conversations/{conversation.id}/events/{event.id}/body")
+        resp = await client.get(f"/conversation_records/{conversation.id}/events/{event.id}/body")
         assert resp.status_code == 200, resp.text
         assert json.loads(resp.content) == {"outcome": "ok"}
 
@@ -216,7 +218,7 @@ class TestBodyRoute:
                 return store
 
         monkeypatch.setattr(event_router, "get_config", lambda: FakeCfg())
-        resp = await client.get(f"/conversations/{conversation.id}/events/{event.id}/body")
+        resp = await client.get(f"/conversation_records/{conversation.id}/events/{event.id}/body")
         assert resp.status_code == 200, resp.text
         assert json.loads(resp.content) == {"big": "x" * 512}
 
@@ -237,7 +239,7 @@ class TestBodyRoute:
                 return None
 
         monkeypatch.setattr(event_router, "get_config", lambda: FakeCfg())
-        resp = await client.get(f"/conversations/{conversation.id}/events/{event.id}/body")
+        resp = await client.get(f"/conversation_records/{conversation.id}/events/{event.id}/body")
         assert resp.status_code == 404
 
 

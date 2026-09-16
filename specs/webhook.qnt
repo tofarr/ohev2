@@ -1,30 +1,30 @@
 // Webhook ingestion specification (tofarr/ohev2#125).
 //
 // Models the legacy agent-server webhook adapter: the sandbox config id is
-// carried on the URL (POST /webhooks/{sandbox_config_id}/conversations and
-// POST /webhooks/{sandbox_config_id}/conversations/{conversation_id}/events),
+// carried on the URL (POST /webhooks/{sandbox_config_id}/conversation_records and
+// POST /webhooks/{sandbox_config_id}/conversation_records/{conversation_record_id}/events),
 // and authentication/authorization go through the standard permission
 // dependencies (role-policy filters). Invariants checked here:
 //
 //   - an unknown sandbox config id on the URL is invisible (404) and leaves
 //     the state unchanged
-//   - every mutation is scoped to conversations whose sandboxConfigId equals
+//   - every mutation is scoped to conversation_records whose sandboxConfigId equals
 //     the URL's config id: cross-scope upserts and event appends are
 //     rejected (404) and change nothing
 //   - the resolved permission filter must both pass the route guard and
 //     match() the candidate/existing row; a deny at either level is a total
 //     no-op (fail-closed, existence not leaked)
-//   - conversation webhook payloads upsert: an in-scope payload whose id
+//   - conversation_record webhook payloads upsert: an in-scope payload whose id
 //     already exists updates title/metrics instead of duplicating the row;
 //     a payload with executionStatus = "deleting" never creates a row
 //   - stats folding: a stats snapshot event updates the owning
-//     conversation's metrics to the absolute snapshot values; non-stats
+//     conversation_record's metrics to the absolute snapshot values; non-stats
 //     events leave the metrics untouched
 //   - total tokens always equal prompt + completion
 //
 // The role-policy resolution itself (how a principal's roles reduce to a
 // filter) is specified in rbac.qnt; this spec treats the resolved outcome
-// (authorized) as an input. Companion to conversation.qnt (storage +
+// (authorized) as an input. Companion to conversation_record.qnt (storage +
 // user-side CRUD/scope) and event.qnt (event storage).
 
 module webhook {
@@ -33,7 +33,7 @@ module webhook {
     id: str,
   }
 
-  type Conversation = {
+  type ConversationRecord = {
     id: str,
     sandboxConfigId: str,
     title: str,
@@ -46,7 +46,7 @@ module webhook {
   // An ingested event: stats snapshots carry absolute metric values.
   type Event = {
     id: str,
-    conversationId: str,
+    conversationRecordId: str,
     isStats: bool,
     cost: int,
     prompt: int,
@@ -54,12 +54,12 @@ module webhook {
   }
 
   var sandboxConfigs: Set[SandboxConfig]
-  var conversations: Set[Conversation]
+  var conversation_records: Set[ConversationRecord]
   var events: Set[Event]
 
   action init = all {
     sandboxConfigs' = Set(),
-    conversations' = Set(),
+    conversation_records' = Set(),
     events' = Set(),
   }
 
@@ -67,12 +67,12 @@ module webhook {
   // Helpers
   // ------------------------------------------------------------------ #
 
-  // A conversation is in scope for a webhook URL iff it is backed by the
+  // A conversation_record is in scope for a webhook URL iff it is backed by the
   // URL's sandbox config id.
-  pure def inScope(c: Conversation, configId: str): bool =
+  pure def inScope(c: ConversationRecord, configId: str): bool =
     c.sandboxConfigId == configId
 
-  pure def tokensConsistent(c: Conversation): bool =
+  pure def tokensConsistent(c: ConversationRecord): bool =
     c.totalTokens == c.promptTokens + c.completionTokens
 
   // The URL's config must exist; otherwise the request is a 404 no-op.
@@ -89,33 +89,33 @@ module webhook {
     not(sandboxConfigs.exists(x => x.id == sc.id)),
     sc.id != "",
     sandboxConfigs' = sandboxConfigs.union(Set(sc)),
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     events' = events,
   }
 
-  // POST /webhooks/{cfg}/conversations with a *deleting* execution status
+  // POST /webhooks/{cfg}/conversation_records with a *deleting* execution status
   // (and, in general, any payload whose id does not resolve to an existing
   // row): a no-op that never creates a row.
   action webhookDeleteStatus(configId: str, id: str, authorized: bool): bool = all {
     urlConfigExists(configId),
     authorized,
-    not(conversations.exists(c => c.id == id)),
-    conversations' = conversations,
+    not(conversation_records.exists(c => c.id == id)),
+    conversation_records' = conversation_records,
     sandboxConfigs' = sandboxConfigs,
     events' = events,
   }
 
-  // POST /webhooks/{cfg}/conversations: upsert. The route guard
+  // POST /webhooks/{cfg}/conversation_records: upsert. The route guard
   // (authorized) and the URL scope must both hold; the URL's config must
   // own a created row, and an updated row must already belong to it. Any
   // violation is rejected and the state is unchanged.
-  action webhookUpsert(configId: str, c: Conversation, authorized: bool): bool = all {
+  action webhookUpsert(configId: str, c: ConversationRecord, authorized: bool): bool = all {
     authorized,
     inScope(c, configId),
-    conversations.forall(x => x.id == c.id implies x.sandboxConfigId == configId),
-    conversations' =
-      if (conversations.exists(x => x.id == c.id))
-        conversations.map(x =>
+    conversation_records.forall(x => x.id == c.id implies x.sandboxConfigId == configId),
+    conversation_records' =
+      if (conversation_records.exists(x => x.id == c.id))
+        conversation_records.map(x =>
           if (x.id == c.id)
             { ...x, title: c.title, accumulatedCost: c.accumulatedCost,
               promptTokens: c.promptTokens, completionTokens: c.completionTokens,
@@ -123,25 +123,25 @@ module webhook {
           else
             x)
       else
-        conversations.union(Set(c)),
+        conversation_records.union(Set(c)),
     sandboxConfigs' = sandboxConfigs,
     events' = events,
   }
 
-  // POST /webhooks/{cfg}/conversations/{cid}/events: append a batch. All-or-
+  // POST /webhooks/{cfg}/conversation_records/{cid}/events: append a batch. All-or-
   // nothing scope check: every event must target an in-scope, existing
-  // conversation, or the whole batch is rejected (404) and the state is
+  // conversation_record, or the whole batch is rejected (404) and the state is
   // unchanged. Stats events fold their absolute snapshot into the
-  // conversation metrics.
+  // conversation_record metrics.
   action webhookEvents(configId: str, newEvents: Set[Event], authorized: bool): bool = all {
     authorized,
     newEvents.forall(e =>
-      conversations.exists(c => c.id == e.conversationId and inScope(c, configId))),
+      conversation_records.exists(c => c.id == e.conversationRecordId and inScope(c, configId))),
     newEvents.forall(e => not(events.exists(x => x.id == e.id))),
     newEvents.forall(e => e.cost >= 0 and e.prompt >= 0 and e.completion >= 0),
     events' = events.union(newEvents),
-    conversations' = conversations.map(c =>
-      newEvents.filter(e => e.conversationId == c.id and e.isStats).fold(c, (acc, e) =>
+    conversation_records' = conversation_records.map(c =>
+      newEvents.filter(e => e.conversationRecordId == c.id and e.isStats).fold(c, (acc, e) =>
         { ...acc, accumulatedCost: e.cost, promptTokens: e.prompt,
           completionTokens: e.completion, totalTokens: e.prompt + e.completion })),
     sandboxConfigs' = sandboxConfigs,
@@ -149,7 +149,7 @@ module webhook {
 
   action step: bool = all {
     sandboxConfigs' = sandboxConfigs,
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     events' = events,
   }
 
@@ -157,17 +157,17 @@ module webhook {
   // Invariants
   // ------------------------------------------------------------------ #
 
-  // Every conversation is backed by an existing sandbox config.
+  // Every conversation_record is backed by an existing sandbox config.
   val allBackedByConfig: bool =
-    conversations.forall(c => sandboxConfigs.exists(sc => sc.id == c.sandboxConfigId))
+    conversation_records.forall(c => sandboxConfigs.exists(sc => sc.id == c.sandboxConfigId))
 
-  // Every event is backed by an existing conversation.
+  // Every event is backed by an existing conversation_record.
   val allEventsBacked: bool =
-    events.forall(e => conversations.exists(c => c.id == e.conversationId))
+    events.forall(e => conversation_records.exists(c => c.id == e.conversationRecordId))
 
-  // total == prompt + completion for every conversation, always.
+  // total == prompt + completion for every conversation_record, always.
   val allTokensConsistent: bool =
-    conversations.forall(c => tokensConsistent(c))
+    conversation_records.forall(c => tokensConsistent(c))
 
   // ------------------------------------------------------------------ #
   // Tests
@@ -175,8 +175,8 @@ module webhook {
 
   val _cfg: SandboxConfig = { id: "cfg1" }
   val _other: SandboxConfig = { id: "cfg2" }
-  val _conv: Conversation = {
-    id: "c1", sandboxConfigId: "cfg1", title: "webhook conversation",
+  val _conv: ConversationRecord = {
+    id: "c1", sandboxConfigId: "cfg1", title: "webhook conversation_record",
     accumulatedCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
   }
 
@@ -184,8 +184,8 @@ module webhook {
     init.then(createConfig(_cfg))
       .then(webhookUpsert("cfg1", _conv, true))
       .then(all {
-        assert(conversations.exists(c => c.id == "c1" and c.sandboxConfigId == "cfg1")),
-        conversations' = conversations,
+        assert(conversation_records.exists(c => c.id == "c1" and c.sandboxConfigId == "cfg1")),
+        conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
@@ -201,7 +201,7 @@ module webhook {
     init.then(createConfig(_cfg))
       .then(createConfig(_other))
       .then(webhookUpsert("cfg1", _conv, true))
-      // The cfg2 URL must not update cfg1's conversation.
+      // The cfg2 URL must not update cfg1's conversation_record.
       .then(webhookUpsert("cfg2", { ..._conv, title: "hijacked" }, true))
       .fail()
   }
@@ -214,10 +214,10 @@ module webhook {
         promptTokens: 10, completionTokens: 5, totalTokens: 15,
       }, true))
       .then(all {
-        assert(conversations.size() == 1),
-        assert(conversations.exists(c =>
+        assert(conversation_records.size() == 1),
+        assert(conversation_records.exists(c =>
           c.id == "c1" and c.title == "renamed" and c.totalTokens == 15)),
-        conversations' = conversations,
+        conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
@@ -227,8 +227,8 @@ module webhook {
     init.then(createConfig(_cfg))
       .then(webhookDeleteStatus("cfg1", "c1", true))
       .then(all {
-        assert(not(conversations.exists(c => c.id == "c1"))),
-        conversations' = conversations,
+        assert(not(conversation_records.exists(c => c.id == "c1"))),
+        conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
@@ -241,10 +241,10 @@ module webhook {
   }
 
   val _msgEvent: Event = {
-    id: "e1", conversationId: "c1", isStats: false, cost: 0, prompt: 0, completion: 0,
+    id: "e1", conversationRecordId: "c1", isStats: false, cost: 0, prompt: 0, completion: 0,
   }
   val _statsEvent: Event = {
-    id: "e2", conversationId: "c1", isStats: true, cost: 2, prompt: 8, completion: 4,
+    id: "e2", conversationRecordId: "c1", isStats: true, cost: 2, prompt: 8, completion: 4,
   }
 
   run eventsAppendAndStatsFold = {
@@ -253,10 +253,10 @@ module webhook {
       .then(webhookEvents("cfg1", Set(_msgEvent, _statsEvent), true))
       .then(all {
         assert(events.size() == 2),
-        assert(conversations.exists(c =>
+        assert(conversation_records.exists(c =>
           c.id == "c1" and c.accumulatedCost == 2 and c.promptTokens == 8
             and c.completionTokens == 4 and c.totalTokens == 12)),
-        conversations' = conversations,
+        conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
@@ -267,9 +267,9 @@ module webhook {
       .then(webhookUpsert("cfg1", _conv, true))
       .then(webhookEvents("cfg1", Set(_msgEvent), true))
       .then(all {
-        assert(conversations.exists(c =>
+        assert(conversation_records.exists(c =>
           c.id == "c1" and c.accumulatedCost == 0 and c.totalTokens == 0)),
-        conversations' = conversations,
+        conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
         events' = events,
       })
@@ -279,7 +279,7 @@ module webhook {
     init.then(createConfig(_cfg))
       .then(createConfig(_other))
       .then(webhookUpsert("cfg1", _conv, true))
-      // The cfg2 URL must not append events to cfg1's conversation.
+      // The cfg2 URL must not append events to cfg1's conversation_record.
       .then(webhookEvents("cfg2", Set(_msgEvent), true))
       .fail()
   }

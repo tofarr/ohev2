@@ -16,7 +16,7 @@ the backfill job can rebuild rows without consulting Postgres::
 
     {
       "id": "<uuid>",
-      "conversation_id": "<uuid>",
+      "conversation_record_id": "<uuid>",
       "kind": "<discriminator>",
       "timestamp": "<iso8601>",
       "size_bytes": <int>,

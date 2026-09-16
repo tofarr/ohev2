@@ -1,10 +1,10 @@
 """HTTP routes for the event feature.
 
-Events are nested under conversations (AGENTS.md §3): create is
-``POST /conversations/{id}/events``, list is ``GET /conversations/{id}/events``
+Events are nested under conversation_records (AGENTS.md §3): create is
+``POST /conversation_records/{id}/events``, list is ``GET /conversation_records/{id}/events``
 with cursor pagination, retrieve is
-``GET /conversations/{conv_id}/events/{event_id}``, and the full-body
-download is ``GET /conversations/{conv_id}/events/{event_id}/body``. Events
+``GET /conversation_records/{conv_id}/events/{event_id}``, and the full-body
+download is ``GET /conversation_records/{conv_id}/events/{event_id}/body``. Events
 are immutable — no update/delete (delete is partition retention only).
 
 Handlers validate, call the service, and serialize. Every endpoint is guarded
@@ -36,7 +36,7 @@ from openhands.ev2.event.event_schemas import (
     EventSearchResult,
 )
 from openhands.ev2.event.event_service import (
-    ConversationNotFoundError,
+    ConversationRecordNotFoundError,
     EventBodyNotFoundError,
     EventNotFoundError,
     EventPermissionScopeError,
@@ -47,7 +47,7 @@ from openhands.ev2.util.schemas import BatchWriteResult
 from openhands.ev2.util.search_filter import SearchFilter
 
 router = APIRouter(
-    prefix="/conversations/{conversation_id}/events",
+    prefix="/conversation_records/{conversation_record_id}/events",
     tags=["events"],
 )
 
@@ -87,18 +87,18 @@ def _service(session: SessionDep, perm_filter: SearchFilter[Event]) -> EventServ
 
 @router.post("", response_model=EventRead, status_code=status.HTTP_201_CREATED)
 async def create_event(
-    conversation_id: uuid.UUID,
+    conversation_record_id: uuid.UUID,
     payload: EventCreate,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.CREATE))],
 ) -> EventRead:
     service = _service(session, perm_filter)
     try:
-        event = await service.create(conversation_id, payload)
-    except ConversationNotFoundError as exc:
+        event = await service.create(conversation_record_id, payload)
+    except ConversationRecordNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation not found: {exc}",
+            detail=f"Conversation record not found: {exc}",
         ) from exc
     except EventPermissionScopeError as exc:
         raise HTTPException(
@@ -111,7 +111,7 @@ async def create_event(
 
 @router.get("", response_model=EventSearchResult)
 async def search_events(
-    conversation_id: uuid.UUID,
+    conversation_record_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.SEARCH))],
     # Bare `Depends()` lets FastAPI explode the filter model's fields as
@@ -123,7 +123,7 @@ async def search_events(
     service = _service(session, perm_filter)
     parsed_cursor = _cursor(cursor) if cursor is not None else None
     events, next_cursor = await service.search_events(
-        conversation_id,
+        conversation_record_id,
         cursor=parsed_cursor,
         limit=limit,
         search_filter=search_filter,
@@ -141,7 +141,7 @@ async def search_events(
     status_code=status.HTTP_201_CREATED,
 )
 async def write_events_batch(
-    conversation_id: uuid.UUID,
+    conversation_record_id: uuid.UUID,
     payload: EventBatchWriteRequest,
     session: SessionDep,
     perm_filter: Annotated[
@@ -160,11 +160,11 @@ async def write_events_batch(
     events: list[Event] = []
     try:
         for op in payload.operations:
-            events.append(await service.create(conversation_id, op.data))
-    except ConversationNotFoundError as exc:
+            events.append(await service.create(conversation_record_id, op.data))
+    except ConversationRecordNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation not found: {exc}",
+            detail=f"Conversation record not found: {exc}",
         ) from exc
     except EventPermissionScopeError as exc:
         raise HTTPException(
@@ -177,14 +177,14 @@ async def write_events_batch(
 
 @router.get("/{event_id}", response_model=EventRead)
 async def get_event(
-    conversation_id: uuid.UUID,
+    conversation_record_id: uuid.UUID,
     event_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.READ))],
 ) -> EventRead:
     service = _service(session, perm_filter)
     try:
-        event = await service.get(conversation_id, event_id)
+        event = await service.get(conversation_record_id, event_id)
     except EventNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -195,7 +195,7 @@ async def get_event(
 
 @router.get("/{event_id}/body")
 async def get_event_body(
-    conversation_id: uuid.UUID,
+    conversation_record_id: uuid.UUID,
     event_id: uuid.UUID,
     session: SessionDep,
     perm_filter: Annotated[SearchFilter[Event], Depends(depends_permissions(Event, Action.READ))],
@@ -208,7 +208,7 @@ async def get_event_body(
     """
     service = _service(session, perm_filter)
     try:
-        body = await service.get_body(conversation_id, event_id)
+        body = await service.get_body(conversation_record_id, event_id)
     except EventNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -16,20 +16,20 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import make_principal, make_sandbox_config
 
-from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.util.search_filter import SearchFilter, SqlCondition
 from openhands.ev2.webhook.webhook_service import (
-    WebhookConversationNotFoundError,
+    WebhookConversationRecordNotFoundError,
     WebhookSandboxNotFoundError,
     WebhookService,
 )
 
 
-class _Deny(SearchFilter[Conversation]):
+class _Deny(SearchFilter[ConversationRecord]):
     """A filter that matches nothing (in-memory predicate always False)."""
 
-    def matches(self, item: Conversation) -> bool:
+    def matches(self, item: ConversationRecord) -> bool:
         return False
 
     def sql_condition(self) -> SqlCondition:
@@ -46,10 +46,10 @@ async def _sandbox_config(session: AsyncSession) -> SandboxConfig:
     return await make_sandbox_config(session, creator_id=user.id)
 
 
-def _info(conversation_id: uuid.UUID) -> Any:
+def _info(conversation_record_id: uuid.UUID) -> Any:
     """A minimal ConversationInfo-like stub (SDK ConversationInfo untouched)."""
     info = type("Info", (), {})()
-    info.id = conversation_id
+    info.id = conversation_record_id
     info.title = None
     info.agent = None
     info.stats = None
@@ -57,8 +57,8 @@ def _info(conversation_id: uuid.UUID) -> Any:
     return info
 
 
-async def _conversation(session: AsyncSession, config_id: uuid.UUID) -> Conversation:
-    conversation = Conversation(
+async def _conversation(session: AsyncSession, config_id: uuid.UUID) -> ConversationRecord:
+    conversation = ConversationRecord(
         title="existing",
         sandbox_config_id=config_id,
         llm_model="m",
@@ -75,21 +75,21 @@ class TestUpsertConversationScope:
         """A candidate denied by the create filter fails closed."""
         config = await _sandbox_config(session)
         service = WebhookService(session, config.id, _Deny(), None, None)
-        with pytest.raises(WebhookConversationNotFoundError):
-            await service.upsert_conversation(_info(uuid.uuid4()))
+        with pytest.raises(WebhookConversationRecordNotFoundError):
+            await service.upsert_conversation_record(_info(uuid.uuid4()))
 
     async def test_update_filter_mismatch(self, session: AsyncSession) -> None:
         """An existing row denied by the update filter fails closed."""
         config = await _sandbox_config(session)
         conversation = await _conversation(session, config.id)
         service = WebhookService(session, config.id, _Deny(), _Deny(), None)
-        with pytest.raises(WebhookConversationNotFoundError):
-            await service.upsert_conversation(_info(conversation.id))
+        with pytest.raises(WebhookConversationRecordNotFoundError):
+            await service.upsert_conversation_record(_info(conversation.id))
 
     async def test_unknown_config(self, session: AsyncSession) -> None:
         service = WebhookService(session, uuid.uuid4(), None, None, None)
         with pytest.raises(WebhookSandboxNotFoundError):
-            await service.upsert_conversation(_info(uuid.uuid4()))
+            await service.upsert_conversation_record(_info(uuid.uuid4()))
 
 
 class TestIngestEventsScope:
@@ -98,7 +98,7 @@ class TestIngestEventsScope:
         config = await _sandbox_config(session)
         conversation = await _conversation(session, config.id)
         service = WebhookService(session, config.id, None, None, _Deny())
-        with pytest.raises(WebhookConversationNotFoundError):
+        with pytest.raises(WebhookConversationRecordNotFoundError):
             await service.ingest_events(conversation.id, [])
 
     async def test_unknown_config(self, session: AsyncSession) -> None:

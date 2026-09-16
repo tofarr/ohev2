@@ -110,9 +110,9 @@ class RoleCreate(BaseModel):
         default=None,
         description="Permission policy for group_user resources; null = deny.",
     )
-    conversation_permission: Permission | None = Field(
+    conversation_record_permission: Permission | None = Field(
         default=None,
-        description="Permission policy for conversation resources; null = deny.",
+        description="Permission policy for conversation_record resources; null = deny.",
     )
     conversation_template_permission: Permission | None = Field(
         default=None,
@@ -234,9 +234,9 @@ class RoleUpdate(BaseModel):
         default=None,
         description="Permission policy for group_user resources; null = deny.",
     )
-    conversation_permission: Permission | None = Field(
+    conversation_record_permission: Permission | None = Field(
         default=None,
-        description="Permission policy for conversation resources; null = deny.",
+        description="Permission policy for conversation_record resources; null = deny.",
     )
     conversation_template_permission: Permission | None = Field(
         default=None,
@@ -298,7 +298,7 @@ class RoleRead(BaseModel):
     sandbox_snapshot_permission: Permission | None
     group_permission: Permission | None
     group_user_permission: Permission | None
-    conversation_permission: Permission | None
+    conversation_record_permission: Permission | None
     conversation_template_permission: Permission | None
     event_permission: Permission | None
     oauth_provider_permission: Permission | None
