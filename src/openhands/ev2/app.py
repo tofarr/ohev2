@@ -64,6 +64,7 @@ from openhands.ev2.secret.secret_provider_router import router as secret_provide
 from openhands.ev2.secret.secret_value_router import router as secret_value_router
 from openhands.ev2.secret.static_secret_router import router as static_secret_router
 from openhands.ev2.user.user_router import router as user_router
+from openhands.ev2.util import logger as _logger_config  # noqa: F401
 from openhands.ev2.webhook.webhook_router import router as webhook_router
 
 if TYPE_CHECKING:

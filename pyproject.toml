@@ -25,6 +25,7 @@ dependencies = [
     "openhands-agent-server>=1.43.1",
     "joserfc>=1.7.4",
     "email-validator>=2.3.0",
+    "python-json-logger>=4.2.0",
 ]
 
 [project.optional-dependencies]
