@@ -4,7 +4,7 @@ Routes are intentionally stubs at this stage; the REST consistency rules in
 AGENTS.md §3 must be applied as resources are added.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
@@ -15,6 +15,11 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+
+# Configure JSON logging before any ORM/router imports — those imports trigger
+# SQLAlchemy mapper configuration that emits one INFO line per mapped column;
+# if logging is configured after, that flood streams to stdout on every import.
+from openhands.ev2.util import logger as _logger_config  # noqa: F401
 
 from openhands.ev2 import __version__
 from openhands.ev2.api_key.api_key_router import router as api_key_router
@@ -64,7 +69,6 @@ from openhands.ev2.secret.secret_provider_router import router as secret_provide
 from openhands.ev2.secret.secret_value_router import router as secret_value_router
 from openhands.ev2.secret.static_secret_router import router as static_secret_router
 from openhands.ev2.user.user_router import router as user_router
-from openhands.ev2.util import logger as _logger_config  # noqa: F401
 from openhands.ev2.webhook.webhook_router import router as webhook_router
 
 if TYPE_CHECKING:
