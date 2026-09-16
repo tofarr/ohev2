@@ -516,6 +516,44 @@ class TestJobRoutes:
         assert items[1] is None
         assert items[2]["job_details_kind"] == "LogJobDetails"
 
+    async def test_search_rejects_invalid_cursor(self, client: AsyncClient) -> None:
+        resp = await client.get("/jobs", params={"cursor": "not-a-uuid"})
+        assert resp.status_code == 400
+        assert "Invalid cursor" in resp.json()["detail"]
+
+    async def test_search_with_valid_cursor_paginates(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await client.post("/jobs", json=_payload(str(i)))
+        first = await client.get("/jobs", params={"limit": 2})
+        assert first.status_code == 200
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+        second = await client.get("/jobs", params={"limit": 2, "cursor": cursor})
+        assert second.status_code == 200
+        assert len(second.json()["items"]) == 1
+
+    async def test_batch_read_over_100_ids_returns_422(self, client: AsyncClient) -> None:
+        ids = "&".join(f"ids={uuid.uuid4()}" for _ in range(101))
+        resp = await client.get(f"/jobs/batch?{ids}")
+        assert resp.status_code == 422
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(f"/jobs/{uuid.uuid4()}", json={"detail": "x"})
+        assert resp.status_code == 404
+
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/jobs/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_batch_write_missing_id_returns_404(self, client: AsyncClient) -> None:
+        batch = {
+            "operations": [
+                {"op": "delete", "id": str(uuid.uuid4())},
+            ]
+        }
+        resp = await client.post("/jobs/batch", json=batch)
+        assert resp.status_code == 404
+
 
 # --------------------------------------------------------------------------- #
 # Permission / role-schema parity

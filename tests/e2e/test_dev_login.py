@@ -22,7 +22,7 @@ from openhands.ev2.scripts.seed_db import seed_db
 BASE_URL = os.environ.get("OHE_BASE_URL", "http://localhost:8000")
 
 # Database coordinates for seeding. Default to the docker-compose service
-# (Postgres exposed on localhost:5432, user/db ``ohev``). Override via env for
+# (Postgres exposed on localhost:5438, user/db ``ohev``). Override via env for
 # non-default deployments.
 DB_HOST = os.environ.get("OHE_DB_CONFIG_HOST", "localhost")
 DB_PORT = os.environ.get("OHE_DB_CONFIG_PORT", "5432")

@@ -115,6 +115,41 @@ class TestOAuthClientCrud:
         assert resp.status_code == 204
         assert (await client.get(f"/auth-clients/{cid}")).status_code == 404
 
+    async def test_delete_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.delete(f"/auth-clients/{uuid.uuid4()}")
+        assert resp.status_code == 404
+
+    async def test_search_clients_with_cursor(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await client.post(
+                "/auth-clients",
+                json={"client_id": f"cursor-{i}", "client_secret": "s", "redirect_uris": []},
+            )
+        first = await client.get("/auth-clients", params={"limit": 2})
+        assert first.status_code == 200
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+        second = await client.get("/auth-clients", params={"limit": 2, "cursor": cursor})
+        assert second.status_code == 200
+        assert len(second.json()["items"]) == 1
+        assert second.json()["next_cursor"] is None
+
+    async def test_create_client_conflict_returns_409(self, client: AsyncClient) -> None:
+        await client.post(
+            "/auth-clients",
+            json={"client_id": "dup-1", "client_secret": "s", "redirect_uris": []},
+        )
+        resp = await client.post(
+            "/auth-clients",
+            json={"client_id": "dup-1", "client_secret": "s", "redirect_uris": []},
+        )
+        assert resp.status_code == 409
+        assert "already exists" in resp.json()["detail"]
+
+    async def test_update_missing_returns_404(self, client: AsyncClient) -> None:
+        resp = await client.patch(f"/auth-clients/{uuid.uuid4()}", json={"name": "x"})
+        assert resp.status_code == 404
+
 
 class TestBatchClientsRoute:
     async def test_batch_returns_aligned_with_nulls_for_missing(self, client: AsyncClient) -> None:
@@ -766,6 +801,52 @@ class TestFullOAuthFlowRoute:
             json={"grant_type": "bogus", "client_id": "x", "client_secret": "y"},
         )
         assert resp.status_code == 400
+
+    async def test_token_auth_code_grant_missing_code(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/auth/token",
+            json={"grant_type": "authorization_code", "client_id": "x", "client_secret": "y"},
+        )
+        assert resp.status_code == 400
+        assert "code is required" in resp.json()["detail"]
+
+    async def test_token_refresh_grant_missing_refresh_token(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/auth/token",
+            json={"grant_type": "refresh_token", "client_id": "x", "client_secret": "y"},
+        )
+        assert resp.status_code == 400
+        assert "refresh_token is required" in resp.json()["detail"]
+
+    async def test_refresh_missing_refresh_token(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/auth/refresh",
+            json={"grant_type": "refresh_token", "client_id": "x", "client_secret": "y"},
+        )
+        assert resp.status_code == 400
+        assert "refresh_token is required" in resp.json()["detail"]
+
+    async def test_callback_invalid_state_returns_400(self, client: AsyncClient) -> None:
+        """A callback with a garbage state raises InvalidGrantError → 400."""
+        resp = await client.get(
+            "/auth/callback",
+            params={"code": "idp-code", "state": "garbage-state"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+
+    async def test_logout_with_garbage_cookie_returns_204(self, app) -> None:
+        """Logout with a malformed cookie still returns 204 (best-effort, AuthError swallowed)."""
+        from httpx import ASGITransport, AsyncClient
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            cookies={"ohesession": "garbage-cookie-value"},
+        ) as c:
+            resp = await c.post("/auth/logout")
+            assert resp.status_code == 204
+            assert "ohesession=" in resp.headers.get("set-cookie", "")
 
     async def test_refresh_unknown_grant_type(self, client: AsyncClient) -> None:
         resp = await client.post(
