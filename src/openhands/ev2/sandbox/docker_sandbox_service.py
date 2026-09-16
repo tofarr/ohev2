@@ -76,17 +76,26 @@ def _webhook_base_url(base_url: str, sandbox_config_id: str) -> str:
     return f"{scheme}://host.docker.internal{port}/webhooks/{sandbox_config_id}"
 
 
-def _sandbox_environment(base_url: str | None, sandbox_config_id: str | None) -> dict[str, str]:
+def _sandbox_environment(
+    base_url: str | None,
+    sandbox_config_id: str | None,
+    secret_key: str | None = None,
+) -> dict[str, str]:
     """Container environment for a new sandbox.
 
     The agent server does not start with --host 0.0.0.0 by default unless a
-    session api key is set, so one is minted per sandbox. When ``base_url`` is
-    set, the webhook callback and CORS environment are injected so the agent
-    server reports conversation/event updates to this app and accepts browser
-    requests from it; the webhook URL carries the sandbox config id in its
-    path.
+    session api key is set, so one is minted per sandbox. When ``secret_key`` is
+    set (the decrypted ``OH_SECRET_KEY`` from the sandbox config), it is injected
+    so the agent server can encrypt/decrypt stored settings; without it the
+    agent server logs a warning and encrypted-at-rest round-trips fail. When
+    ``base_url`` is set, the webhook callback and CORS environment are injected
+    so the agent server reports conversation/event updates to this app and
+    accepts browser requests from it; the webhook URL carries the sandbox
+    config id in its path.
     """
     environment = {"SESSION_API_KEY": generate_random_id()}
+    if secret_key is not None:
+        environment["OH_SECRET_KEY"] = secret_key
     if base_url is not None:
         environment["OH_ALLOW_CORS_ORIGINS_0"] = base_url
         if sandbox_config_id is not None:
@@ -689,7 +698,9 @@ class DockerSandboxService(SandboxService):
             if self.extra_hosts and not self.use_host_network
             else None,
             devices=["/dev/kvm:/dev/kvm:rwm"] if self.kvm_enabled else None,
-            environment=_sandbox_environment(self.base_url, sandbox.sandbox_config_id),
+            environment=_sandbox_environment(
+                self.base_url, sandbox.sandbox_config_id, sandbox.secret_key
+            ),
         )
         return container_name
 

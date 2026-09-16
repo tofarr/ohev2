@@ -79,6 +79,7 @@ async def make_sandbox_config(
         creator_id=creator_id,
         sandbox_template_id=template.id,
         session_api_key="encrypted-session-key",
+        secret_key="encrypted-secret-key",
     )
     session.add(config)
     await session.flush()

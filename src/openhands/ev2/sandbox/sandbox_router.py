@@ -22,6 +22,10 @@ from sqlalchemy import select
 from openhands.ev2.auth.auth_dependencies import depends_permissions, depends_permissions_or_none
 from openhands.ev2.db import SessionDep
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
+from openhands.ev2.sandbox.sandbox_config_service import (
+    SandboxConfigNotFoundError,
+    SandboxConfigService,
+)
 from openhands.ev2.sandbox.sandbox_models import Sandbox
 from openhands.ev2.sandbox.sandbox_schemas import (
     SandboxBatchCreate,
@@ -131,6 +135,34 @@ async def _resolve_template_image_tag(session: SessionDep, template_id: str) -> 
     return str(row[0])
 
 
+async def _resolve_secret_key(
+    session: SessionDep,
+    sandbox_config_id: str,
+    perm_filter: SearchFilter[SandboxConfig],
+) -> str:
+    """Decrypt and return the ``OH_SECRET_KEY`` for a sandbox config.
+
+    The key is injected into the sandbox container env so the agent server can
+    encrypt/decrypt stored settings. Raises 404 when the config does not exist
+    or is out of scope.
+    """
+    try:
+        config_id = uuid.UUID(sandbox_config_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sandbox config {sandbox_config_id!r} not found.",
+        ) from exc
+    service = SandboxConfigService(session, perm_filter)
+    try:
+        return await service.get_secret_key(config_id)
+    except SandboxConfigNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sandbox config {sandbox_config_id!r} not found.",
+        ) from exc
+
+
 @router.post("", response_model=SandboxRead, status_code=status.HTTP_201_CREATED)
 async def create_sandbox(
     payload: SandboxCreate,
@@ -143,10 +175,11 @@ async def create_sandbox(
 ) -> SandboxRead:
     image_tag = await _resolve_template_image_tag(session, payload.sandbox_template_id)
     resolved = payload.model_copy(update={"sandbox_template_id": image_tag})
+    secret_key = await _resolve_secret_key(session, payload.sandbox_config_id, perm_filter)
     service = await get_sandbox_service(request)
     try:
         sandbox = await service.create_sandbox(
-            resolved, perm_filter=cast(SearchFilter[Sandbox], perm_filter)
+            resolved, perm_filter=cast(SearchFilter[Sandbox], perm_filter), secret_key=secret_key
         )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
@@ -190,17 +223,25 @@ async def write_sandboxes_batch(
         Depends(depends_permissions_or_none(SandboxConfig, Action.DELETE)),
     ],
 ) -> BatchWriteResult[SandboxRead]:
+    create_config_ids: set[str] = set()
     for op in payload.operations:
         if isinstance(op, SandboxBatchCreate):
             image_tag = await _resolve_template_image_tag(session, op.data.sandbox_template_id)
             op.data = op.data.model_copy(update={"sandbox_template_id": image_tag})
+            create_config_ids.add(op.data.sandbox_config_id)
+    secret_keys: dict[str, str] = {}
+    if create_filter is not None:
+        for config_id in create_config_ids:
+            secret_keys[config_id] = await _resolve_secret_key(session, config_id, create_filter)
     service = await get_sandbox_service(request)
     perm_filters = cast(
         dict[Action, SearchFilter[Sandbox] | None],
         {Action.CREATE: create_filter, Action.DELETE: delete_filter},
     )
     try:
-        results = await service.apply_sandbox_batch(payload.operations, perm_filters)
+        results = await service.apply_sandbox_batch(
+            payload.operations, perm_filters, secret_keys=secret_keys or None
+        )
     except Exception as exc:
         raise _map_exception_to_status(exc) from exc
     return BatchWriteResult(

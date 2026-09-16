@@ -95,8 +95,8 @@ class _FakeSandboxService(SandboxService):
         raise NotImplementedError
 
 
-def _create_payload(template_id: str = "img-a") -> dict[str, Any]:
-    return {"sandbox_template_id": template_id, "sandbox_config_id": "cfg-1"}
+def _create_payload(template_id: str = "img-a", config_id: str = "cfg-1") -> dict[str, Any]:
+    return {"sandbox_template_id": template_id, "sandbox_config_id": config_id}
 
 
 async def _create_template(client: AsyncClient) -> str:
@@ -110,10 +110,21 @@ async def _create_template(client: AsyncClient) -> str:
     return resp.json()["id"]
 
 
+async def _create_config(client: AsyncClient, template_id: str) -> str:
+    """Create a sandbox config and return its UUID (needed for sandbox create)."""
+    resp = await client.post(
+        "/sandbox/sandbox-configs",
+        json={"sandbox_template_id": template_id, "enabled": True},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 async def _post_sandbox(client: AsyncClient) -> Any:
-    """Create a template + sandbox in one step, returning the POST response."""
+    """Create a template + config + sandbox in one step, returning the POST response."""
     tid = await _create_template(client)
-    return await client.post("/sandbox/sandboxes", json=_create_payload(tid))
+    cid = await _create_config(client, tid)
+    return await client.post("/sandbox/sandboxes", json=_create_payload(tid, cid))
 
 
 @pytest_asyncio.fixture
@@ -277,11 +288,12 @@ class TestBatch:
     async def test_batch_write_mixed(self, client: AsyncClient) -> None:
         await _post_sandbox(client)
         tid = await _create_template(client)
+        cid = await _create_config(client, tid)
         resp = await client.post(
             "/sandbox/sandboxes/batch",
             json={
                 "operations": [
-                    {"op": "create", "data": _create_payload(tid)},
+                    {"op": "create", "data": _create_payload(tid, cid)},
                     {"op": "delete", "id": "sandbox-1"},
                 ]
             },

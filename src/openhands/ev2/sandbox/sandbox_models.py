@@ -101,6 +101,13 @@ class Sandbox(DiscriminatedUnionMixin, ABC):
             "the session_api_key will be None."
         ),
     )
+    # Decrypted OH_SECRET_KEY injected into the container env so the agent
+    # server can encrypt/decrypt stored settings. Populated from the config at
+    # create time; not exposed in SandboxRead.
+    secret_key: str | None = Field(
+        default=None,
+        description="Decrypted OH_SECRET_KEY for the sandbox agent server (internal).",
+    )
     exposed_urls: list[ExposedUrl] | None = Field(
         default_factory=lambda: [],
         description=(

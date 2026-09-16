@@ -108,6 +108,7 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
         creator_id=admin.id,
         sandbox_template_id=template.id,
         session_api_key="encrypted-session-key",
+        secret_key="encrypted-secret-key",
     )
     session.add(config)
     await session.flush()

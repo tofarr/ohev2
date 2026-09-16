@@ -1820,6 +1820,46 @@ def test_sync_create_sandbox_no_extra_env_without_base_url() -> None:
     assert set(env) == {"SESSION_API_KEY"}
 
 
+def test_sync_create_sandbox_injects_secret_key() -> None:
+    """The decrypted secret_key is injected as OH_SECRET_KEY into the container."""
+    service, fc = _make_warm_service()
+    service._sync_create_sandbox(
+        DockerSandbox(
+            sandbox_template_id="img:latest",
+            sandbox_config_id="cfg-9",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+            secret_key="super-secret-key-123",
+        )
+    )
+    env = fc._created[0].environment
+    assert env["OH_SECRET_KEY"] == "super-secret-key-123"
+    assert "SESSION_API_KEY" in env
+
+
+def test_sync_create_warm_omits_secret_key() -> None:
+    """Warm (unclaimed) containers have no secret_key (no config yet)."""
+    service, fc = _make_warm_service()
+    service._sync_create_warm("img:latest")
+    env = fc._created[0].environment
+    assert "OH_SECRET_KEY" not in env
+
+
+def test_sandbox_environment_helper_injects_secret_key() -> None:
+    from openhands.ev2.sandbox.docker_sandbox_service import _sandbox_environment
+
+    env = _sandbox_environment(None, None, secret_key="abc123")
+    assert env["OH_SECRET_KEY"] == "abc123"
+    assert "SESSION_API_KEY" in env
+
+
+def test_sandbox_environment_helper_omits_secret_key_when_none() -> None:
+    from openhands.ev2.sandbox.docker_sandbox_service import _sandbox_environment
+
+    env = _sandbox_environment(None, None, secret_key=None)
+    assert "OH_SECRET_KEY" not in env
+
+
 def test_sync_create_warm_cors_only_no_webhook() -> None:
     service, fc = _make_warm_service()
     service.base_url = "http://localhost:8000"

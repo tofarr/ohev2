@@ -2,9 +2,9 @@
 
 A :class:`SandboxConfig` is the durable intent for a sandbox. The only mutable
 fields are ``enabled``, ``expires_at``, ``sandbox_snapshot_id``,
-``snapshot_on_deactivate``, and ``meta``. The ``session_api_key`` is never
-exposed in the API read (it is encrypted at rest and revealed only to the live
-sandbox service).
+``snapshot_on_deactivate``, and ``meta``. The ``session_api_key`` and
+``secret_key`` are never exposed in the API read (they are encrypted at rest
+and revealed only to the live sandbox service).
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ class SandboxConfigCreate(BaseModel):
 class SandboxConfigUpdate(BaseModel):
     """Partial update of a sandbox config.
 
-    Only the mutable intent fields may be patched; ``sandbox_template_id`` and
-    ``session_api_key`` are immutable after creation.
+    Only the mutable intent fields may be patched; ``sandbox_template_id``,
+    ``session_api_key``, and ``secret_key`` are immutable after creation.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -69,8 +69,8 @@ class SandboxConfigUpdate(BaseModel):
 class SandboxConfigRead(BaseModel):
     """Sandbox config representation returned by the API.
 
-    The ``session_api_key`` is intentionally omitted — it is encrypted at rest
-    and revealed only to the sandbox service.
+    The ``session_api_key`` and ``secret_key`` are intentionally omitted — they
+    are encrypted at rest and revealed only to the sandbox service.
     """
 
     model_config = ConfigDict(from_attributes=True)
