@@ -35,15 +35,19 @@ def upgrade() -> None:
         sa.Column("secret_key", sa.String(length=8192), nullable=True),
     )
     # Backfill each existing row with a freshly minted + encrypted secret key.
-    enc = get_encryption_service()
+    # The encryption service is instantiated lazily so that a fresh database
+    # (no rows to backfill) does not require the full app config / encryption
+    # key env vars to be present at migration time.
     connection = op.get_bind()
     rows = connection.execute(sa.text("SELECT id FROM sandbox_configs")).fetchall()
-    for (config_id,) in rows:
-        ciphertext = enc.encrypt_value(generate_random_id())
-        connection.execute(
-            sa.text("UPDATE sandbox_configs SET secret_key = :c WHERE id = :id"),
-            {"c": ciphertext, "id": config_id},
-        )
+    if rows:
+        enc = get_encryption_service()
+        for (config_id,) in rows:
+            ciphertext = enc.encrypt_value(generate_random_id())
+            connection.execute(
+                sa.text("UPDATE sandbox_configs SET secret_key = :c WHERE id = :id"),
+                {"c": ciphertext, "id": config_id},
+            )
     op.alter_column("sandbox_configs", "secret_key", nullable=False)
     op.alter_column(
         "sandbox_configs",
