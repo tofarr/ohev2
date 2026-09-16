@@ -4,9 +4,7 @@ An :class:`EventCallback` is a polymorphic async callable that reacts to a
 batch of SDK events. It is a Pydantic discriminated-union model (not an ORM
 model and not a governed entity): it has no endpoints, DB table, CRUD schemas,
 router, or service. Callbacks are stored as a JSONB ``event_callbacks`` list on
-:class:`Conversation` (and ``default_callbacks`` on
-:class:`ConversationTemplate`) and round-tripped via
-:class:`EventCallbackListType`.
+:class:`Conversation` and round-tripped via :class:`EventCallbackListType`.
 
 Per-kind filtering is intentionally dropped: there is no ``event_kind`` field.
 Each callback receives a batch of the conversation's events and filters

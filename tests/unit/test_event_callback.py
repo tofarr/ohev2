@@ -1,14 +1,13 @@
 """Unit tests for the embedded event-callback model (issue #159).
 
 Event callbacks are no longer a standalone governed resource: they are a
-polymorphic Pydantic model stored as a JSONB list on ``ConversationRecord`` (and
-``default_callbacks`` on ``ConversationTemplate``). These tests cover:
+polymorphic Pydantic model stored as a JSONB list on ``ConversationRecord``.
+These tests cover:
 
 * the ``EventCallback`` JSON round-trip (serialize/deserialize restores the
   concrete subclass)
 * ``LoggingCallback.__call__`` invoking against a batch of events
 * the ``ConversationRecord.event_callbacks`` typed column (create, read, update)
-* the ``ConversationTemplate.default_callbacks`` typed column (create, read)
 
 Dispatch/invocation against real conversation events is out of scope (the
 future generic job queue owns it).
@@ -27,12 +26,6 @@ from tests.unit._auth_helpers import make_principal, make_sandbox_config
 
 from openhands.ev2.conversation_record.conversation_record_schemas import ConversationRecordCreate
 from openhands.ev2.conversation_record.conversation_record_service import ConversationRecordService
-from openhands.ev2.conversation_template.conversation_template_schemas import (
-    ConversationTemplateCreate,
-)
-from openhands.ev2.conversation_template.conversation_template_service import (
-    ConversationTemplateService,
-)
 from openhands.ev2.event_callback.event_callback_models import (
     EventCallback,
     LoggingCallback,
@@ -182,43 +175,6 @@ class TestConversationEventCallbacks:
 
 
 # --------------------------------------------------------------------------- #
-# ConversationTemplate.default_callbacks typed column
-# --------------------------------------------------------------------------- #
-
-
-class TestConversationTemplateDefaultCallbacks:
-    async def test_create_defaults_to_empty(self, session: AsyncSession, owner: User) -> None:
-        service = ConversationTemplateService(session, ALL)
-        template = await service.create(
-            ConversationTemplateCreate(
-                name="cb-test-template",
-                agent_config={"agent": "CodeActAgent"},
-                conversation_config={"max_iterations": 100},
-            ),
-            creator_id=owner.id,
-        )
-        assert template.default_callbacks == []
-
-    async def test_create_persists_and_round_trips_callbacks(
-        self, session: AsyncSession, owner: User
-    ) -> None:
-        service = ConversationTemplateService(session, ALL)
-        template = await service.create(
-            ConversationTemplateCreate(
-                name="cb-test-template",
-                agent_config={"agent": "CodeActAgent"},
-                conversation_config={"max_iterations": 100},
-                default_callbacks=[LoggingCallback(level="debug")],
-            ),
-            creator_id=owner.id,
-        )
-        assert len(template.default_callbacks) == 1
-        callback = template.default_callbacks[0]
-        assert isinstance(callback, LoggingCallback)
-        assert callback.level == "debug"
-
-
-# --------------------------------------------------------------------------- #
 # HTTP routes — event_callbacks embedded on conversations
 # --------------------------------------------------------------------------- #
 
@@ -264,17 +220,3 @@ class TestConversationEventCallbackRoutes:
         body = resp.json()
         assert len(body["event_callbacks"]) == 1
         assert body["event_callbacks"][0]["level"] == "warning"
-
-    async def test_template_create_with_default_callbacks(self, client: AsyncClient) -> None:
-        payload = {
-            "name": "cb-template-route",
-            "agent_config": {"agent": "CodeActAgent"},
-            "conversation_config": {"max_iterations": 100},
-            "default_callbacks": [_logging_callback_json("debug")],
-        }
-        resp = await client.post("/conversation-templates", json=payload)
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        assert len(body["default_callbacks"]) == 1
-        assert body["default_callbacks"][0]["kind"] == "LoggingCallback"
-        assert body["default_callbacks"][0]["level"] == "debug"
