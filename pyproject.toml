@@ -87,6 +87,10 @@ omit = [
 ]
 
 [tool.coverage.report]
+# precision must be > 0 so pytest-cov's fail-under exit-code check
+# (round(total, precision) < fail_under) doesn't round 93.85% up to 94%,
+# silently passing a --cov-fail-under=94 gate.
+precision = 2
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",
