@@ -102,3 +102,37 @@ def test_quiet_lib_loggers(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for name in ("sqlalchemy.engine.Engine", "httpx", "socketio.server"):
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
+
+
+def test_app_import_does_not_flood_stdout_with_mapper_logs() -> None:
+    """Importing the app configures logging before ORM models load.
+
+    SQLAlchemy emits one INFO line per mapped column when mappers configure
+    (triggered by the router/model imports in ``app.py``). The JSON logging
+    setup must run *before* those imports so the flood does not stream to
+    stdout on every process that imports the app (workers, tests, the
+    server). Verified in a fresh subprocess so in-process import side
+    effects do not mask the result.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import openhands.ev2.app"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # The JSON log handler may be attached to stdout or stderr depending on
+    # the environment; check both.
+    output = result.stdout + result.stderr
+    mapper_flood = sum(
+        1
+        for line in output.splitlines()
+        if "sqlalchemy.orm.mapper.Mapper" in line and '"INFO"' in line
+    )
+    assert mapper_flood == 0, (
+        f"Importing openhands.ev2.app emitted {mapper_flood} SQLAlchemy mapper "
+        "INFO log lines — logging is not configured before ORM imports. "
+        "Ensure the util/logger import precedes model/router imports in app.py."
+    )
