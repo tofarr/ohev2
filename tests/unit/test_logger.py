@@ -9,7 +9,6 @@ import logging
 import pytest
 
 from openhands.ev2.util.logger import (
-    LOG_JSON_FOR_CONSOLE,
     custom_json_serializer,
     format_stack,
     setup_json_logger,
