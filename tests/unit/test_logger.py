@@ -41,17 +41,115 @@ def test_custom_json_serializer_plain() -> None:
     assert parsed == payload
 
 
-def test_custom_json_serializer_console_mode_indents() -> None:
+def test_custom_json_serializer_console_mode_indents(monkeypatch: pytest.MonkeyPatch) -> None:
     """Console mode adds a ``ts`` and indents the output."""
-    payload = {"message": "hi", "severity": "INFO"}
-    out = custom_json_serializer(dict(payload), indent=None) if LOG_JSON_FOR_CONSOLE else None
-    if LOG_JSON_FOR_CONSOLE:
+    import importlib
+
+    from openhands.ev2.util import logger as logger_mod
+
+    monkeypatch.setenv("LOG_JSON_FOR_CONSOLE", "1")
+    importlib.reload(logger_mod)
+    try:
+        payload = {"message": "hi", "severity": "INFO"}
+        out = logger_mod.custom_json_serializer(dict(payload), indent=None)
         assert out is not None
         parsed = json.loads(out)
         assert parsed["message"] == "hi"
         assert "ts" in parsed
-    else:
-        assert out is None
+    finally:
+        monkeypatch.delenv("LOG_JSON_FOR_CONSOLE", raising=False)
+        importlib.reload(logger_mod)
+
+
+def test_custom_json_serializer_console_mode_formats_exc_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Console mode rewrites ``exc_info`` / ``stack_info`` strings via format_stack."""
+    import importlib
+
+    from openhands.ev2.util import logger as logger_mod
+
+    monkeypatch.setenv("LOG_JSON_FOR_CONSOLE", "1")
+    importlib.reload(logger_mod)
+    try:
+        from openhands.ev2.util.logger import CWD_PREFIX
+
+        stack = CWD_PREFIX + 'src/foo.py", line 1, in bar'
+        payload = {"message": "boom", "exc_info": stack, "stack_info": stack}
+        out = logger_mod.custom_json_serializer(dict(payload), indent=None)
+        parsed = json.loads(out)
+        assert isinstance(parsed["exc_info"], list)
+        assert any("File 'src/foo.py'" in line for line in parsed["exc_info"])
+        assert isinstance(parsed["stack_info"], list)
+        assert any("File 'src/foo.py'" in line for line in parsed["stack_info"])
+    finally:
+        monkeypatch.delenv("LOG_JSON_FOR_CONSOLE", raising=False)
+        importlib.reload(logger_mod)
+
+
+def test_custom_json_serializer_console_mode_swaps_newlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Console mode replaces ``\\n`` escapes with real newlines (readable, not valid JSON)."""
+    import importlib
+
+    from openhands.ev2.util import logger as logger_mod
+
+    monkeypatch.setenv("LOG_JSON_FOR_CONSOLE", "1")
+    importlib.reload(logger_mod)
+    try:
+        payload = {"message": "line1\nline2"}
+        out = logger_mod.custom_json_serializer(dict(payload), indent=None)
+        assert "\\n" not in out
+        assert "\n" in out
+    finally:
+        monkeypatch.delenv("LOG_JSON_FOR_CONSOLE", raising=False)
+        importlib.reload(logger_mod)
+
+
+def test_custom_json_serializer_console_mode_non_dict_obj(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Console mode wraps a dict-with-extra-keys in a ``ts`` wrapper (the ``isinstance`` guard).
+
+    A non-dict payload (e.g. a list) is not a mapping, so ``**obj`` raises —
+    the serializer is only called with dict payloads from the JSON formatter.
+    Verify the guard skips exc_info/stack_info processing for dicts that lack them.
+    """
+    import importlib
+
+    from openhands.ev2.util import logger as logger_mod
+
+    monkeypatch.setenv("LOG_JSON_FOR_CONSOLE", "1")
+    importlib.reload(logger_mod)
+    try:
+        # A dict without exc_info/stack_info still gets a ts and is serialized.
+        out = logger_mod.custom_json_serializer({"message": "ok"}, indent=None)
+        parsed = json.loads(out)
+        assert "ts" in parsed
+        assert parsed["message"] == "ok"
+        # exc_info / stack_info keys are absent (isinstance guard skipped them).
+        assert "exc_info" not in parsed
+        assert "stack_info" not in parsed
+    finally:
+        monkeypatch.delenv("LOG_JSON_FOR_CONSOLE", raising=False)
+        importlib.reload(logger_mod)
+
+
+def test_debug_env_var_lowers_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``DEBUG=True`` forces ``LOG_LEVEL`` to ``DEBUG``."""
+    import importlib
+
+    monkeypatch.setenv("DEBUG", "true")
+    from openhands.ev2.util import logger as logger_mod
+
+    importlib.reload(logger_mod)
+    try:
+        assert logger_mod.LOG_LEVEL == "DEBUG"
+        assert logger_mod.DEBUG is True
+    finally:
+        monkeypatch.delenv("DEBUG", raising=False)
+        importlib.reload(logger_mod)
 
 
 def test_setup_json_logger_emits_json_to_stream() -> None:
