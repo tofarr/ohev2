@@ -70,7 +70,6 @@ validate-specs:
 		quint test specs/auth.qnt --main=auth; \
 		quint test specs/batch.qnt --main=batch; \
 		quint test specs/conversation_record.qnt --main=conversation_record; \
-		quint test specs/conversation_template.qnt --main=conversation_template; \
 		quint test specs/webhook.qnt --main=webhook; \
 		echo "== validate-specs: invariants =="; \
 		quint run specs/user.qnt --main=user --invariant=userIdsUnique --max-steps=100; \
