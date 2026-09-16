@@ -85,6 +85,12 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    env:
+      OHE_DB_CONFIG_HOST: localhost
+      OHE_DB_CONFIG_PORT: 5438
+      OHE_DB_CONFIG_DB_NAME: ohev
+      OHE_DB_CONFIG_USERNAME: ohev
+      OHE_DB_CONFIG_PASSWORD: ohev
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -94,12 +100,6 @@ jobs:
         run: docker compose up -d
       - name: Run migrations
         run: uv run alembic upgrade head
-        env:
-          OHE_DB_CONFIG_HOST: localhost
-          OHE_DB_CONFIG_PORT: 5432
-          OHE_DB_CONFIG_DB_NAME: ohev
-          OHE_DB_CONFIG_USERNAME: ohev
-          OHE_DB_CONFIG_PASSWORD: ohev
       - name: Wait for app
         run: |
           for i in $(seq 1 30); do
