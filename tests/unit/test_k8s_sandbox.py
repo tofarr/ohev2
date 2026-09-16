@@ -1037,6 +1037,57 @@ def test_build_env_no_base_url_only_session_key() -> None:
     assert "OH_WEBHOOKS_0_BASE_URL" not in env
 
 
+def test_build_env_injects_secret_key() -> None:
+    """The decrypted secret_key is injected as OH_SECRET_KEY."""
+    service = K8sSandboxService()
+    env = {e.name: e.value for e in service._build_env(_template_spec(), "cfg-1", "sek-1")}
+    assert env["OH_SECRET_KEY"] == "sek-1"
+    assert "SESSION_API_KEY" in env
+
+
+def test_build_env_omits_secret_key_when_none() -> None:
+    service = K8sSandboxService()
+    env = {e.name: e.value for e in service._build_env(_template_spec(), "cfg-1", None)}
+    assert "OH_SECRET_KEY" not in env
+
+
+def test_build_env_template_overrides_secret_key() -> None:
+    """A template-supplied OH_SECRET_KEY is preserved, not overwritten."""
+    from openhands.ev2.sandbox.k8s_sandbox_service import _K8sTemplateSpec
+
+    spec = _K8sTemplateSpec(
+        id="img:1",
+        command=None,
+        initial_env={"OH_SECRET_KEY": "preset-secret"},
+        working_dir="/work",
+        idle_pause_seconds=None,
+        paused_delete_seconds=None,
+        max_age_seconds=None,
+        max_memory=None,
+    )
+    env = {e.name: e.value for e in K8sSandboxService()._build_env(spec, secret_key="injected")}
+    assert env["OH_SECRET_KEY"] == "preset-secret"
+
+
+def test_sync_create_sandbox_injects_secret_key() -> None:
+    """The secret_key on the K8sSandbox model reaches the container env."""
+    fake = _FakeKube()
+    _add_template_cm(fake, "img:1")
+    service = _make_k8s_service(fake)
+    sandbox_id = service._sync_create_sandbox(
+        K8sSandbox(
+            sandbox_template_id="img:1",
+            sandbox_config_id="cfg-1",
+            status=SandboxStatus.INACTIVE,
+            desired_status=SandboxStatus.INACTIVE,
+            secret_key="k8s-secret-123",
+        )
+    )
+    container = fake.apps.deployments[sandbox_id].spec.template.spec.containers[0]
+    env = {e.name: e.value for e in container.env}
+    assert env["OH_SECRET_KEY"] == "k8s-secret-123"
+
+
 def test_sync_create_sandbox_carries_webhook_env() -> None:
     fake = _FakeKube()
     _add_template_cm(fake, "img:1")

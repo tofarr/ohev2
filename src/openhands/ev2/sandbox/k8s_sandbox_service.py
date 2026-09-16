@@ -626,6 +626,7 @@ class K8sSandboxService(SandboxService):
             exposed_ports=self.exposed_ports,
             replicas=1,
             config_id=sandbox.sandbox_config_id,
+            secret_key=sandbox.secret_key,
         )
         return sandbox_id
 
@@ -777,8 +778,11 @@ class K8sSandboxService(SandboxService):
         exposed_ports: list[ExposedPort],
         replicas: int,
         config_id: str | None = None,
+        secret_key: str | None = None,
     ) -> None:
-        container = self._build_container(template, image_pull_policy, exposed_ports, config_id)
+        container = self._build_container(
+            template, image_pull_policy, exposed_ports, config_id, secret_key
+        )
         pod_template = k8s_client.V1PodTemplateSpec(
             metadata=k8s_client.V1ObjectMeta(labels={_LABEL_SANDBOX_ID: sandbox_id}),
             spec=k8s_client.V1PodSpec(
@@ -814,13 +818,14 @@ class K8sSandboxService(SandboxService):
         image_pull_policy: str,
         exposed_ports: list[ExposedPort],
         sandbox_config_id: str | None = None,
+        secret_key: str | None = None,
     ) -> k8s_client.V1Container:
         """Build the sandbox container spec from the template."""
         container_ports = [
             k8s_client.V1ContainerPort(name=p.name, container_port=p.container_port)
             for p in exposed_ports
         ]
-        env = self._build_env(template, sandbox_config_id)
+        env = self._build_env(template, sandbox_config_id, secret_key)
         resources = self._build_resources(template)
         return k8s_client.V1Container(
             name="sandbox",
@@ -839,14 +844,17 @@ class K8sSandboxService(SandboxService):
         self,
         template: _K8sTemplateSpec,
         sandbox_config_id: str | None = None,
+        secret_key: str | None = None,
     ) -> list[k8s_client.V1EnvVar]:
         """Build the container env list, ensuring SESSION_API_KEY is present.
 
         Also injects the webhook callback (``OH_WEBHOOKS_0_BASE_URL``) and CORS
         (``OH_ALLOW_CORS_ORIGINS_0``) environment from ``base_url`` when set;
         the webhook URL carries the sandbox config id in its path so the
-        agent server reports conversation/event updates to this app. Template
-        env always wins over the injected values.
+        agent server reports conversation/event updates to this app. When
+        ``secret_key`` is set (the decrypted ``OH_SECRET_KEY`` from the sandbox
+        config), it is injected so the agent server can encrypt/decrypt stored
+        settings. Template env always wins over the injected values.
         """
         env = [k8s_client.V1EnvVar(name=k, value=v) for k, v in template.initial_env.items()]
         # The agent server does not start with --host 0.0.0.0 by default unless a
@@ -854,6 +862,8 @@ class K8sSandboxService(SandboxService):
         # supply one.
         if not any(e.name == "SESSION_API_KEY" for e in env):
             env.append(k8s_client.V1EnvVar(name="SESSION_API_KEY", value=generate_random_id()))
+        if secret_key is not None and not any(e.name == "OH_SECRET_KEY" for e in env):
+            env.append(k8s_client.V1EnvVar(name="OH_SECRET_KEY", value=secret_key))
         base_url = self.base_url
         if base_url is not None:
             names = {e.name for e in env}

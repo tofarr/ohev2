@@ -31,8 +31,8 @@ class SandboxConfig(Base):
     """Durable intent for a sandbox (DB-backed, provider-neutral).
 
     The sandbox service reads ``enabled``, ``sandbox_snapshot_id``, and the
-    linked template to reconcile the live sandbox. ``session_api_key`` is
-    encrypted at rest (JWE ciphertext, same pattern as
+    linked template to reconcile the live sandbox. ``session_api_key`` and
+    ``secret_key`` are encrypted at rest (JWE ciphertext, same pattern as
     :class:`StoredProviderConnection.api_key`).
 
     ``expires_at`` is derived from the template's
@@ -61,6 +61,13 @@ class SandboxConfig(Base):
     session_api_key: Mapped[str] = mapped_column(
         String(8192),
         comment="Encrypted session API key for the sandbox (JWE ciphertext).",
+    )
+    # Encrypted JWE ciphertext of the OH_SECRET_KEY injected into the sandbox
+    # container; the agent server derives its Fernet Cipher from it. Never
+    # exposed through the API (SandboxConfigRead omits it).
+    secret_key: Mapped[str] = mapped_column(
+        String(8192),
+        comment="Encrypted OH_SECRET_KEY for the sandbox agent server (JWE ciphertext).",
     )
     enabled: Mapped[bool] = mapped_column(
         Boolean,

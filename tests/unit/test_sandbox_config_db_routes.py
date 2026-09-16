@@ -30,6 +30,7 @@ class TestSandboxConfigRoutes:
         config_id = config["id"]
         assert config["enabled"] is True
         assert "session_api_key" not in config
+        assert "secret_key" not in config
 
         got = await client.get(f"/sandbox/sandbox-configs/{config_id}")
         assert got.status_code == 200

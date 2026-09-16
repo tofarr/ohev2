@@ -30,6 +30,7 @@ async def _seed_config(session: AsyncSession, *, username: str) -> tuple[uuid.UU
         creator_id=user.id,
         sandbox_template_id=template.id,
         session_api_key="jwe-ciphertext",
+        secret_key="encrypted-secret-key",
     )
     session.add(config)
     await session.flush()

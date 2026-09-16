@@ -4,8 +4,11 @@ CRUD over :class:`SandboxConfig` (the durable intent for a sandbox). On
 create a regular ``ApiKey`` (``system=True``, named
 ``"Sandbox {id} API Key"``) is minted; its raw ``oh_...`` value is
 encrypted at rest into ``session_api_key`` (JWE ciphertext, same pattern as
-:class:`StoredProviderConnection.api_key`). It is never exposed in the API
-read model — the live sandbox service decrypts it when reconciling.
+:class:`StoredProviderConnection.api_key`). A per-sandbox ``secret_key`` is
+minted and encrypted the same way; it is injected as ``OH_SECRET_KEY`` into
+the container so the agent server can encrypt/decrypt stored settings. Both
+are never exposed in the API read model — the live sandbox service decrypts
+them when reconciling.
 
 The service delegates to the :class:`SandboxService` (the polymorphic
 reconciler) when ``enabled`` changes — the DB row is the source of truth, the
@@ -34,6 +37,7 @@ from openhands.ev2.sandbox.sandbox_config_schemas import (
 )
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
 from openhands.ev2.security.security_models import Action
+from openhands.ev2.util.random_id import generate_random_id
 from openhands.ev2.util.search_filter import ALL, SearchFilter
 
 
@@ -68,7 +72,7 @@ class SandboxConfigService:
         self._enc = encryption_service or get_encryption_service()
 
     def to_read(self, config: SandboxConfig) -> SandboxConfigRead:
-        """Build the API read model (omits ``session_api_key``)."""
+        """Build the API read model (omits ``session_api_key`` and ``secret_key``)."""
         return SandboxConfigRead(
             id=config.id,
             creator_id=config.creator_id,
@@ -97,13 +101,15 @@ class SandboxConfigService:
         *,
         creator_id: uuid.UUID,
     ) -> SandboxConfig:
-        """Create a sandbox config and mint its system session API key.
+        """Create a sandbox config and mint its system session API key + secret key.
 
-        The key is a regular :class:`ApiKey` row (``system=True``, named
-        ``"Sandbox {id} API Key"``); its raw ``oh_...`` value is encrypted
-        into ``session_api_key``. The config id is generated up front so the
-        ApiKey name and the encrypted key are both set before the single
-        flush — no placeholder row / second save.
+        The session API key is a regular :class:`ApiKey` row (``system=True``,
+        named ``"Sandbox {id} API Key"``); its raw ``oh_...`` value is encrypted
+        into ``session_api_key``. The ``secret_key`` is a random
+        :func:`generate_random_id` value encrypted into the ``secret_key``
+        column — the sandbox agent server derives its Fernet Cipher from it. The
+        config id is generated up front so the ApiKey name and both encrypted
+        keys are set before the single flush — no placeholder row / second save.
         """
         template = await self._get_template(payload.sandbox_template_id)
         snapshot_on_deactivate = (
@@ -115,6 +121,7 @@ class SandboxConfigService:
             creator_id=creator_id,
             sandbox_template_id=payload.sandbox_template_id,
             session_api_key="",
+            secret_key="",
             enabled=payload.enabled,
             sandbox_snapshot_id=payload.sandbox_snapshot_id,
             expires_at=payload.expires_at,
@@ -132,10 +139,21 @@ class SandboxConfigService:
             system=True,
         )
         config.session_api_key = self._enc.encrypt_value(raw_key)
+        config.secret_key = self._enc.encrypt_value(generate_random_id())
         self._session.add(config)
         await self._session.flush()
         await self._session.refresh(config)
         return config
+
+    async def get_secret_key(self, config_id: uuid.UUID) -> str:
+        """Return the decrypted ``OH_SECRET_KEY`` for a config.
+
+        Used by the sandbox router to plumb the secret key into the live
+        sandbox container env. Raises :class:`SandboxConfigNotFoundError` when
+        the config does not exist or is out of scope.
+        """
+        config = await self.get(config_id)
+        return self._enc.decrypt_value(config.secret_key)
 
     async def get(self, config_id: uuid.UUID) -> SandboxConfig:
         """Retrieve a config by id, scoped by ``perm_filter``."""

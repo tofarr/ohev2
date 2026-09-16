@@ -244,6 +244,7 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         payload: SandboxCreate,
         *,
         perm_filter: SearchFilter[Sandbox] = ALL,
+        secret_key: str | None = None,
     ) -> Sandbox:
         """Create a sandbox. Raises on out-of-scope payload or provider conflict.
 
@@ -257,8 +258,13 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         backing compute is started. When ``payload.snapshot_id`` is set the
         provider restores that snapshot's workspace into the new sandbox
         before starting it.
+
+        *secret_key* is the decrypted ``OH_SECRET_KEY`` from the sandbox config;
+        the provider injects it into the container env so the agent server can
+        encrypt/decrypt stored settings. It is ``None`` for warm sandboxes.
         """
         sandbox = self._sandbox_from_create(payload)
+        sandbox.secret_key = secret_key
         if not perm_filter.matches(sandbox):
             raise SandboxPermissionScopeError(payload.sandbox_template_id)
         if payload.snapshot_id is None:
@@ -310,23 +316,34 @@ class SandboxService(DiscriminatedUnionMixin, ABC):
         self,
         operations: list[SandboxBatchOp],
         perm_filters: dict[Action, SearchFilter[Sandbox] | None],
+        *,
+        secret_keys: dict[str, str] | None = None,
     ) -> list[Sandbox | None]:
         """Apply a mix of create/delete sandbox operations.
 
         Each operation is authorized against its own action via *perm_filters*;
         an action with a ``None`` filter denies that operation. Returns results
         aligned with *operations* (the sandbox for create, ``None`` for delete).
+
+        *secret_keys* maps a sandbox config id to its decrypted ``OH_SECRET_KEY``
+        for create operations; it is plumbed into each created sandbox's env.
         """
-        return [await self._apply_sandbox_batch_op(op, perm_filters) for op in operations]
+        return [
+            await self._apply_sandbox_batch_op(op, perm_filters, secret_keys=secret_keys)
+            for op in operations
+        ]
 
     async def _apply_sandbox_batch_op(
         self,
         op: SandboxBatchOp,
         perm_filters: dict[Action, SearchFilter[Sandbox] | None],
+        *,
+        secret_keys: dict[str, str] | None = None,
     ) -> Sandbox | None:
         if isinstance(op, SandboxBatchCreate):
             filt = self._require_action(perm_filters, Action.CREATE, "create")
-            return await self.create_sandbox(op.data, perm_filter=filt)
+            key = secret_keys.get(op.data.sandbox_config_id) if secret_keys else None
+            return await self.create_sandbox(op.data, perm_filter=filt, secret_key=key)
         if isinstance(op, SandboxBatchDelete):
             filt = self._require_action(perm_filters, Action.DELETE, "delete")
             await self.delete_sandbox(op.id, perm_filter=filt)
