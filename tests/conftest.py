@@ -44,7 +44,6 @@ from openhands.ev2.config import get_config
 from openhands.ev2.conversation.conversation_models import Conversation  # noqa: F401
 from openhands.ev2.cors.cors_models import AllowedOrigin  # noqa: F401
 from openhands.ev2.event.event_models import Event  # noqa: F401
-from openhands.ev2.event_callback.event_callback_models import EventCallback  # noqa: F401
 from openhands.ev2.feature_flag.feature_flag_models import (  # noqa: F401
     FeatureFlag,
     FeatureFlagRoleAssignment,
@@ -99,7 +98,6 @@ def _build_schema(host: str, port: int, user: str, password: str, dbname: str) -
     import openhands.ev2.conversation_template.conversation_template_models
     import openhands.ev2.cors.cors_models
     import openhands.ev2.event.event_models
-    import openhands.ev2.event_callback.event_callback_models
     import openhands.ev2.feature_flag.feature_flag_models
     import openhands.ev2.group.group_models
     import openhands.ev2.job.job_models

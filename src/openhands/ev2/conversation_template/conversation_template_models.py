@@ -26,7 +26,7 @@ per-invocation and **not** sandbox-specific:
   ``parent_conversation_id``) are intentionally not on the template.
 * ``system_message_suffix`` — optional static suffix; the planning-agent
   prefix and HOST context are applied by the start service, not stored.
-* ``default_callbacks`` — list of :class:`EventCallbackProcessor` specs to
+* ``default_callbacks`` — list of :class:`EventCallback` callables to
   auto-attach to every conversation started from this template.
 
 Ownership is direct via ``creator_id`` (unlike :class:`Conversation`, which
@@ -46,6 +46,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.ev2.db import Base
+from openhands.ev2.event_callback.event_callback_models import (
+    EventCallback,
+    EventCallbackListType,
+)
 
 _TZ = DateTime(timezone=True)
 
@@ -121,10 +125,10 @@ class ConversationTemplate(Base):
         nullable=True,
         comment="Optional static suffix appended by the start service.",
     )
-    default_callbacks: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB,
+    default_callbacks: Mapped[list[EventCallback]] = mapped_column(
+        EventCallbackListType,
         default_factory=list,
-        comment="EventCallbackProcessor specs auto-attached by the start service.",
+        comment="EventCallback callables auto-attached by the start service.",
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,

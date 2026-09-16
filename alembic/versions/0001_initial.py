@@ -476,12 +476,6 @@ def upgrade() -> None:
             comment="Permission policy for event resources; null = deny.",
         ),
         sa.Column(
-            "event_callback_permission",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-            comment="Permission policy for event_callback resources; null = deny.",
-        ),
-        sa.Column(
             "oauth_provider_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
@@ -1521,6 +1515,13 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
+            "event_callbacks",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+            comment="Embedded polymorphic EventCallback callables for this conversation.",
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("clock_timestamp()"),
@@ -1615,7 +1616,7 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
             server_default=sa.text("'[]'::jsonb"),
-            comment="EventCallbackProcessor specs auto-attached by the start service.",
+            comment="EventCallback callables auto-attached by the start service.",
         ),
         sa.Column(
             "created_at",
@@ -1689,77 +1690,6 @@ def upgrade() -> None:
     op.execute("CREATE TABLE events_default PARTITION OF events DEFAULT")
 
     # ------------------------------------------------------------------ #
-    # event_callbacks
-    # ------------------------------------------------------------------ #
-    op.create_table(
-        "event_callbacks",
-        sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("creator_id", sa.Uuid(), nullable=False),
-        sa.Column("event_kind", sa.String(length=255), nullable=False),
-        sa.Column("processor", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("conversation_id", sa.Uuid(), nullable=True),
-        sa.Column("conversation_template_id", sa.Uuid(), nullable=True),
-        sa.Column(
-            "status",
-            sa.String(length=32),
-            nullable=False,
-            server_default=sa.text("'READY'"),
-            comment="Lifecycle/last-result state: READY/SUCCESS/ERROR/SKIPPED/DISABLED.",
-        ),
-        sa.Column("detail", sa.Text(), nullable=True),
-        sa.Column("last_event_id", sa.Uuid(), nullable=True),
-        sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("clock_timestamp()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["conversation_id"],
-            ["conversations.id"],
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["conversation_template_id"],
-            ["conversation_templates.id"],
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["creator_id"],
-            ["users.id"],
-            ondelete="CASCADE",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-        sa.CheckConstraint(
-            "(conversation_id IS NOT NULL) <> (conversation_template_id IS NOT NULL)",
-            name="event_callbacks_exactly_one_link",
-        ),
-        comment="Event callbacks with merged result state (governed CRUD)",
-    )
-    op.create_index(
-        "ix_event_callbacks_creator_id", "event_callbacks", ["creator_id"], unique=False
-    )
-    op.create_index(
-        "ix_event_callbacks_conversation_id",
-        "event_callbacks",
-        ["conversation_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_event_callbacks_conversation_template_id",
-        "event_callbacks",
-        ["conversation_template_id"],
-        unique=False,
-    )
-
-    # ------------------------------------------------------------------ #
     # jobs (range-partitioned parent by created_at; partitions are managed by
     # the background house-cleaning loop — see README 'Job runner'. A DEFAULT
     # partition is created here so inserts never fail before the manager
@@ -1820,10 +1750,7 @@ def downgrade() -> None:
     op.drop_index("ix_jobs_creator_id", table_name="jobs")
     op.drop_index("ix_jobs_created_at", table_name="jobs")
     op.drop_table("jobs")
-    op.drop_index("ix_event_callbacks_conversation_template_id", table_name="event_callbacks")
-    op.drop_index("ix_event_callbacks_conversation_id", table_name="event_callbacks")
-    op.drop_index("ix_event_callbacks_creator_id", table_name="event_callbacks")
-    op.drop_table("event_callbacks")
+
     op.drop_index("ix_events_conversation_id", table_name="events")
     op.drop_table("events")
     op.drop_index("ix_conversation_templates_llm_id", table_name="conversation_templates")
