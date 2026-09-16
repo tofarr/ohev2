@@ -30,9 +30,6 @@ from openhands.ev2.config import get_config
 from openhands.ev2.conversation_record.conversation_record_router import (
     router as conversation_record_router,
 )
-from openhands.ev2.conversation_template.conversation_template_router import (
-    router as conversation_template_router,
-)
 from openhands.ev2.cors.cors_middleware import CorsMiddleware
 from openhands.ev2.cors.cors_router import router as cors_router
 from openhands.ev2.db import get_session_factory
@@ -460,10 +457,6 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "conversation_records",
         "description": "Agent conversation records backed by sandbox configs.",
     },
-    {
-        "name": "conversation-templates",
-        "description": "Reusable conversation launch profiles (admin-governed).",
-    },
     {"name": "cors-origins", "description": "CORS allow-list origins."},
     {
         "name": "secret-providers",
@@ -541,7 +534,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_discovery_router)
     app.include_router(api_key_router)
     app.include_router(conversation_record_router)
-    app.include_router(conversation_template_router)
+
     app.include_router(event_router)
     app.include_router(job_router)
     app.include_router(cors_router)
