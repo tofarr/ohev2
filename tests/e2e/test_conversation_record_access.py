@@ -1,7 +1,7 @@
-"""E2E test: ConversationAccess grants scoped read/search, denies writes.
+"""E2E test: ConversationRecordAccess grants scoped read/search, denies writes.
 
 Seeds the database with the admin user and a regular user (whose seeded
-``user`` role carries ``conversation_permission = ConversationAccess``),
+``user`` role carries ``conversation_record_permission = ConversationRecordAccess``),
 inserts sandbox configs + conversations for each directly in the DB (the
 sandbox provider is not exercised here), then verifies over HTTP that:
 
@@ -24,7 +24,7 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
 from openhands.ev2.role.role_models import UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.sandbox.sandbox_template_models import SandboxTemplate
@@ -81,7 +81,7 @@ async def _make_sandbox_config(session: AsyncSession, creator_id: uuid.UUID) -> 
 
 async def _reset_e2e_artifacts(session: AsyncSession) -> None:
     """Delete rows from prior runs so the test is hermetic across re-runs."""
-    await session.execute(delete(Conversation))
+    await session.execute(delete(ConversationRecord))
     await session.execute(delete(SandboxConfig))
     await session.execute(delete(SandboxTemplate))
     for username in (ADMIN_USERNAME, USER_USERNAME):
@@ -136,14 +136,14 @@ async def test_conversation_access_policy() -> None:
 
         # Admin creates one conversation per sandbox config.
         own_resp = await ac.post(
-            "/conversations",
+            "/conversation_records",
             json=_payload(user_config.id, "user conversation"),
             headers=admin_headers,
         )
         assert own_resp.status_code == 201, own_resp.text
         own = own_resp.json()
         foreign_resp = await ac.post(
-            "/conversations",
+            "/conversation_records",
             json=_payload(admin_config.id, "admin conversation"),
             headers=admin_headers,
         )
@@ -152,35 +152,35 @@ async def test_conversation_access_policy() -> None:
 
         # The regular user sees only the conversation backed by their own
         # sandbox config.
-        list_resp = await ac.get("/conversations", headers=user_headers)
+        list_resp = await ac.get("/conversation_records", headers=user_headers)
         assert list_resp.status_code == 200, list_resp.text
         assert [i["id"] for i in list_resp.json()["items"]] == [own["id"]]
         assert (
-            await ac.get(f"/conversations/{own['id']}", headers=user_headers)
+            await ac.get(f"/conversation_records/{own['id']}", headers=user_headers)
         ).status_code == 200
         # Out-of-scope conversations are invisible (404, not 403).
         assert (
-            await ac.get(f"/conversations/{foreign['id']}", headers=user_headers)
+            await ac.get(f"/conversation_records/{foreign['id']}", headers=user_headers)
         ).status_code == 404
 
         # Writes are denied for the regular user, even on in-scope rows.
         assert (
             await ac.post(
-                "/conversations", json=_payload(user_config.id, "nope"), headers=user_headers
+                "/conversation_records", json=_payload(user_config.id, "nope"), headers=user_headers
             )
         ).status_code == 403
         assert (
             await ac.patch(
-                f"/conversations/{own['id']}", json={"title": "nope"}, headers=user_headers
+                f"/conversation_records/{own['id']}", json={"title": "nope"}, headers=user_headers
             )
         ).status_code == 403
         assert (
-            await ac.delete(f"/conversations/{own['id']}", headers=user_headers)
+            await ac.delete(f"/conversation_records/{own['id']}", headers=user_headers)
         ).status_code == 403
 
         # The admin PATCHes the metric columns (as the ingestion path will).
         patch_resp = await ac.patch(
-            f"/conversations/{own['id']}",
+            f"/conversation_records/{own['id']}",
             json={
                 "accumulated_cost": 0.5,
                 "prompt_tokens": 10,

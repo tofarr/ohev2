@@ -17,10 +17,10 @@ ones) is written to the backing store at a key derivable from the event's own
 identity (``<event_date>/<event_id[:2]>/<event_id>.json``), so there is no
 ``body_uri`` column — the table is identical in every deployment shape.
 
-Ownership is deliberately indirect: like :class:`Conversation`, an event has
+Ownership is deliberately indirect: like :class:`ConversationRecord`, an event has
 no ``creator_id``. Access for non-admin users derives from the parent
-conversation's backing sandbox config's creator (see
-``event_security.EventAccess``); the ``conversation`` relationship is loaded
+conversation_record's backing sandbox config's creator (see
+``event_security.EventAccess``); the ``conversation_record`` relationship is loaded
 eagerly (``selectin``) so the in-memory ownership check needs no lazy load
 (AGENTS.md: asyncio-first, no implicit I/O).
 """
@@ -35,7 +35,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
 from openhands.ev2.db import Base
 
 _TZ = DateTime(timezone=True)
@@ -47,7 +47,7 @@ class Event(Base):
     __tablename__ = "events"
     __table_args__ = {  # noqa: RUF012
         "postgresql_partition_by": "RANGE(timestamp)",
-        "comment": "Conversation event projection, daily-partitioned by timestamp",
+        "comment": "Conversation record event projection, daily-partitioned by timestamp",
     }
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -63,8 +63,8 @@ class Event(Base):
         init=False,
         server_default=func.clock_timestamp(),
     )
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"),
+    conversation_record_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversation_records.id", ondelete="CASCADE"),
         index=True,
     )
     kind: Mapped[str] = mapped_column(
@@ -86,5 +86,5 @@ class Event(Base):
 
     # Loaded eagerly so the in-memory ownership check in
     # EventAccessFilter.matches can resolve the backing sandbox config's
-    # creator without a lazy load (see Conversation.sandbox_config).
-    conversation: Mapped[Conversation] = relationship(init=False, lazy="selectin")
+    # creator without a lazy load (see ConversationRecord.sandbox_config).
+    conversation_record: Mapped[ConversationRecord] = relationship(init=False, lazy="selectin")

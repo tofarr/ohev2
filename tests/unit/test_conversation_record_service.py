@@ -8,21 +8,23 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import make_principal, make_sandbox_config
 
-from openhands.ev2.conversation.conversation_models import Conversation
-from openhands.ev2.conversation.conversation_schemas import (
-    ConversationBatchCreate,
-    ConversationBatchDelete,
-    ConversationBatchUpdate,
-    ConversationCreate,
-    ConversationSearchFilter,
-    ConversationUpdate,
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
+from openhands.ev2.conversation_record.conversation_record_schemas import (
+    ConversationRecordBatchCreate,
+    ConversationRecordBatchDelete,
+    ConversationRecordBatchUpdate,
+    ConversationRecordCreate,
+    ConversationRecordSearchFilter,
+    ConversationRecordUpdate,
 )
-from openhands.ev2.conversation.conversation_security import ConversationAccessFilter
-from openhands.ev2.conversation.conversation_service import (
+from openhands.ev2.conversation_record.conversation_record_security import (
+    ConversationRecordAccessFilter,
+)
+from openhands.ev2.conversation_record.conversation_record_service import (
     BatchPermissionDeniedError,
-    ConversationNotFoundError,
-    ConversationPermissionScopeError,
-    ConversationService,
+    ConversationRecordNotFoundError,
+    ConversationRecordPermissionScopeError,
+    ConversationRecordService,
 )
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 from openhands.ev2.security.security_models import Action
@@ -30,7 +32,7 @@ from openhands.ev2.user.user_models import User
 from openhands.ev2.util.search_filter import ALL, NONE
 
 
-def _create_payload(sandbox_config_id: uuid.UUID, **overrides: object) -> ConversationCreate:
+def _create_payload(sandbox_config_id: uuid.UUID, **overrides: object) -> ConversationRecordCreate:
     data: dict[str, object] = {
         "title": "test conversation",
         "sandbox_config_id": sandbox_config_id,
@@ -41,7 +43,7 @@ def _create_payload(sandbox_config_id: uuid.UUID, **overrides: object) -> Conver
         "trigger": "manual",
     }
     data.update(overrides)
-    return ConversationCreate(**data)  # type: ignore[arg-type]
+    return ConversationRecordCreate(**data)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -55,13 +57,13 @@ async def sandbox_config(session: AsyncSession, owner: User) -> SandboxConfig:
 
 
 @pytest.fixture
-def service(session: AsyncSession) -> ConversationService:
-    return ConversationService(session, ALL)
+def service(session: AsyncSession) -> ConversationRecordService:
+    return ConversationRecordService(session, ALL)
 
 
 class TestCreateConversation:
     async def test_create_defaults_metrics_to_zero(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         conversation = await service.create(_create_payload(sandbox_config.id))
         assert conversation.id is not None
@@ -79,51 +81,51 @@ class TestCreateConversation:
     async def test_create_outside_scope_denied(
         self, session: AsyncSession, sandbox_config: SandboxConfig
     ) -> None:
-        service = ConversationService(session, NONE)
-        with pytest.raises(ConversationPermissionScopeError):
+        service = ConversationRecordService(session, NONE)
+        with pytest.raises(ConversationRecordPermissionScopeError):
             await service.create(_create_payload(sandbox_config.id))
 
     async def test_create_scoped_to_other_user_denied(
         self, session: AsyncSession, owner: User, sandbox_config: SandboxConfig
     ) -> None:
-        # A ConversationAccessFilter keyed on another user cannot match the
+        # A ConversationRecordAccessFilter keyed on another user cannot match the
         # prospective row: its sandbox_config relationship is not loaded yet.
         other = uuid.uuid4()
         assert other != owner.id
-        service = ConversationService(
-            session, ConversationAccessFilter[Conversation](user_id=other)
+        service = ConversationRecordService(
+            session, ConversationRecordAccessFilter[ConversationRecord](user_id=other)
         )
-        with pytest.raises(ConversationPermissionScopeError):
+        with pytest.raises(ConversationRecordPermissionScopeError):
             await service.create(_create_payload(sandbox_config.id))
 
 
 class TestGetConversation:
     async def test_get_existing(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         created = await service.create(_create_payload(sandbox_config.id))
         fetched = await service.get(created.id)
         assert fetched.id == created.id
 
-    async def test_get_missing_raises(self, service: ConversationService) -> None:
-        with pytest.raises(ConversationNotFoundError):
+    async def test_get_missing_raises(self, service: ConversationRecordService) -> None:
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.get(uuid.uuid4())
 
     async def test_get_out_of_scope_raises(
         self, session: AsyncSession, owner: User, sandbox_config: SandboxConfig
     ) -> None:
-        service = ConversationService(session, ALL)
+        service = ConversationRecordService(session, ALL)
         created = await service.create(_create_payload(sandbox_config.id))
-        scoped = ConversationService(
-            session, ConversationAccessFilter[Conversation](user_id=uuid.uuid4())
+        scoped = ConversationRecordService(
+            session, ConversationRecordAccessFilter[ConversationRecord](user_id=uuid.uuid4())
         )
-        with pytest.raises(ConversationNotFoundError):
+        with pytest.raises(ConversationRecordNotFoundError):
             await scoped.get(created.id)
 
 
 class TestGetMany:
     async def test_get_many_positionally_aligned(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         first = await service.create(_create_payload(sandbox_config.id, title="first"))
         second = await service.create(_create_payload(sandbox_config.id, title="second"))
@@ -136,7 +138,7 @@ class TestGetMany:
             second.id,
         ]
 
-    async def test_get_many_empty(self, service: ConversationService) -> None:
+    async def test_get_many_empty(self, service: ConversationRecordService) -> None:
         assert await service.get_many([]) == []
 
 
@@ -144,55 +146,55 @@ class TestSearchConversations:
     async def test_search_scoped_by_perm_filter(
         self, session: AsyncSession, owner: User, sandbox_config: SandboxConfig
     ) -> None:
-        service = ConversationService(session, ALL)
+        service = ConversationRecordService(session, ALL)
         own = await service.create(_create_payload(sandbox_config.id, title="own"))
         other_user = await make_principal(session, email="other@example.com", username="other")
         other_config = await make_sandbox_config(session, creator_id=other_user.id)
         foreign = await service.create(_create_payload(other_config.id, title="foreign"))
 
-        scoped = ConversationService(
-            session, ConversationAccessFilter[Conversation](user_id=owner.id)
+        scoped = ConversationRecordService(
+            session, ConversationRecordAccessFilter[ConversationRecord](user_id=owner.id)
         )
-        found, next_cursor = await scoped.search_conversations()
+        found, next_cursor = await scoped.search_conversation_records()
         assert next_cursor is None
         assert {c.id for c in found} == {own.id}
         assert foreign.id not in {c.id for c in found}
 
-        denied = ConversationService(session, NONE)
-        found, _ = await denied.search_conversations()
+        denied = ConversationRecordService(session, NONE)
+        found, _ = await denied.search_conversation_records()
         assert found == []
 
     async def test_search_filter_narrows_results(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         await service.create(_create_payload(sandbox_config.id, title="alpha"))
         beta = await service.create(
             _create_payload(sandbox_config.id, title="beta", trigger="webhook")
         )
-        found, _ = await service.search_conversations(
-            search_filter=ConversationSearchFilter(title__contains="BET")
+        found, _ = await service.search_conversation_records(
+            search_filter=ConversationRecordSearchFilter(title__contains="BET")
         )
         assert [c.id for c in found] == [beta.id]
-        found, _ = await service.search_conversations(
-            search_filter=ConversationSearchFilter(trigger__eq="webhook")
+        found, _ = await service.search_conversation_records(
+            search_filter=ConversationRecordSearchFilter(trigger__eq="webhook")
         )
         assert [c.id for c in found] == [beta.id]
-        found, _ = await service.search_conversations(
-            search_filter=ConversationSearchFilter(sandbox_config_id__eq=uuid.uuid4())
+        found, _ = await service.search_conversation_records(
+            search_filter=ConversationRecordSearchFilter(sandbox_config_id__eq=uuid.uuid4())
         )
         assert found == []
 
     async def test_search_paginates_with_cursor(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         created = [
             await service.create(_create_payload(sandbox_config.id, title=f"c{i}"))
             for i in range(3)
         ]
-        page1, cursor = await service.search_conversations(limit=2)
+        page1, cursor = await service.search_conversation_records(limit=2)
         assert cursor is not None
         assert len(page1) == 2
-        page2, cursor2 = await service.search_conversations(cursor=cursor, limit=2)
+        page2, cursor2 = await service.search_conversation_records(cursor=cursor, limit=2)
         assert cursor2 is None
         assert len(page2) == 1
         # Pages are disjoint and together cover every row.
@@ -201,12 +203,12 @@ class TestSearchConversations:
 
 class TestUpdateConversation:
     async def test_update_metrics_and_fields(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         created = await service.create(_create_payload(sandbox_config.id))
         updated = await service.update(
             created.id,
-            ConversationUpdate(
+            ConversationRecordUpdate(
                 title="renamed",
                 accumulated_cost=1.25,
                 prompt_tokens=100,
@@ -223,52 +225,54 @@ class TestUpdateConversation:
         assert updated.trigger == "manual"
         assert updated.sandbox_config_id == sandbox_config.id
 
-    async def test_update_missing_raises(self, service: ConversationService) -> None:
-        with pytest.raises(ConversationNotFoundError):
-            await service.update(uuid.uuid4(), ConversationUpdate(title="x"))
+    async def test_update_missing_raises(self, service: ConversationRecordService) -> None:
+        with pytest.raises(ConversationRecordNotFoundError):
+            await service.update(uuid.uuid4(), ConversationRecordUpdate(title="x"))
 
     async def test_update_rejects_negative_metrics(self) -> None:
         with pytest.raises(ValueError):
-            ConversationUpdate(prompt_tokens=-1)
+            ConversationRecordUpdate(prompt_tokens=-1)
 
 
 class TestConversationUpdateSchema:
     def test_title_none_passthrough(self) -> None:
-        assert ConversationUpdate(title=None).title is None
+        assert ConversationRecordUpdate(title=None).title is None
 
     def test_title_blank_rejected(self) -> None:
         with pytest.raises(ValueError):
-            ConversationUpdate(title="   ")
+            ConversationRecordUpdate(title="   ")
 
     def test_title_stripped(self) -> None:
-        assert ConversationUpdate(title="  x  ").title == "x"
+        assert ConversationRecordUpdate(title="  x  ").title == "x"
 
 
 class TestDeleteConversation:
     async def test_delete(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         created = await service.create(_create_payload(sandbox_config.id))
         await service.delete(created.id)
-        with pytest.raises(ConversationNotFoundError):
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.get(created.id)
 
-    async def test_delete_missing_raises(self, service: ConversationService) -> None:
-        with pytest.raises(ConversationNotFoundError):
+    async def test_delete_missing_raises(self, service: ConversationRecordService) -> None:
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.delete(uuid.uuid4())
 
 
 class TestBatch:
     async def test_apply_batch_mixed(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         existing = await service.create(_create_payload(sandbox_config.id, title="existing"))
         doomed = await service.create(_create_payload(sandbox_config.id, title="doomed"))
         results = await service.apply_batch(
             [
-                ConversationBatchCreate(data=_create_payload(sandbox_config.id, title="new")),
-                ConversationBatchUpdate(id=existing.id, data=ConversationUpdate(title="renamed")),
-                ConversationBatchDelete(id=doomed.id),
+                ConversationRecordBatchCreate(data=_create_payload(sandbox_config.id, title="new")),
+                ConversationRecordBatchUpdate(
+                    id=existing.id, data=ConversationRecordUpdate(title="renamed")
+                ),
+                ConversationRecordBatchDelete(id=doomed.id),
             ],
             {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: ALL},
         )
@@ -276,50 +280,60 @@ class TestBatch:
         assert results[0] is not None and results[0].title == "new"
         assert results[1] is not None and results[1].title == "renamed"
         assert results[2] is None
-        with pytest.raises(ConversationNotFoundError):
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.get(doomed.id)
 
     async def test_apply_batch_denies_ungranted_action(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         # A None filter for the operation's action denies the whole batch.
         with pytest.raises(BatchPermissionDeniedError):
             await service.apply_batch(
-                [ConversationBatchCreate(data=_create_payload(sandbox_config.id))],
+                [ConversationRecordBatchCreate(data=_create_payload(sandbox_config.id))],
                 {Action.CREATE: None, Action.UPDATE: None, Action.DELETE: None},
             )
 
     async def test_apply_batch_denies_missing_action_grant(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         with pytest.raises(BatchPermissionDeniedError):
             await service.apply_batch(
-                [ConversationBatchDelete(id=uuid.uuid4())],
+                [ConversationRecordBatchDelete(id=uuid.uuid4())],
                 {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: None},
             )
 
     async def test_apply_batch_update_denied(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
         with pytest.raises(BatchPermissionDeniedError):
             await service.apply_batch(
-                [ConversationBatchUpdate(id=uuid.uuid4(), data=ConversationUpdate(title="x"))],
+                [
+                    ConversationRecordBatchUpdate(
+                        id=uuid.uuid4(), data=ConversationRecordUpdate(title="x")
+                    )
+                ],
                 {Action.CREATE: ALL, Action.UPDATE: None, Action.DELETE: ALL},
             )
 
     async def test_apply_batch_create_outside_scope(
-        self, service: ConversationService, sandbox_config: SandboxConfig
+        self, service: ConversationRecordService, sandbox_config: SandboxConfig
     ) -> None:
-        with pytest.raises(ConversationPermissionScopeError):
+        with pytest.raises(ConversationRecordPermissionScopeError):
             await service.apply_batch(
-                [ConversationBatchCreate(data=_create_payload(sandbox_config.id))],
+                [ConversationRecordBatchCreate(data=_create_payload(sandbox_config.id))],
                 {Action.CREATE: NONE, Action.UPDATE: ALL, Action.DELETE: ALL},
             )
 
-    async def test_apply_batch_update_missing_raises(self, service: ConversationService) -> None:
-        with pytest.raises(ConversationNotFoundError):
+    async def test_apply_batch_update_missing_raises(
+        self, service: ConversationRecordService
+    ) -> None:
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.apply_batch(
-                [ConversationBatchUpdate(id=uuid.uuid4(), data=ConversationUpdate(title="x"))],
+                [
+                    ConversationRecordBatchUpdate(
+                        id=uuid.uuid4(), data=ConversationRecordUpdate(title="x")
+                    )
+                ],
                 {Action.CREATE: ALL, Action.UPDATE: ALL, Action.DELETE: ALL},
             )
 
@@ -328,14 +342,15 @@ class TestCount:
     async def test_count_scoped(
         self, session: AsyncSession, owner: User, sandbox_config: SandboxConfig
     ) -> None:
-        service = ConversationService(session, ALL)
+        service = ConversationRecordService(session, ALL)
         assert await service.count() == 0
         await service.create(_create_payload(sandbox_config.id))
         assert await service.count() == 1
         assert (
-            await service.count(search_filter=ConversationSearchFilter(title__contains="zzz")) == 0
+            await service.count(search_filter=ConversationRecordSearchFilter(title__contains="zzz"))
+            == 0
         )
-        scoped = ConversationService(
-            session, ConversationAccessFilter[Conversation](user_id=uuid.uuid4())
+        scoped = ConversationRecordService(
+            session, ConversationRecordAccessFilter[ConversationRecord](user_id=uuid.uuid4())
         )
         assert await scoped.count() == 0

@@ -20,7 +20,7 @@ from openhands.ev2.util.search_filter import BaseSearchFilter
 
 
 class EventCreate(BaseModel):
-    """Payload to create an event under a conversation."""
+    """Payload to create an event under a conversation_record."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -42,14 +42,14 @@ class EventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    conversation_id: uuid.UUID
+    conversation_record_id: uuid.UUID
     kind: str
     timestamp: datetime
     body: dict[str, Any]
     size_bytes: int
 
 
-# Batch write: POST /conversations/{id}/events/batch applies creates
+# Batch write: POST /conversation_records/{id}/events/batch applies creates
 # atomically (AGENTS.md §3). Events are immutable, so the only op is
 # create — no update/delete ops exist.
 
@@ -62,7 +62,7 @@ class EventBatchCreate(BaseModel):
 
 
 class EventBatchWriteRequest(BaseModel):
-    """Request body for ``POST /conversations/{id}/events/batch``."""
+    """Request body for ``POST /conversation_records/{id}/events/batch``."""
 
     operations: list[EventBatchCreate] = Field(
         min_length=1,
@@ -72,7 +72,7 @@ class EventBatchWriteRequest(BaseModel):
 
 
 class EventSearchFilter(BaseSearchFilter[Event]):
-    """Optional filter clauses for ``GET /conversations/{id}/events``.
+    """Optional filter clauses for ``GET /conversation_records/{id}/events``.
 
     Field names follow the ``<attr>__<op>`` convention so the base class
     derives both the in-memory ``matches`` predicate and the SQL
@@ -93,7 +93,7 @@ class EventSearchFilter(BaseSearchFilter[Event]):
 
 
 class EventSearchResult(BaseModel):
-    """Paginated collection of events for one conversation."""
+    """Paginated collection of events for one conversation_record."""
 
     items: list[EventRead]
     next_cursor: str | None = Field(

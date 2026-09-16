@@ -5,7 +5,7 @@
 // event's full body at a derivable key. Invariants checked here:
 //
 //   - event ids are unique, and every event is backed by an existing
-//     conversation (FK → conversations)
+//     conversation_record (FK → conversation_records)
 //   - the body cap rule: serialized payloads of at most `bodyCap` bytes are
 //     stored inline; larger ones become a truncation stub with
 //     `_truncated = true` and a preview; `sizeBytes` always records the
@@ -17,18 +17,18 @@
 //     date prefix in one aligned sweep (single rm/delete-prefix)
 //   - the backfill job (store → Postgres) restores rows for stored
 //     envelopes missing from the table, with their stored id/timestamp
-//   - a non-admin user may read/search events only on conversations backed
+//   - a non-admin user may read/search events only on conversation_records backed
 //     by sandbox configs they created (EventAccess); writes are denied to
 //     them. Admin bypasses the scope (Permitted).
 //
-// Companion to conversation.qnt (parent entity) and rbac.qnt
+// Companion to conversation_record.qnt (parent entity) and rbac.qnt
 // (event_permission column on Role).
 
 module event {
   // Only the fields the access policy/body-cap rule depends on are modeled.
   type Event = {
     id: str,
-    conversationId: str,
+    conversationRecordId: str,
     kind: str,
     timestamp: int,   // epoch day (partition grain)
     sizeBytes: int,
@@ -36,7 +36,7 @@ module event {
     bodyPreview: str,
   }
 
-  type Conversation = {
+  type ConversationRecord = {
     id: str,
     sandboxConfigId: str,
   }
@@ -50,14 +50,14 @@ module event {
   val bodyCap: int = 16
 
   var events: Set[Event]
-  var conversations: Set[Conversation]
+  var conversation_records: Set[ConversationRecord]
   var sandboxConfigs: Set[SandboxConfig]
   // The backing store as a set of event ids whose full body it holds.
   var storedBodies: Set[str]
 
   action init = all {
     events' = Set(),
-    conversations' = Set(),
+    conversation_records' = Set(),
     sandboxConfigs' = Set(),
     storedBodies' = Set(),
   }
@@ -66,9 +66,9 @@ module event {
 
   // Helpers
 
-  // Every event is backed by an existing conversation.
-  def hasBackingConversation(e: Event): bool =
-    conversations.exists(c => c.id == e.conversationId)
+  // Every event is backed by an existing conversation_record.
+  def hasBackingConversationRecord(e: Event): bool =
+    conversation_records.exists(c => c.id == e.conversationRecordId)
 
   // Payloads of at most bodyCap bytes are stored inline; over-cap becomes a
   // stub. sizeBytes always records the original serialized size.
@@ -83,11 +83,11 @@ module event {
   def kindNonEmpty(e: Event): bool =
     e.kind != ""
 
-  // EventAccess scope: read/search iff the conversation is backed by a
+  // EventAccess scope: read/search iff the conversation_record is backed by a
   // sandbox config the principal created; admin bypasses.
   pure def canRead(e: Event, userId: str, isAdmin: bool,
-                   convs: Set[Conversation], cfgs: Set[SandboxConfig]): bool =
-    isAdmin or convs.filter(c => c.id == e.conversationId).exists(c =>
+                   convs: Set[ConversationRecord], cfgs: Set[SandboxConfig]): bool =
+    isAdmin or convs.filter(c => c.id == e.conversationRecordId).exists(c =>
       cfgs.exists(sc => sc.id == c.sandboxConfigId and sc.creatorId == userId))
 
   // The /body endpoint: not-truncated serves the row, truncated hits the
@@ -99,9 +99,9 @@ module event {
 
   // Actions
 
-  action createConversation(c: Conversation): bool = all {
-    not(conversations.exists(x => x.id == c.id)),
-    conversations' = conversations.union(Set(c)),
+  action createConversationRecord(c: ConversationRecord): bool = all {
+    not(conversation_records.exists(x => x.id == c.id)),
+    conversation_records' = conversation_records.union(Set(c)),
     events' = events,
     sandboxConfigs' = sandboxConfigs,
     storedBodies' = storedBodies,
@@ -112,7 +112,7 @@ module event {
     sc.creatorId != "",
     sandboxConfigs' = sandboxConfigs.union(Set(sc)),
     events' = events,
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     storedBodies' = storedBodies,
   }
 
@@ -120,13 +120,13 @@ module event {
   // the full body of every event (rebuild property).
   action create(e: Event): bool = all {
     not(events.exists(x => x.id == e.id)),
-    hasBackingConversation(e),
+    hasBackingConversationRecord(e),
     kindNonEmpty(e),
     capRule(e),
     stubSelfDescribing(e),
     events' = events.union(Set(e)),
     storedBodies' = storedBodies.union(Set(e.id)),
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     sandboxConfigs' = sandboxConfigs,
   }
 
@@ -137,20 +137,20 @@ module event {
     all {
       events' = events.exclude(dropped),
       storedBodies' = storedBodies.exclude(dropped.map(e => e.id)),
-      conversations' = conversations,
+      conversation_records' = conversation_records,
       sandboxConfigs' = sandboxConfigs,
     }
   }
 
-  // Deleting a conversation cascade-removes its events and their stored
+  // Deleting a conversation_record cascade-removes its events and their stored
   // bodies (FK ON DELETE CASCADE; bodies orphaned only if the row cascade
   // ran — modeled as the aligned cleanup).
-  action deleteConversation(id: str): bool = {
-    val gone = events.filter(e => e.conversationId == id)
+  action deleteConversationRecord(id: str): bool = {
+    val gone = events.filter(e => e.conversationRecordId == id)
     all {
       events' = events.exclude(gone),
       storedBodies' = storedBodies.exclude(gone.map(e => e.id)),
-      conversations' = conversations.filter(c => c.id != id),
+      conversation_records' = conversation_records.filter(c => c.id != id),
       sandboxConfigs' = sandboxConfigs,
     }
   }
@@ -160,19 +160,19 @@ module event {
   action backfill(e: Event): bool = all {
     storedBodies.contains(e.id),
     not(events.exists(x => x.id == e.id)),
-    hasBackingConversation(e),
+    hasBackingConversationRecord(e),
     capRule(e),
     stubSelfDescribing(e),
     kindNonEmpty(e),
     events' = events.union(Set(e)),
     storedBodies' = storedBodies,
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     sandboxConfigs' = sandboxConfigs,
   }
 
   action step: bool = all {
     events' = events,
-    conversations' = conversations,
+    conversation_records' = conversation_records,
     sandboxConfigs' = sandboxConfigs,
     storedBodies' = storedBodies,
   }
@@ -185,9 +185,9 @@ module event {
   val idsUnique: bool =
     events.forall(e1 => events.forall(e2 => e1.id == e2.id implies e1 == e2))
 
-  // every event is backed by an existing conversation
-  val allBackedByConversation: bool =
-    events.forall(e => hasBackingConversation(e))
+  // every event is backed by an existing conversation_record
+  val allBackedByConversationRecord: bool =
+    events.forall(e => hasBackingConversationRecord(e))
 
   // the body-cap rule holds for every stored row
   val allCapRule: bool =
@@ -213,9 +213,9 @@ module event {
   val readScopeSound: bool =
     events.forall(e =>
       mentionedUsers(sandboxConfigs).forall(u =>
-        canRead(e, u, false, conversations, sandboxConfigs) implies
-          conversations.exists(c =>
-            c.id == e.conversationId and
+        canRead(e, u, false, conversation_records, sandboxConfigs) implies
+          conversation_records.exists(c =>
+            c.id == e.conversationRecordId and
               sandboxConfigs.exists(sc =>
                 sc.id == c.sandboxConfigId and sc.creatorId == u))))
 
@@ -224,47 +224,47 @@ module event {
   // Tests
 
   val _cfg1: SandboxConfig = { id: "sc1", creatorId: "u1" }
-  val _conv1: Conversation = { id: "c1", sandboxConfigId: "sc1" }
+  val _conv1: ConversationRecord = { id: "c1", sandboxConfigId: "sc1" }
   val _evInline: Event = {
-    id: "e1", conversationId: "c1", kind: "message", timestamp: 0,
+    id: "e1", conversationRecordId: "c1", kind: "message", timestamp: 0,
     sizeBytes: 12, truncated: false, bodyPreview: "",
   }
   val _evStub: Event = {
-    id: "e2", conversationId: "c1", kind: "observation", timestamp: 0,
+    id: "e2", conversationRecordId: "c1", kind: "observation", timestamp: 0,
     truncated: true, bodyPreview: "<first-4k", sizeBytes: 2000000,
   }
 
   run createInlineEvent = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evInline))
       .then(all {
         assert(events.exists(e => e.id == "e1" and e.truncated == false)),
         assert(storedBodies.contains("e1")),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
   run createOverCapBecomesStub = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evStub))
       .then(all {
         assert(events.exists(e => e.id == "e2" and e.truncated)),
         assert(storedBodies.contains("e2")),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
-  run cannotCreateWithoutConversation = {
+  run cannotCreateWithoutConversationRecord = {
     init.then(create(_evInline)).fail()
   }
 
   run cannotCreateTwice = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evInline))
       .then(create({ ..._evInline, kind: "other" }))
       .fail()
@@ -272,76 +272,76 @@ module event {
 
   run cannotCreateMixed = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create({ ..._evInline, truncated: true }))
       .fail()
   }
 
   run partitionDropClearsStorePrefix = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evStub))
       .then(dropPartition(0))
       .then(all {
         assert(not(events.exists(e => e.id == "e2"))),
         assert(not(storedBodies.contains("e2"))),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
   run conversationDeleteCascades = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evStub))
-      .then(deleteConversation("c1"))
+      .then(deleteConversationRecord("c1"))
       .then(all {
         assert(not(events.exists(e => e.id == "e2"))),
         assert(not(storedBodies.contains("e2"))),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
   run backfillRestoresMissingRow = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evStub))
       .then(dropPartition(0))
       // simulated Postgres-down: row gone but the store envelope survived
       // the mock; backfill restores it.
       .then(all {
         storedBodies' = storedBodies.union(Set("e2")),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs,
       })
       .then(backfill({ ..._evStub, truncated: true }))
       .then(all {
         assert(events.exists(e => e.id == "e2")),
-        events' = events, conversations' = conversations,
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
   run ownerCanReadStrangerCannot = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evInline))
       .then(all {
-        assert(canRead(_evInline, "u1", false, conversations, sandboxConfigs)),
-        assert(not(canRead(_evInline, "stranger", false, conversations, sandboxConfigs))),
-        events' = events, conversations' = conversations,
+        assert(canRead(_evInline, "u1", false, conversation_records, sandboxConfigs)),
+        assert(not(canRead(_evInline, "stranger", false, conversation_records, sandboxConfigs))),
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }
 
   run adminBypassesScope = {
     init.then(createSandboxConfig(_cfg1))
-      .then(createConversation(_conv1))
+      .then(createConversationRecord(_conv1))
       .then(create(_evInline))
       .then(all {
-        assert(canRead(_evInline, "stranger", true, conversations, sandboxConfigs)),
-        events' = events, conversations' = conversations,
+        assert(canRead(_evInline, "stranger", true, conversation_records, sandboxConfigs)),
+        events' = events, conversation_records' = conversation_records,
         sandboxConfigs' = sandboxConfigs, storedBodies' = storedBodies,
       })
   }

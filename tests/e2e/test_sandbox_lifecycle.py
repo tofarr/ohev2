@@ -7,7 +7,7 @@ sandbox lifecycle over HTTP against the real Docker backend:
 1. Create a sandbox template (agent-server image).
 2. Create a sandbox config + live sandbox from that template.
 3. Wait for the sandbox to become ``active`` and probe the agent-server
-   ``/api/conversations/search`` endpoint inside the container.
+   ``/api/conversation_records/search`` endpoint inside the container.
 4. Capture a workspace snapshot from the live sandbox.
 5. Delete the sandbox.
 6. Create a new sandbox from the snapshot (``snapshot_id`` on ``SandboxCreate``).
@@ -273,7 +273,7 @@ async def _probe_conversations(
     for _ in range(_PROBE_RETRIES):
         try:
             conv_resp = await client.get(
-                f"{agent_url}/api/conversations/search",
+                f"{agent_url}/api/conversation_records/search",
                 headers={"X-Session-API-Key": session_api_key},
             )
             if conv_resp.status_code == 200:

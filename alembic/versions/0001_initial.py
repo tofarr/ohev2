@@ -37,8 +37,8 @@ Tables:
 * ``sandbox_configs``        — durable sandbox intent (DB-backed source of truth).
 * ``sandbox_snapshots``      — DB-indexed sandbox workspace snapshots (tarball artifacts).
 * ``sandbox_usage``          — per-poll per-sandbox-config usage snapshots (daily-partitioned, cpu/disk nullable).
-* ``conversations``          — agent conversations backed by sandbox configs.
-* ``events``                 — conversation event projection (daily-partitioned; no body_uri column).
+* ``conversation_records``   — agent conversation records backed by sandbox configs.
+* ``events``                 — conversation_record event projection (daily-partitioned; no body_uri column).
 """
 
 from __future__ import annotations
@@ -458,10 +458,10 @@ def upgrade() -> None:
             comment="Permission policy for group_user resources; null = deny.",
         ),
         sa.Column(
-            "conversation_permission",
+            "conversation_record_permission",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=True,
-            comment="Permission policy for conversation resources; null = deny.",
+            comment="Permission policy for conversation_record resources; null = deny.",
         ),
         sa.Column(
             "conversation_template_permission",
@@ -1477,10 +1477,10 @@ def upgrade() -> None:
     op.execute("CREATE TABLE sandbox_usage_default PARTITION OF sandbox_usage DEFAULT")
 
     # ------------------------------------------------------------------ #
-    # conversations
+    # conversation_records
     # ------------------------------------------------------------------ #
     op.create_table(
-        "conversations",
+        "conversation_records",
         sa.Column("id", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column("title", sa.Text(), nullable=False),
         sa.Column("sandbox_config_id", sa.Uuid(), nullable=False),
@@ -1519,7 +1519,7 @@ def upgrade() -> None:
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
             server_default=sa.text("'[]'::jsonb"),
-            comment="Embedded polymorphic EventCallback callables for this conversation.",
+            comment="Embedded polymorphic EventCallback callables for this conversation_record.",
         ),
         sa.Column(
             "created_at",
@@ -1537,14 +1537,14 @@ def upgrade() -> None:
             ["sandbox_config_id"],
             ["sandbox_configs.id"],
             ondelete="CASCADE",
-            name="fk_conversations_sandbox_config_id_sandbox_configs",
+            name="fk_conversation_records_sandbox_config_id_sandbox_configs",
         ),
         sa.PrimaryKeyConstraint("id"),
-        comment="Agent conversations backed by sandbox configs",
+        comment="Agent conversation records backed by sandbox configs",
     )
     op.create_index(
-        "ix_conversations_sandbox_config_id",
-        "conversations",
+        "ix_conversation_records_sandbox_config_id",
+        "conversation_records",
         ["sandbox_config_id"],
         unique=False,
     )
@@ -1672,21 +1672,23 @@ def upgrade() -> None:
             server_default=sa.text("clock_timestamp()"),
             nullable=False,
         ),
-        sa.Column("conversation_id", sa.Uuid(), nullable=False),
+        sa.Column("conversation_record_id", sa.Uuid(), nullable=False),
         sa.Column("kind", sa.Text(), nullable=False),
         sa.Column("body", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("size_bytes", sa.Integer(), nullable=False),
         sa.PrimaryKeyConstraint("id", "timestamp"),
         sa.ForeignKeyConstraint(
-            ["conversation_id"],
-            ["conversations.id"],
+            ["conversation_record_id"],
+            ["conversation_records.id"],
             ondelete="CASCADE",
-            name="fk_events_conversation_id_conversations",
+            name="fk_events_conversation_record_id_conversation_records",
         ),
-        comment="Conversation event projection, daily-partitioned by timestamp",
+        comment="Conversation record event projection, daily-partitioned by timestamp",
         postgresql_partition_by="RANGE(timestamp)",
     )
-    op.create_index("ix_events_conversation_id", "events", ["conversation_id"], unique=False)
+    op.create_index(
+        "ix_events_conversation_record_id", "events", ["conversation_record_id"], unique=False
+    )
     op.execute("CREATE TABLE events_default PARTITION OF events DEFAULT")
 
     # ------------------------------------------------------------------ #
@@ -1751,13 +1753,13 @@ def downgrade() -> None:
     op.drop_index("ix_jobs_created_at", table_name="jobs")
     op.drop_table("jobs")
 
-    op.drop_index("ix_events_conversation_id", table_name="events")
+    op.drop_index("ix_events_conversation_record_id", table_name="events")
     op.drop_table("events")
     op.drop_index("ix_conversation_templates_llm_id", table_name="conversation_templates")
     op.drop_index("ix_conversation_templates_creator_id", table_name="conversation_templates")
     op.drop_table("conversation_templates")
-    op.drop_index("ix_conversations_sandbox_config_id", table_name="conversations")
-    op.drop_table("conversations")
+    op.drop_index("ix_conversation_records_sandbox_config_id", table_name="conversation_records")
+    op.drop_table("conversation_records")
     op.drop_index("ix_sandbox_usage_sandbox_config_id", table_name="sandbox_usage")
     op.drop_index("ix_sandbox_usage_created_at", table_name="sandbox_usage")
     op.drop_table("sandbox_usage")

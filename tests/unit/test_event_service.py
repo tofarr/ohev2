@@ -12,14 +12,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import make_principal, make_sandbox_config
 
-from openhands.ev2.conversation.conversation_models import Conversation
-from openhands.ev2.conversation.conversation_schemas import ConversationCreate
-from openhands.ev2.conversation.conversation_service import ConversationService
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
+from openhands.ev2.conversation_record.conversation_record_schemas import ConversationRecordCreate
+from openhands.ev2.conversation_record.conversation_record_service import ConversationRecordService
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.event.event_schemas import EventCreate, EventSearchFilter
 from openhands.ev2.event.event_security import EventAccessFilter
 from openhands.ev2.event.event_service import (
-    ConversationNotFoundError,
+    ConversationRecordNotFoundError,
     EventBodyNotFoundError,
     EventNotFoundError,
     EventPermissionScopeError,
@@ -69,10 +69,10 @@ async def sandbox_config(session: AsyncSession, owner: User) -> SandboxConfig:
 
 
 @pytest.fixture
-async def conversation(session: AsyncSession, sandbox_config: SandboxConfig) -> Conversation:
+async def conversation(session: AsyncSession, sandbox_config: SandboxConfig) -> ConversationRecord:
     """Create a real parent conversation for the event fixture wiring."""
-    convo_service = ConversationService(session, ALL)
-    payload = ConversationCreate(
+    convo_service = ConversationRecordService(session, ALL)
+    payload = ConversationRecordCreate(
         title="parent",
         sandbox_config_id=sandbox_config.id,
         llm_model="claude-sonnet-4",
@@ -86,7 +86,7 @@ async def conversation(session: AsyncSession, sandbox_config: SandboxConfig) -> 
 
 class TestCreateEvent:
     async def test_create_inline_body_sized(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, body_cap_bytes=_CAP)
         event = await service.create(conversation.id, _payload())
@@ -98,7 +98,7 @@ class TestCreateEvent:
         assert event.timestamp is not None
 
     async def test_create_over_cap_stores_stub(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, body_cap_bytes=_CAP)
         big = {"text": "x" * (_CAP * 2)}
@@ -111,11 +111,11 @@ class TestCreateEvent:
 
     async def test_create_unknown_conversation_raises(self, session: AsyncSession) -> None:
         service = EventService(session, ALL)
-        with pytest.raises(ConversationNotFoundError):
+        with pytest.raises(ConversationRecordNotFoundError):
             await service.create(uuid.uuid4(), _payload())
 
     async def test_create_outside_scope_denied(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         # EventAccessFilter keyed on another user cannot match: the prospective
         # row's conversation relationship is empty, so the in-memory check
@@ -125,14 +125,14 @@ class TestCreateEvent:
             await scoped.create(conversation.id, _payload())
 
     async def test_store_failure_is_best_effort(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, store=_BrokenStore())
         event = await service.create(conversation.id, _payload())
         assert event.id is not None
 
     async def test_every_event_body_lands_in_store(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         store = FilesystemEventBodyStore(str(tmp_path))
         service = EventService(session, ALL, store=store, body_cap_bytes=_CAP)
@@ -141,27 +141,29 @@ class TestCreateEvent:
         assert envelope_bytes is not None
         envelope = json.loads(envelope_bytes)
         assert envelope["id"] == str(event.id)
-        assert envelope["conversation_id"] == str(event.conversation_id)
+        assert envelope["conversation_record_id"] == str(event.conversation_record_id)
         assert envelope["kind"] == event.kind
         assert envelope["body"] == event.body
 
 
 class TestGetEvent:
-    async def test_get_existing(self, session: AsyncSession, conversation: Conversation) -> None:
+    async def test_get_existing(
+        self, session: AsyncSession, conversation: ConversationRecord
+    ) -> None:
         service = EventService(session, ALL)
         created = await service.create(conversation.id, _payload())
         fetched = await service.get(conversation.id, created.id)
         assert fetched.id == created.id
 
     async def test_get_missing_raises(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         with pytest.raises(EventNotFoundError):
             await service.get(conversation.id, uuid.uuid4())
 
     async def test_get_out_of_scope_raises(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         created = await service.create(conversation.id, _payload())
@@ -172,7 +174,7 @@ class TestGetEvent:
 
 class TestGetBody:
     async def test_body_inline_payload(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, body_cap_bytes=_CAP)
         event = await service.create(conversation.id, _payload())
@@ -180,7 +182,7 @@ class TestGetBody:
         assert json.loads(body) == event.body
 
     async def test_body_truncated_resolves_store(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         store = FilesystemEventBodyStore(str(tmp_path))
         service = EventService(session, ALL, store=store, body_cap_bytes=_CAP)
@@ -190,7 +192,7 @@ class TestGetBody:
         assert json.loads(body) == big
 
     async def test_body_truncated_without_store_raises(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, body_cap_bytes=_CAP, store=None)
         big = {"text": "x" * (_CAP * 2)}
@@ -199,7 +201,7 @@ class TestGetBody:
             await service.get_body(conversation.id, event.id)
 
     async def test_body_truncated_malformed_store_entry_raises(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         """A missing, unparseable, or non-dict-body stored envelope is a 404-class error."""
         store = FilesystemEventBodyStore(str(tmp_path))
@@ -224,7 +226,7 @@ class TestGetBody:
 
 class TestSearchEvents:
     async def test_search_orders_by_timestamp(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         await service.create(conversation.id, _payload(kind="a"))
@@ -234,7 +236,7 @@ class TestSearchEvents:
         assert next_cursor is None
 
     async def test_search_cursor_paginates(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         for i in range(3):
@@ -247,7 +249,7 @@ class TestSearchEvents:
         assert last_cursor is None
 
     async def test_search_filters_apply(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         await service.create(conversation.id, _payload(kind="message"))
@@ -263,7 +265,7 @@ class TestSearchEvents:
         assert by_size == []
 
     async def test_search_scope_filters_rows(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL)
         await service.create(conversation.id, _payload())
@@ -274,7 +276,7 @@ class TestSearchEvents:
 
 class TestBackfill:
     async def test_backfill_skips_existing_rows(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         store = FilesystemEventBodyStore(str(tmp_path))
         service = EventService(session, ALL, store=store, body_cap_bytes=_CAP)
@@ -284,7 +286,7 @@ class TestBackfill:
         assert event.id is not None
 
     async def test_backfill_restores_missing_row(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         store = FilesystemEventBodyStore(str(tmp_path))
         service = EventService(session, ALL, store=store, body_cap_bytes=_CAP)
@@ -306,13 +308,13 @@ class TestBackfill:
         assert rebuilt.body == event.body
 
     async def test_backfill_no_store_restores_nothing(
-        self, session: AsyncSession, conversation: Conversation
+        self, session: AsyncSession, conversation: ConversationRecord
     ) -> None:
         service = EventService(session, ALL, store=None)
         assert await service.backfill() == 0
 
     async def test_backfill_tolerates_malformed_envelopes(
-        self, session: AsyncSession, conversation: Conversation, tmp_path: Path
+        self, session: AsyncSession, conversation: ConversationRecord, tmp_path: Path
     ) -> None:
         """Unparseable/non-dict envelopes are skipped; a valid envelope with a
         non-dict body and no timestamp is rebuilt with an empty body and the
@@ -326,7 +328,7 @@ class TestBackfill:
             good_id,
             day,
             json.dumps(
-                {"conversation_id": str(conversation.id), "kind": "message", "body": "oops"}
+                {"conversation_record_id": str(conversation.id), "kind": "message", "body": "oops"}
             ).encode(),
         )
         service = EventService(session, ALL, store=store)

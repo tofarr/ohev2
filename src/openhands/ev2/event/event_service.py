@@ -21,7 +21,7 @@ from typing import Any
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.event.event_schemas import EventCreate, EventSearchFilter
 from openhands.ev2.event.event_store import EventBodyStore
@@ -37,7 +37,7 @@ class EventNotFoundError(Exception):
     """Raised when an event id does not exist (or is out of scope)."""
 
 
-class ConversationNotFoundError(Exception):
+class ConversationRecordNotFoundError(Exception):
     """Raised when the parent conversation id does not exist."""
 
 
@@ -78,7 +78,7 @@ def _envelope_payload(event: Event, full_body: dict[str, Any]) -> bytes:
     """
     envelope = {
         "id": str(event.id),
-        "conversation_id": str(event.conversation_id),
+        "conversation_record_id": str(event.conversation_record_id),
         "kind": event.kind,
         "timestamp": event.timestamp.isoformat(),
         "size_bytes": event.size_bytes,
@@ -110,7 +110,7 @@ def _event_from_envelope(
     else:
         timestamp = datetime(event_date.year, event_date.month, event_date.day, tzinfo=UTC)
     event = Event(
-        conversation_id=uuid.UUID(str(envelope.get("conversation_id"))),
+        conversation_record_id=uuid.UUID(str(envelope.get("conversation_record_id"))),
         kind=str(envelope.get("kind", "backfill")),
         body=_stub_or_payload(serialized, body, body_cap_bytes),
         size_bytes=len(serialized),
@@ -150,7 +150,7 @@ class EventService:
 
     async def create(
         self,
-        conversation_id: uuid.UUID,
+        conversation_record_id: uuid.UUID,
         payload: EventCreate,
         *,
         timestamp: datetime | None = None,
@@ -162,17 +162,17 @@ class EventService:
         store outage never blocks the row. ``timestamp`` overrides the server
         default; the ingestion path passes the event's own time.
         """
-        if not await self._conversation_exists(conversation_id):
-            raise ConversationNotFoundError(str(conversation_id))
+        if not await self._conversation_exists(conversation_record_id):
+            raise ConversationRecordNotFoundError(str(conversation_record_id))
         serialized = _serialize(payload.body)
         event = Event(
-            conversation_id=conversation_id,
+            conversation_record_id=conversation_record_id,
             kind=payload.kind,
             body=_stub_or_payload(serialized, payload.body, self._body_cap_bytes),
             size_bytes=len(serialized),
         )
         if not self._perm_filter.matches(event):
-            raise EventPermissionScopeError(str(conversation_id))
+            raise EventPermissionScopeError(str(conversation_record_id))
         if timestamp is not None:
             # ``timestamp`` is init=False on the model (server default); stamp
             # the event's own time for the ingestion path.
@@ -190,12 +190,12 @@ class EventService:
                 logger.exception("failed to store full event body %s", event.id)
         return event
 
-    async def get(self, conversation_id: uuid.UUID, event_id: uuid.UUID) -> Event:
+    async def get(self, conversation_record_id: uuid.UUID, event_id: uuid.UUID) -> Event:
         """Retrieve an event by id, scoped by ``perm_filter`` and parent."""
         stmt = self._perm_filter.filter_sql(
             select(Event).where(
                 Event.id == event_id,
-                Event.conversation_id == conversation_id,
+                Event.conversation_record_id == conversation_record_id,
             )
         )
         result = await self._session.execute(stmt)
@@ -206,7 +206,7 @@ class EventService:
 
     async def search_events(
         self,
-        conversation_id: uuid.UUID,
+        conversation_record_id: uuid.UUID,
         *,
         cursor: tuple[datetime, uuid.UUID] | None = None,
         limit: int = 50,
@@ -219,7 +219,7 @@ class EventService:
         """
         stmt = self._perm_filter.filter_sql(
             select(Event)
-            .where(Event.conversation_id == conversation_id)
+            .where(Event.conversation_record_id == conversation_record_id)
             .order_by(Event.timestamp, Event.id)
         )
         if search_filter is not None:
@@ -238,7 +238,7 @@ class EventService:
         next_cursor = (events[-1].timestamp, events[-1].id) if len(events) == limit else None
         return events, next_cursor
 
-    async def get_body(self, conversation_id: uuid.UUID, event_id: uuid.UUID) -> bytes:
+    async def get_body(self, conversation_record_id: uuid.UUID, event_id: uuid.UUID) -> bytes:
         """Return the event's full body as serialized JSON.
 
         Not-truncated events serve their row payload directly; truncated ones
@@ -246,7 +246,7 @@ class EventService:
         :class:`EventBodyNotFoundError` when the backing store lacks the
         object (or no store is configured).
         """
-        event = await self.get(conversation_id, event_id)
+        event = await self.get(conversation_record_id, event_id)
         if not event.body.get(_TRUNCATED_MARKER):
             return _serialize(event.body)
         if self._store is None:
@@ -394,9 +394,9 @@ class EventService:
         await self._session.commit()
         return restored
 
-    async def _conversation_exists(self, conversation_id: uuid.UUID) -> bool:
+    async def _conversation_exists(self, conversation_record_id: uuid.UUID) -> bool:
         """Unscoped existence check for the parent conversation on create."""
         result = await self._session.execute(
-            select(Conversation.id).where(Conversation.id == conversation_id)
+            select(ConversationRecord.id).where(ConversationRecord.id == conversation_record_id)
         )
         return result.scalar_one_or_none() is not None

@@ -558,11 +558,11 @@ from openhands.ev2.api_key import (  # noqa: E402,F401
 )
 from openhands.ev2.auth.auth_models import ApiKey as _ApiKey  # noqa: E402
 from openhands.ev2.auth.auth_models import OAuthClient as _OAuthClient  # noqa: E402
-from openhands.ev2.conversation import (  # noqa: E402,F401
-    conversation_security as _conversation_security,  # registers ConversationAccess in the Permission union
+from openhands.ev2.conversation_record import (  # noqa: E402,F401
+    conversation_record_security as _conversation_record_security,  # registers ConversationRecordAccess in the Permission union
 )
-from openhands.ev2.conversation.conversation_models import (  # noqa: E402
-    Conversation as _Conversation,
+from openhands.ev2.conversation_record.conversation_record_models import (  # noqa: E402
+    ConversationRecord as _ConversationRecord,
 )
 from openhands.ev2.conversation_template.conversation_template_models import (  # noqa: E402
     ConversationTemplate as _ConversationTemplate,
@@ -648,16 +648,16 @@ register_resource_policy(_SandboxConfig, "sandbox_permission")
 register_resource_policy(_SandboxSnapshot, "sandbox_snapshot_permission")
 register_resource_policy(_Group, "group_permission")
 register_resource_policy(_GroupUser, "group_user_permission")
-# Conversation is governed by its own ``conversation_permission`` Role column.
+# ConversationRecord is governed by its own ``conversation_record_permission`` Role column.
 # Non-admin users get read/search only, scoped by the backing sandbox config's
-# creator (ConversationAccess); writes belong to the ingestion path.
-register_resource_policy(_Conversation, "conversation_permission")
+# creator (ConversationRecordAccess); writes belong to the ingestion path.
+register_resource_policy(_ConversationRecord, "conversation_record_permission")
 # ConversationTemplate is governed by its own ``conversation_template_permission``
 # Role column (AGENTS.md §11). The generic CreatorPermission / Permitted /
 # Denied policies cover all cases; no custom Permission subclass is needed.
 register_resource_policy(_ConversationTemplate, "conversation_template_permission")
 # Event is governed by its own ``event_permission`` Role column. Non-admin
-# users get read/search only, scoped by the parent conversation's backing
+# users get read/search only, scoped by the parent conversation_record's backing
 # sandbox config's creator (EventAccess); events are immutable and written by
 # the ingestion path.
 register_resource_policy(_Event, "event_permission")

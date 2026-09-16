@@ -69,7 +69,7 @@ validate-specs:
 		quint test specs/rest.qnt --main=rest; \
 		quint test specs/auth.qnt --main=auth; \
 		quint test specs/batch.qnt --main=batch; \
-		quint test specs/conversation.qnt --main=conversation; \
+		quint test specs/conversation_record.qnt --main=conversation_record; \
 		quint test specs/conversation_template.qnt --main=conversation_template; \
 		quint test specs/webhook.qnt --main=webhook; \
 		echo "== validate-specs: invariants =="; \

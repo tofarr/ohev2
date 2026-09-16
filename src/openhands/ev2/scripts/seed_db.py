@@ -10,8 +10,8 @@ Seeds two roles:
   (scoped to their own ``user_id``), a :class:`CreatorPermission` on
   ``sandbox_permission`` granting full access to the sandbox configs the user
   created plus create permission (``on_match=Permitted``,
-  ``on_create=Permitted``), and :class:`ConversationAccess` on
-  ``conversation_permission`` so they can search/read conversations backed by
+  ``on_create=Permitted``), and :class:`ConversationRecordAccess` on
+  ``conversation_record_permission`` so they can search/read conversations backed by
   sandbox configs they created, and :class:`EventAccess` on
   ``event_permission`` so they can search/read the events on those
   conversations. All other entity columns are ``NULL`` (deny).
@@ -63,7 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.api_key.api_key_security import ApiKeyAccess
 from openhands.ev2.config import get_config
-from openhands.ev2.conversation.conversation_security import ConversationAccess
+from openhands.ev2.conversation_record.conversation_record_security import ConversationRecordAccess
 from openhands.ev2.db import create_engine, create_session_factory
 from openhands.ev2.event.event_security import EventAccess
 from openhands.ev2.group.group_models import Group, GroupUser
@@ -156,7 +156,7 @@ def _user_role_permissions() -> dict[str, Permission | None]:
     Sets ``api_key_permission`` to :class:`ApiKeyAccess`, ``sandbox_permission``
     to a :class:`CreatorPermission` granting full access to the sandbox
     configs the user created (``on_match=Permitted``, ``on_create=Permitted``),
-    ``conversation_permission`` to :class:`ConversationAccess`
+    ``conversation_record_permission`` to :class:`ConversationRecordAccess`
     (search/read conversations backed by sandbox configs the user created),
     and ``event_permission`` to :class:`EventAccess` (search/read events on
     those conversations).
@@ -168,7 +168,7 @@ def _user_role_permissions() -> dict[str, Permission | None]:
             on_match=Permitted(),
             on_create=Permitted(),
         ),
-        "conversation_permission": ConversationAccess(),
+        "conversation_record_permission": ConversationRecordAccess(),
         "event_permission": EventAccess(),
     }
 
@@ -527,10 +527,10 @@ async def _ensure_admin_role(session: AsyncSession, user: User) -> None:
 
 
 async def _ensure_user_role(session: AsyncSession) -> Role:
-    """Upsert the regular-user role (ApiKeyAccess + ConversationAccess).
+    """Upsert the regular-user role (ApiKeyAccess + ConversationRecordAccess).
 
     ``api_key_permission`` is set to :class:`ApiKeyAccess` and
-    ``conversation_permission`` to :class:`ConversationAccess`; every other
+    ``conversation_record_permission`` to :class:`ConversationRecordAccess`; every other
     governed entity stays ``None`` (deny). Re-running refreshes both columns
     if they were changed.
     """

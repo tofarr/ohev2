@@ -1,20 +1,22 @@
-"""ORM model for the conversation resource.
+"""ORM model for the conversation_record resource.
 
-A :class:`Conversation` is the durable record of an agent conversation backed
-by a sandbox (``sandbox_config_id`` -> ``sandbox_configs``). Rows are populated
-by the webhook ingestion path; this feature provides storage + CRUD only. The
-metric columns (``accumulated_cost``, ``prompt_tokens``, ``completion_tokens``,
-``total_tokens``) start at 0 and are updated via ``PATCH`` as events arrive.
+A :class:`ConversationRecord` is the durable record of an agent conversation
+backed by a sandbox (``sandbox_config_id`` -> ``sandbox_configs``). Rows are
+populated by the webhook ingestion path; this feature provides storage + CRUD
+only. The metric columns (``accumulated_cost``, ``prompt_tokens``,
+``completion_tokens``, ``total_tokens``) start at 0 and are updated via
+``PATCH`` as events arrive.
 
 ``event_callbacks`` is a JSONB list of polymorphic
 :class:`~openhands.ev2.event_callback.event_callback_models.EventCallback`
-callables embedded on the conversation, round-tripped via
+callables embedded on the conversation_record, round-tripped via
 :class:`EventCallbackListType`. Dispatch is out of scope (the future generic
 job queue owns it).
 
-Ownership is deliberately indirect: a conversation has no ``creator_id`` of its
-own. Access for non-admin users derives from the backing sandbox config's
-creator (see ``conversation_security.ConversationAccess``).
+Ownership is deliberately indirect: a conversation_record has no
+``creator_id`` of its own. Access for non-admin users derives from the backing
+sandbox config's creator (see
+``conversation_record_security.ConversationRecordAccess``).
 """
 
 from __future__ import annotations
@@ -35,11 +37,11 @@ from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
 _TZ = DateTime(timezone=True)
 
 
-class Conversation(Base):
-    """A conversation backed by a sandbox config."""
+class ConversationRecord(Base):
+    """A conversation_record backed by a sandbox config."""
 
-    __tablename__ = "conversations"
-    __table_args__ = {"comment": "Agent conversations backed by sandbox configs"}  # noqa: RUF012
+    __tablename__ = "conversation_records"
+    __table_args__ = {"comment": "Agent conversation records backed by sandbox configs"}  # noqa: RUF012
 
     id: Mapped[uuid.UUID] = mapped_column(
         init=False,
@@ -117,6 +119,6 @@ class Conversation(Base):
     )
 
     # Loaded eagerly so the in-memory ownership check in
-    # ConversationAccessFilter.matches can resolve the backing config's
+    # ConversationRecordAccessFilter.matches can resolve the backing config's
     # creator without a lazy load (AGENTS.md: asyncio-first, no implicit I/O).
     sandbox_config: Mapped[SandboxConfig] = relationship(init=False, lazy="selectin")

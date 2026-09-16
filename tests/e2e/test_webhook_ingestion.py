@@ -4,11 +4,11 @@ Seeds the database with the admin user and a sandbox config, mints a system
 API key with a known plaintext directly in the DB, then verifies over HTTP
 that:
 
-1. ``POST /webhooks/{sandbox_config_id}/conversations`` authenticated via
+1. ``POST /webhooks/{sandbox_config_id}/conversation_records`` authenticated via
    ``X-API-Key`` creates the conversation (idempotent upsert: a second call
    updates title/metrics instead of duplicating the row) for the sandbox
    identified by the URL.
-2. ``POST /webhooks/{sandbox_config_id}/conversations/{id}/events`` appends
+2. ``POST /webhooks/{sandbox_config_id}/conversation_records/{id}/events`` appends
    events and folds a stats snapshot into the conversation's metric columns.
 3. An unknown API key is rejected (401) and events for a conversation
    owned by another sandbox are rejected (404).
@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from openhands.ev2.auth.auth_models import ApiKey
 from openhands.ev2.auth.auth_tokens import hash_api_key_value
-from openhands.ev2.conversation.conversation_models import Conversation
+from openhands.ev2.conversation_record.conversation_record_models import ConversationRecord
 from openhands.ev2.event.event_models import Event
 from openhands.ev2.role.role_models import UserRole
 from openhands.ev2.sandbox.sandbox_config_models import SandboxConfig
@@ -78,7 +78,7 @@ async def _reset_e2e_artifacts(session: AsyncSession) -> None:
     """Delete rows from prior runs so the test is hermetic across re-runs."""
     await session.execute(delete(ApiKey))
     await session.execute(delete(Event))
-    await session.execute(delete(Conversation))
+    await session.execute(delete(ConversationRecord))
     await session.execute(delete(SandboxConfig))
     await session.execute(delete(SandboxTemplate))
     user = (
@@ -127,10 +127,10 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
     return admin.id, config.id
 
 
-def _conversation_info_payload(conversation_id: uuid.UUID, title: str) -> dict:
+def _conversation_info_payload(conversation_record_id: uuid.UUID, title: str) -> dict:
     llm = LLM(model="test-model", usage_id="test-llm")
     info = ConversationInfo(
-        id=conversation_id,
+        id=conversation_record_id,
         agent=Agent(llm=llm, tools=[]),
         workspace=LocalWorkspace(working_dir="/tmp/workspace"),
         title=title,
@@ -179,36 +179,36 @@ async def test_webhook_ingestion() -> None:
         await engine.dispose()
     assert config_id is not None
 
-    conversation_id = uuid.uuid4()
+    conversation_record_id = uuid.uuid4()
     async with httpx.AsyncClient(base_url=BASE_URL) as ac:
         # Unknown API keys are rejected.
         bad = await ac.post(
-            f"/webhooks/{config_id}/conversations",
+            f"/webhooks/{config_id}/conversation_records",
             headers=_api_key_headers("bogus"),
-            json=_conversation_info_payload(conversation_id, "denied"),
+            json=_conversation_info_payload(conversation_record_id, "denied"),
         )
         assert bad.status_code == 401, bad.text
 
         # The system API key creates the conversation.
         created = await ac.post(
-            f"/webhooks/{config_id}/conversations",
+            f"/webhooks/{config_id}/conversation_records",
             headers=_api_key_headers(),
-            json=_conversation_info_payload(conversation_id, "e2e webhook conversation"),
+            json=_conversation_info_payload(conversation_record_id, "e2e webhook conversation"),
         )
         assert created.status_code == 200, created.text
 
         # A second call with the same id upserts (renames) instead of
         # duplicating.
         renamed = await ac.post(
-            f"/webhooks/{config_id}/conversations",
+            f"/webhooks/{config_id}/conversation_records",
             headers=_api_key_headers(),
-            json=_conversation_info_payload(conversation_id, "renamed"),
+            json=_conversation_info_payload(conversation_record_id, "renamed"),
         )
         assert renamed.status_code == 200, renamed.text
 
         # Events append; the stats snapshot folds into the conversation metrics.
         events = await ac.post(
-            f"/webhooks/{config_id}/conversations/{conversation_id}/events",
+            f"/webhooks/{config_id}/conversation_records/{conversation_record_id}/events",
             headers=_api_key_headers(),
             json=_event_payloads(),
         )
@@ -216,7 +216,7 @@ async def test_webhook_ingestion() -> None:
 
         # Events for an unknown/foreign conversation are rejected.
         foreign = await ac.post(
-            f"/webhooks/{config_id}/conversations/{uuid.uuid4()}/events",
+            f"/webhooks/{config_id}/conversation_records/{uuid.uuid4()}/events",
             headers=_api_key_headers(),
             json=_event_payloads(),
         )
@@ -225,12 +225,12 @@ async def test_webhook_ingestion() -> None:
         # The admin sees exactly one conversation with the folded metrics.
         cookie = await _login(ac, ADMIN_USERNAME, ADMIN_PASSWORD)
         headers = {"Cookie": f"{COOKIE_NAME}={cookie}"}
-        listing = await ac.get("/conversations", headers=headers)
+        listing = await ac.get("/conversation_records", headers=headers)
         assert listing.status_code == 200, listing.text
         items = listing.json()["items"]
         assert len(items) == 1
         row = items[0]
-        assert row["id"] == str(conversation_id)
+        assert row["id"] == str(conversation_record_id)
         assert row["title"] == "renamed"
         assert row["llm_model"] == "test-model"
         assert row["accumulated_cost"] == 0.75
@@ -238,6 +238,8 @@ async def test_webhook_ingestion() -> None:
         assert row["completion_tokens"] == 20
         assert row["total_tokens"] == 60
 
-        event_listing = await ac.get(f"/conversations/{conversation_id}/events", headers=headers)
+        event_listing = await ac.get(
+            f"/conversation_records/{conversation_record_id}/events", headers=headers
+        )
         assert event_listing.status_code == 200, event_listing.text
         assert len(event_listing.json()["items"]) == 2
