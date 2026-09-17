@@ -59,6 +59,7 @@ from openhands.ev2.oauth.oauth_session_router import router as oauth_session_rou
 from openhands.ev2.role.role_router import router as role_router
 from openhands.ev2.role.user_role_router import router as user_role_router
 from openhands.ev2.sandbox.sandbox_config_router import router as sandbox_config_router
+from openhands.ev2.sandbox.sandbox_proxy_router import router as sandbox_proxy_router
 from openhands.ev2.sandbox.sandbox_router import router as sandbox_sandbox_router
 from openhands.ev2.sandbox.sandbox_snapshot_router import router as sandbox_snapshot_router
 from openhands.ev2.sandbox.sandbox_template_router import router as sandbox_template_router
@@ -559,6 +560,7 @@ def create_app() -> FastAPI:
     app.include_router(sandbox_config_router)
     app.include_router(sandbox_sandbox_router)
     app.include_router(sandbox_snapshot_router)
+    app.include_router(sandbox_proxy_router)
     app.include_router(user_router)
     app.include_router(oauth_provider_router)
     app.include_router(oauth_session_router)
