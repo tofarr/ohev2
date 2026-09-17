@@ -26,11 +26,20 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from openhands.sdk.utils.models import DiscriminatedUnionMixin
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -53,6 +62,28 @@ JOB_CLIENT_STATUSES: tuple[str, ...] = (JOB_PENDING, JOB_SUSPENDED)
 JOB_TERMINAL_STATUSES: tuple[str, ...] = (JOB_COMPLETED, JOB_ERROR)
 
 logger = logging.getLogger("openhands.ev2.job")
+
+
+class JobProgressReporter(Protocol):
+    """Runner-provided handle a job body uses to report mid-run progress.
+
+    Each call opens its own short-lived DB session and performs a conditional
+    ``UPDATE jobs SET progress = :p, status_code = :s WHERE id = :id AND
+    status = 'RUNNING' AND runner_id = :own`` — the same race-guard pattern as
+    :meth:`JobService.complete`, so a dead-runner recovery that already flipped
+    the row to ``ERROR`` is not clobbered by a late progress tick. A call that
+    matches 0 rows is a silent no-op (the job is no longer ``RUNNING``).
+
+    The runner constructs a concrete instance bound to ``(job_id, runner_id)``
+    and never holds a DB session open while the job body runs.
+    """
+
+    async def update(self, progress: float, status_code: str | None = None) -> None:
+        """Persist *progress* (0.0-1.0) and optional *status_code* to the job row.
+
+        No-op when the job is no longer ``RUNNING`` for the owning runner.
+        """
+        ...
 
 
 class JobRun(BaseModel):
@@ -78,13 +109,23 @@ class JobDetails(DiscriminatedUnionMixin, ABC):
     field tags the concrete type) so a stored details object can be serialized
     to JSON and deserialized back to the right subclass.
 
-    The runner invokes ``__call__`` inside a try/except and never holds a DB
-    session open while a job is running.
+    The runner invokes ``__call__`` with the job's identity and a progress
+    handle, and never holds a DB session open while a job is running.
     """
 
     @abstractmethod
-    async def __call__(self) -> JobRun:
-        """Perform the job's work and return the terminal :class:`JobRun`."""
+    async def __call__(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        progress: JobProgressReporter,
+    ) -> JobRun:
+        """Perform the job's work and return the terminal :class:`JobRun`.
+
+        *job_id* is the id of the :class:`Job` row being run; *creator_id* is
+        the user the job acts on behalf of; *progress* is a runner-provided
+        handle for mid-run progress / status_code updates.
+        """
         raise NotImplementedError
 
 
@@ -98,7 +139,12 @@ class LogJobDetails(JobDetails):
 
     message: str = Field(description="Message to log when the job runs.")
 
-    async def __call__(self) -> JobRun:
+    async def __call__(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        progress: JobProgressReporter,
+    ) -> JobRun:
         logger.info(self.message)
         return JobRun(status=JOB_COMPLETED)
 
@@ -149,10 +195,13 @@ class Job(Base):
     """
 
     __tablename__ = "jobs"
-    __table_args__ = {  # noqa: RUF012
-        "postgresql_partition_by": "RANGE(created_at)",
-        "comment": "Durable background jobs, daily-partitioned by created_at (governed CRUD)",
-    }
+    __table_args__ = (
+        CheckConstraint("progress >= 0.0 AND progress <= 1.0", name="ck_jobs_progress_range"),
+        {
+            "postgresql_partition_by": "RANGE(created_at)",
+            "comment": "Durable background jobs, daily-partitioned by created_at (governed CRUD)",
+        },
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         init=False,
@@ -194,6 +243,22 @@ class Job(Base):
         server_default=JOB_PENDING,
         index=True,
         comment="Lifecycle status: PENDING/SUSPENDED/RUNNING/COMPLETED/ERROR.",
+    )
+    # Runner-managed mid-run progress / sub-status. Not client-settable: they do
+    # not appear on JobCreate/JobUpdate (mirroring how RUNNING/COMPLETED are not
+    # client-settable). progress is constrained to [0.0, 1.0] via a CHECK; set
+    # to 0.0 on create/claim and to 1.0 by the runner on COMPLETED.
+    progress: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        server_default="0.0",
+        comment="Runner-managed fractional progress in [0.0, 1.0].",
+    )
+    status_code: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        default=None,
+        comment="Runner-managed machine-readable sub-status (e.g. a stage name).",
     )
     detail: Mapped[str | None] = mapped_column(
         Text,

@@ -15,16 +15,19 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from pydantic import Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.unit._auth_helpers import assign_role, make_principal
 
+from openhands.ev2.db import get_session_factory
 from openhands.ev2.job.job_models import (
     JOB_COMPLETED,
     JOB_ERROR,
@@ -32,6 +35,8 @@ from openhands.ev2.job.job_models import (
     JOB_RUNNING,
     Job,
     JobDetails,
+    JobProgressReporter,
+    JobRun,
     LogJobDetails,
 )
 from openhands.ev2.job.job_schemas import (
@@ -48,6 +53,13 @@ from openhands.ev2.user.user_models import User
 from openhands.ev2.util.search_filter import ALL
 
 pytestmark = pytest.mark.asyncio
+
+
+class _NullProgressReporter:
+    """No-op :class:`JobProgressReporter` for tests that don't persist progress."""
+
+    async def update(self, progress: float, status_code: str | None = None) -> None:
+        return None
 
 
 def _details(message: str = "hello") -> LogJobDetails:
@@ -87,7 +99,9 @@ class TestJobDetailsRoundTrip:
         assert restored.kind == "LogJobDetails"
 
     async def test_log_job_details_completes(self) -> None:
-        run = await _details("go").__call__()
+        run = await _details("go").__call__(
+            uuid.uuid4(), uuid.uuid4(), _NullProgressReporter()
+        )
         assert run.status == JOB_COMPLETED
 
 
@@ -398,6 +412,452 @@ class TestJobRunnerPaths:
         )
         assert await count_running_for_runner(session, r1) == 2
         assert await count_running_for_runner(session, uuid.uuid4()) == 0
+
+
+# --------------------------------------------------------------------------- #
+# JobRunnerService end-to-end sweep / run / shutdown (issue #176)
+# --------------------------------------------------------------------------- #
+
+
+class _FailingJobDetails(JobDetails):
+    """Job body that always raises, to exercise the runner's ERROR path."""
+
+    message: str = Field(default="boom")
+
+    async def __call__(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        progress: JobProgressReporter,
+    ) -> JobRun:
+        raise RuntimeError("job body crashed")
+
+
+class _SlowJobDetails(JobDetails):
+    """Job body that sleeps, to exercise timeout cancellation / shutdown drain."""
+
+    message: str = Field(default="slow")
+
+    async def __call__(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        progress: JobProgressReporter,
+    ) -> JobRun:
+        await asyncio.sleep(10)
+        return JobRun(status=JOB_COMPLETED, detail=self.message)
+
+
+class TestJobRunnerService:
+    """Exercises the JobRunnerService background-sweep path end to end.
+
+    These tests commit so the runner's short-lived sessions (opened via
+    get_session_factory()) can see the seeded rows.
+    """
+
+    async def test_sweep_once_claims_and_runs_pending_job(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        service = JobService(session, ALL)
+        await service.create(JobCreate(job_details=_details("sweep-me")), creator_id=owner.id)
+        await session.commit()
+
+        runner = JobRunnerService(max_concurrent_jobs=1)
+        msg = await runner.sweep_once()
+        assert msg is not None
+        assert "claimed 1 jobs" in msg
+        # Let the background task finish.
+        await asyncio.gather(*[t for t, _ in runner._live.values()])
+        await runner.aclose()
+
+        async with get_session_factory()() as s:
+            rows, _ = await JobService(s, ALL).search(limit=1)
+            assert rows[0].status == JOB_COMPLETED
+
+    async def test_sweep_once_no_jobs_returns_none(
+        self, session: AsyncSession
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        await session.commit()
+        runner = JobRunnerService()
+        msg = await runner.sweep_once()
+        assert msg is None
+        await runner.aclose()
+
+    async def test_sweep_once_recovers_dead_runner(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        service = JobService(session, ALL)
+        # Create a RUNNING job that looks like it belongs to a dead runner
+        # (started_at pushed past its max_seconds_for_run).
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details(), max_seconds_for_run=1),
+            creator_id=owner.id,
+            runner_id=uuid.uuid4(),
+            run_now=True,
+        )
+        await session.execute(
+            text("UPDATE jobs SET started_at = :ago WHERE id = :id"),
+            {"ago": datetime.now(UTC) - timedelta(minutes=2), "id": job.id},
+        )
+        await session.commit()
+
+        runner = JobRunnerService()
+        msg = await runner.sweep_once()
+        assert msg is not None
+        assert "recovered 1 dead jobs" in msg
+        await runner.aclose()
+
+    async def test_run_job_persists_error_on_exception(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        service = JobService(session, ALL)
+        await service.create(JobCreate(job_details=_FailingJobDetails()), creator_id=owner.id)
+        await session.commit()
+
+        runner = JobRunnerService(max_concurrent_jobs=1)
+        await runner.sweep_once()
+        await asyncio.gather(*[t for t, _ in runner._live.values()])
+        await runner.aclose()
+
+        async with get_session_factory()() as s:
+            rows, _ = await JobService(s, ALL).search(limit=1)
+            assert rows[0].status == JOB_ERROR
+
+    async def test_cancel_overdue_live_task(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        service = JobService(session, ALL)
+        await service.create(
+            JobCreate(job_details=_SlowJobDetails(), max_seconds_for_run=1), creator_id=owner.id
+        )
+        await session.commit()
+
+        runner = JobRunnerService(max_concurrent_jobs=1)
+        await runner.sweep_once()
+        await asyncio.sleep(0.05)  # let the task start
+        # Push the in-memory started_at into the past so the task is overdue.
+        for jid in list(runner._live):
+            task = runner._live[jid][0]
+            runner._live[jid] = (task, datetime.now(UTC) - timedelta(minutes=2))
+        cancelled = runner._cancel_overdue_live_tasks()
+        assert cancelled == 1
+        await runner.aclose()
+
+    async def test_house_clean_once(self, session: AsyncSession) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        await session.commit()
+        runner = JobRunnerService()
+        msg = await runner.house_clean_once(preallocate_days=7, retention_days=30)
+        # Partitions may already exist; msg is None if nothing to create/drop.
+        assert msg is None or "partitions" in msg
+        await runner.aclose()
+
+    async def test_aclose_cancels_live_tasks(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        from openhands.ev2.job.job_runner_service import JobRunnerService
+
+        service = JobService(session, ALL)
+        await service.create(JobCreate(job_details=_SlowJobDetails()), creator_id=owner.id)
+        await session.commit()
+
+        runner = JobRunnerService(max_concurrent_jobs=1)
+        await runner.sweep_once()
+        await asyncio.sleep(0.05)  # let the task start
+        assert len(runner._live) == 1
+        await runner.aclose()
+        assert len(runner._live) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Progress / status_code (issue #176)
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingProgressReporter:
+    """JobProgressReporter that records update calls (does not persist)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[float, str | None]] = []
+
+    async def update(self, progress: float, status_code: str | None = None) -> None:
+        self.calls.append((progress, status_code))
+
+
+class TestJobProgress:
+    async def test_update_progress_persists_while_running(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """A progress.update while RUNNING persists progress / status_code."""
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        ok = await service.update_progress(
+            job.id, runner_id=runner_id, progress=0.5, status_code="stage-2"
+        )
+        assert ok is True
+        fetched = await service.get(job.id)
+        assert fetched.progress == 0.5
+        assert fetched.status_code == "stage-2"
+
+    async def test_update_progress_noop_after_error(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """A late progress.update after dead-runner recovery to ERROR is a no-op."""
+
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        # First move the job to ERROR (simulating dead-runner recovery).
+        await service.complete(job.id, runner_id=runner_id, run=None, exception=RuntimeError("crashed"))
+        # A late progress tick must not overwrite the terminal row.
+        ok = await service.update_progress(
+            job.id, runner_id=runner_id, progress=0.9, status_code="late"
+        )
+        assert ok is False
+        fetched = await service.get(job.id)
+        assert fetched.status == JOB_ERROR
+        assert fetched.progress == 0.0  # never advanced past the initial 0.0
+        assert fetched.status_code is None
+
+    async def test_update_progress_wrong_runner_is_noop(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """A progress.update from a non-owning runner matches 0 rows."""
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        ok = await service.update_progress(
+            job.id, runner_id=uuid.uuid4(), progress=0.5
+        )
+        assert ok is False
+        fetched = await service.get(job.id)
+        assert fetched.progress == 0.0
+        assert fetched.status_code is None
+
+    async def test_update_progress_rejects_out_of_range(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """progress outside [0.0, 1.0] raises ValueError."""
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        with pytest.raises(ValueError):
+            await service.update_progress(job.id, runner_id=runner_id, progress=1.5)
+        with pytest.raises(ValueError):
+            await service.update_progress(job.id, runner_id=runner_id, progress=-0.1)
+
+    async def test_complete_sets_progress_to_one_on_completed(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """On COMPLETED, complete sets progress = 1.0."""
+        from openhands.ev2.job.job_models import JobRun
+
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        await service.update_progress(job.id, runner_id=runner_id, progress=0.3)
+        ok = await service.complete(
+            job.id, runner_id=runner_id, run=JobRun(status=JOB_COMPLETED, detail="done")
+        )
+        assert ok is True
+        fetched = await service.get(job.id)
+        assert fetched.status == JOB_COMPLETED
+        assert fetched.progress == 1.0
+
+    async def test_complete_error_leaves_progress_unchanged(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """On ERROR, complete leaves progress as-is (the last reported value)."""
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_details()),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        await service.update_progress(
+            job.id, runner_id=runner_id, progress=0.4, status_code="stage-1"
+        )
+        ok = await service.complete(job.id, runner_id=runner_id, run=None, exception=ValueError("boom"))
+        assert ok is True
+        fetched = await service.get(job.id)
+        assert fetched.status == JOB_ERROR
+        assert fetched.progress == 0.4  # unchanged
+        assert fetched.status_code == "stage-1"
+
+    async def test_new_job_defaults_progress_zero(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """A freshly created job has progress 0.0 and status_code None."""
+        service = JobService(session, ALL)
+        job = await service.create(JobCreate(job_details=_details()), creator_id=owner.id)
+        assert job.progress == 0.0
+        assert job.status_code is None
+
+
+# --------------------------------------------------------------------------- #
+# JobDetails signature round-trip with the new __call__ contract (issue #176)
+# --------------------------------------------------------------------------- #
+
+
+class _ProgressJobDetails(JobDetails):
+    """Test variant that calls progress.update mid-run and records identity."""
+
+    message: str = Field(description="Message logged on run.")
+
+    async def __call__(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        progress: JobProgressReporter,
+    ) -> JobRun:
+        await progress.update(0.5, status_code="stage-2")
+        return JobRun(status=JOB_COMPLETED, detail=self.message)
+
+
+class TestJobDetailsSignature:
+    async def test_progress_job_details_round_trips(self) -> None:
+        """A stored _ProgressJobDetails deserializes back to the right subclass."""
+        d = _ProgressJobDetails(message="run-me")
+        blob = d.model_dump(mode="json")
+        assert blob["kind"] == "_ProgressJobDetails"
+        restored = JobDetails.model_validate(blob)
+        assert isinstance(restored, _ProgressJobDetails)
+        assert restored.message == "run-me"
+
+    async def test_progress_job_details_receives_identity_and_progress(self) -> None:
+        """The new __call__ signature receives job_id, creator_id, and progress."""
+        d = _ProgressJobDetails(message="run-me")
+        job_id = uuid.uuid4()
+        creator_id = uuid.uuid4()
+        reporter = _RecordingProgressReporter()
+        run = await d(job_id, creator_id, reporter)
+        assert run.status == JOB_COMPLETED
+        assert run.detail == "run-me"
+        assert reporter.calls == [(0.5, "stage-2")]
+
+    async def test_progress_job_details_runs_through_service(
+        self, session: AsyncSession, owner: User
+    ) -> None:
+        """A job body calling progress.update persists values while RUNNING.
+
+        The _JobProgressHandle opens its own short-lived session (mirroring
+        production), so the creating session must commit first to make the
+        row visible to it. Reads after the handle's commit use a fresh
+        session to avoid the test session's stale identity map (the factory
+        is configured with ``expire_on_commit=False``).
+        """
+        from openhands.ev2.db import get_session_factory
+        from openhands.ev2.job.job_runner_service import _JobProgressHandle
+
+        service = JobService(session, ALL)
+        runner_id = uuid.uuid4()
+        job = await service.create_runner_owned(
+            JobCreate(job_details=_ProgressJobDetails(message="stage-run")),
+            creator_id=owner.id,
+            runner_id=runner_id,
+            run_now=True,
+        )
+        await session.commit()
+        # Simulate the runner invoking the body with a real progress handle.
+        handle: JobProgressReporter = _JobProgressHandle(job.id, runner_id)
+        run = await job.job_details(job.id, owner.id, handle)
+        # Read with a fresh session to see the handle's committed update.
+        async with get_session_factory()() as s:
+            fetched = await JobService(s, ALL).get(job.id)
+            assert fetched.progress == 0.5
+            assert fetched.status_code == "stage-2"
+        # Then complete the job and read the final state with a fresh session.
+        await service.complete(job.id, runner_id=runner_id, run=run)
+        await session.commit()
+        async with get_session_factory()() as s:
+            done = await JobService(s, ALL).get(job.id)
+            assert done.status == JOB_COMPLETED
+            assert done.progress == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Schema exposure (JobRead exposes progress/status_code; create/update reject)
+# --------------------------------------------------------------------------- #
+
+
+class TestJobProgressSchemas:
+    async def test_job_read_exposes_progress_and_status_code(self, client: AsyncClient) -> None:
+        resp = await client.post("/jobs", json=_payload("a"))
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["progress"] == 0.0
+        assert body["status_code"] is None
+
+    async def test_job_create_ignores_progress(self, client: AsyncClient) -> None:
+        """progress is not client-settable: an extra field is ignored (Pydantic
+        default behavior) and the created job's progress stays 0.0."""
+        payload = _payload("a")
+        payload["progress"] = 0.5
+        resp = await client.post("/jobs", json=payload)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["progress"] == 0.0
+
+    async def test_job_create_ignores_status_code(self, client: AsyncClient) -> None:
+        """status_code is not client-settable: an extra field is ignored and
+        the created job's status_code stays None."""
+        payload = _payload("a")
+        payload["status_code"] = "stage-1"
+        resp = await client.post("/jobs", json=payload)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status_code"] is None
+
+    async def test_job_update_ignores_progress(self, client: AsyncClient) -> None:
+        resp = await client.post("/jobs", json=_payload("a"))
+        job_id = resp.json()["id"]
+        resp = await client.patch(f"/jobs/{job_id}", json={"progress": 0.5})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["progress"] == 0.0
+
+    async def test_job_update_ignores_status_code(self, client: AsyncClient) -> None:
+        resp = await client.post("/jobs", json=_payload("a"))
+        job_id = resp.json()["id"]
+        resp = await client.patch(f"/jobs/{job_id}", json={"status_code": "stage-1"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status_code"] is None
 
 
 # --------------------------------------------------------------------------- #
