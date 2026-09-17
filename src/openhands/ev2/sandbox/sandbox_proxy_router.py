@@ -371,7 +371,9 @@ async def _relay(client: WebSocket, upstream: ClientConnection) -> None:
     for task in done:
         # Surface unexpected exceptions to the logger; normal closures are silent.
         exc = task.exception()
-        if exc is not None and not isinstance(exc, (WebSocketDisconnect, websockets.exceptions.ConnectionClosed)):
+        if exc is not None and not isinstance(
+            exc, (WebSocketDisconnect, websockets.exceptions.ConnectionClosed)
+        ):
             logger.debug("sandbox proxy websocket relay task error: %s", exc)
 
 

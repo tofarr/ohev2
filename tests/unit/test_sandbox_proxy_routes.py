@@ -94,10 +94,14 @@ def _active_sandbox(
     session_api_key: str | None = _SESSION_KEY,
     exposed_urls: list[ExposedUrl] | None = None,
 ) -> DockerSandbox:
-    urls = exposed_urls if exposed_urls is not None else [
-        ExposedUrl(name="agent_server", url=_UPSTREAM_BASE, port=3000),
-        ExposedUrl(name="vscode", url="http://vscode.test", port=3100),
-    ]
+    urls = (
+        exposed_urls
+        if exposed_urls is not None
+        else [
+            ExposedUrl(name="agent_server", url=_UPSTREAM_BASE, port=3000),
+            ExposedUrl(name="vscode", url="http://vscode.test", port=3100),
+        ]
+    )
     return DockerSandbox(
         id=sandbox_id,
         sandbox_template_id="tmpl",
@@ -149,7 +153,9 @@ class TestHttpProxy:
             captured["method"] = request.method
             captured["url"] = str(request.url)
             captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
-            return httpx.Response(200, json={"ok": True}, headers={"content-type": "application/json"})
+            return httpx.Response(
+                200, json={"ok": True}, headers={"content-type": "application/json"}
+            )
 
         respx.get(f"{_UPSTREAM_BASE}/api/conversation_records").mock(side_effect=_capture)
         resp = await client.get("/sandbox-proxy/sb-1/api/conversation_records", params={"q": "hi"})
@@ -167,7 +173,9 @@ class TestHttpProxy:
         assert "x-session-api-key" not in {k.lower() for k in resp.headers}
 
     @respx.mock
-    async def test_post_forwards_body_and_headers(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_post_forwards_body_and_headers(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox()
         captured: dict[str, Any] = {}
 
@@ -187,7 +195,9 @@ class TestHttpProxy:
         assert captured["content_type"] == "application/json"
 
     @respx.mock
-    async def test_upstream_error_passthrough(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_upstream_error_passthrough(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox()
         respx.get(f"{_UPSTREAM_BASE}/api/oops").mock(
             return_value=httpx.Response(500, json={"error": "internal"})
@@ -197,7 +207,9 @@ class TestHttpProxy:
         assert resp.json() == {"error": "internal"}
 
     @respx.mock
-    async def test_sse_streamed_byte_for_byte(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_sse_streamed_byte_for_byte(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox()
         stream_body = (
             b'event: message\ndata: {"jsonrpc":"2.0","method":"ping"}\n\n'
@@ -215,7 +227,9 @@ class TestHttpProxy:
         assert b"pong" in resp.content
 
     @respx.mock
-    async def test_options_preflight_forwarded(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_options_preflight_forwarded(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox()
         respx.options(f"{_UPSTREAM_BASE}/api/items").mock(
             return_value=httpx.Response(
@@ -231,7 +245,9 @@ class TestHttpProxy:
         assert resp.headers.get("access-control-allow-methods") == "GET,POST"
 
     @respx.mock
-    async def test_hop_by_hop_headers_stripped(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_hop_by_hop_headers_stripped(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox()
         respx.get(f"{_UPSTREAM_BASE}/api/x").mock(
             return_value=httpx.Response(
@@ -253,7 +269,9 @@ class TestHttpProxy:
 
 
 class TestAvailability:
-    async def test_not_active_returns_503(self, client: AsyncClient, sandbox_service: _FakeSandboxService) -> None:
+    async def test_not_active_returns_503(
+        self, client: AsyncClient, sandbox_service: _FakeSandboxService
+    ) -> None:
         sandbox_service._sandboxes["sb-1"] = _active_sandbox(status=SandboxStatus.INACTIVE)
         resp = await client.get("/sandbox-proxy/sb-1/api/foo")
         assert resp.status_code == 503
@@ -346,7 +364,9 @@ class TestWebSocketProxy:
         port = server.sockets[0].getsockname()[1]
         # Repoint the sandbox's agent_server URL at the in-process WS server.
         sandbox_service._sandboxes["sb-1"] = _active_sandbox(
-            exposed_urls=[ExposedUrl(name="agent_server", url=f"http://127.0.0.1:{port}", port=port)],
+            exposed_urls=[
+                ExposedUrl(name="agent_server", url=f"http://127.0.0.1:{port}", port=port)
+            ],
         )
         try:
             token = create_auth_token(_TEST_USER_ID)
