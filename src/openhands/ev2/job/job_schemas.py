@@ -67,6 +67,8 @@ class JobRead(BaseModel):
 
     ``created_at`` (the partition key) is intentionally absent: partitioning is
     internal and clients interact by ``id`` alone (mirrors the usage tables).
+    ``progress`` / ``status_code`` are runner-managed and exposed read-only;
+    they are not accepted on :class:`JobCreate` / :class:`JobUpdate`.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -75,6 +77,8 @@ class JobRead(BaseModel):
     creator_id: uuid.UUID
     runner_id: uuid.UUID | None
     status: str
+    progress: float
+    status_code: str | None
     detail: str | None
     max_seconds_for_run: int
     started_at: datetime | None

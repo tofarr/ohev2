@@ -32,6 +32,7 @@ from sqlalchemy import bindparam, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.ev2.job.job_models import (
+    JOB_COMPLETED,
     JOB_ERROR,
     JOB_PENDING,
     JOB_RUNNING,
@@ -299,6 +300,41 @@ class JobService:
         )
         return list(result.scalars().all())
 
+    async def update_progress(
+        self,
+        job_id: uuid.UUID,
+        *,
+        runner_id: uuid.UUID,
+        progress: float,
+        status_code: str | None = None,
+    ) -> bool:
+        """Conditionally update a running job's ``progress`` / ``status_code``.
+
+        The UPDATE only fires while the job is still ``RUNNING`` and still owned
+        by *runner_id* — the same race-guard pattern as :meth:`complete`, so a
+        dead-runner recovery that already flipped the row to ``ERROR`` is not
+        clobbered by a late progress tick. Returns True if a row was updated,
+        False on 0 rows (the job is no longer ``RUNNING`` for this runner — a
+        silent no-op for the caller).
+        """
+        if not 0.0 <= progress <= 1.0:
+            raise ValueError(f"progress must be in [0.0, 1.0]; got {progress}")
+        from sqlalchemy import CursorResult
+
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.runner_id == runner_id,
+                    Job.status == JOB_RUNNING,
+                )
+                .values(progress=progress, status_code=status_code)
+            ),
+        )
+        return bool(result.rowcount)
+
     async def complete(
         self,
         job_id: uuid.UUID,
@@ -333,6 +369,10 @@ class JobService:
             new_status = run.status
             new_detail = run.detail
         values: dict[str, Any] = {"status": new_status, "detail": new_detail}
+        # On COMPLETED, advance progress to 1.0; on ERROR leave it as-is so a
+        # caller can still see how far a failed run got.
+        if new_status == JOB_COMPLETED:
+            values["progress"] = 1.0
         if job_details is not None:
             values["job_details"] = job_details
         from sqlalchemy import CursorResult

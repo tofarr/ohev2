@@ -31,13 +31,40 @@ import uuid
 from datetime import UTC, datetime
 
 from openhands.ev2.db import get_session_factory
-from openhands.ev2.job.job_models import Job, JobDetails, JobRun
+from openhands.ev2.job.job_models import Job, JobDetails, JobProgressReporter, JobRun
 from openhands.ev2.job.job_service import (
     JobService,
     count_running_for_runner,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _JobProgressHandle:
+    """Concrete :class:`JobProgressReporter` bound to ``(job_id, runner_id)``.
+
+    Each :meth:`update` call opens its own short-lived DB session (the runner
+    holds no session open while a job body runs) and performs the conditional
+    UPDATE via :meth:`JobService.update_progress`. A call that matches 0 rows
+    (the job is no longer ``RUNNING`` for this runner) is a silent no-op.
+    """
+
+    __slots__ = ("_job_id", "_runner_id")
+
+    def __init__(self, job_id: uuid.UUID, runner_id: uuid.UUID) -> None:
+        self._job_id = job_id
+        self._runner_id = runner_id
+
+    async def update(self, progress: float, status_code: str | None = None) -> None:
+        factory = get_session_factory()
+        async with factory() as session:
+            await JobService(session).update_progress(
+                self._job_id,
+                runner_id=self._runner_id,
+                progress=progress,
+                status_code=status_code,
+            )
+            await session.commit()
 
 
 class JobRunnerService:
@@ -83,6 +110,7 @@ class JobRunnerService:
         async with factory() as session:
             service = JobService(session)
             count = await service.recover_dead_runners()
+            await session.commit()
         return count
 
     def _cancel_overdue_live_tasks(self) -> int:
@@ -108,6 +136,7 @@ class JobRunnerService:
                 return 0
             service = JobService(session)
             claimed = await service.claim_pending(runner_id=self.runner_id, limit=capacity)
+            await session.commit()
         for job in claimed:
             self._start_run(job)
         return len(claimed)
@@ -116,12 +145,18 @@ class JobRunnerService:
         """Spawn the background task that runs *job* and completes it.
 
         The task opens its own session for the final conditional UPDATE; no DB
-        session is held open while the job body runs.
+        session is held open while the job body runs. The job's ``id`` /
+        ``creator_id`` and a progress handle are threaded into the body.
         """
         job_id = job.id
+        creator_id = job.creator_id
         details = job.job_details
+        progress: JobProgressReporter = _JobProgressHandle(job_id, self.runner_id)
         started_at = datetime.now(UTC)
-        task = asyncio.create_task(self._run_job(job_id, details), name=f"job-run-{job_id}")
+        task = asyncio.create_task(
+            self._run_job(job_id, creator_id, details, progress),
+            name=f"job-run-{job_id}",
+        )
         task._job = job  # type: ignore[attr-defined]  # for timeout cancellation
         self._live[job_id] = (task, started_at)
 
@@ -130,12 +165,18 @@ class JobRunnerService:
 
         task.add_done_callback(_on_done)
 
-    async def _run_job(self, job_id: uuid.UUID, details: JobDetails) -> None:
+    async def _run_job(
+        self,
+        job_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        details: JobDetails,
+        progress: JobProgressReporter,
+    ) -> None:
         """Invoke the job body and persist the terminal status (conditional)."""
         run: JobRun | None = None
         exception: BaseException | None = None
         try:
-            run = await details()
+            run = await details(job_id, creator_id, progress)
         except BaseException as exc:  # runner must persist any failure
             exception = exc
             logger.exception("Job %s raised; persisting ERROR", job_id)
@@ -148,6 +189,7 @@ class JobRunnerService:
                 run=run,
                 exception=exception,
             )
+            await session.commit()
         if not updated:
             logger.info("Job %s already terminal; abandoning completion write", job_id)
 
@@ -164,6 +206,7 @@ class JobRunnerService:
                 preallocate_days=preallocate_days,
                 retention_days=retention_days,
             )
+            await session.commit()
         parts: list[str] = []
         if created:
             parts.append(f"created {len(created)} partitions")
