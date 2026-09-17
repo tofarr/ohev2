@@ -509,6 +509,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "jobs",
         "description": "Durable background jobs (date-partitioned) and the JobRunnerService.",
     },
+    {
+        "name": "groups",
+        "description": "Named groups of users",
+    },
 ]
 
 
